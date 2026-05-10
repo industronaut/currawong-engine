@@ -11,7 +11,7 @@
 
 use std::time::{Duration, Instant};
 
-use currawong::glam::{Quat, Vec3};
+use currawong::glam::{Mat4, Quat, Vec3};
 use currawong::{
     Camera, EngineCtx, Renderer, Simulation, View, WorldObject, Zone, ZoneId, Zones, wgpu, winit,
 };
@@ -61,13 +61,16 @@ impl Simulation for Game {
         self.elapsed += dt;
         let t = self.elapsed.as_secs_f32();
         // Iterate the Bobber component and write back to each object's
-        // position. `split_mut` hands out independent borrows of the object
+        // transform. `split_mut` hands out independent borrows of the object
         // map and the component registry so we can do both in one pass.
         let zone = self.zones.get_mut(self.main_zone).expect("main zone");
         let (objects, components) = zone.split_mut();
         for (id, bobber) in components.iter::<Bobber>() {
             if let Some(obj) = objects.get_mut(id) {
                 obj.position.y = (t * 2.0 + bobber.phase).sin() * 0.6;
+                // Spin around local Z so the rotation is visible from the
+                // orbiting camera — different rates per object via phase.
+                obj.rotation = Quat::from_rotation_z(t * 0.8 + bobber.phase);
             }
         }
     }
@@ -83,7 +86,12 @@ struct Camera {
 
 struct VsIn {
     @builtin(vertex_index) vidx: u32,
-    @location(0) instance_pos: vec3<f32>,
+    // Per-instance model matrix, supplied as four columns. WGSL doesn't allow
+    // a mat4x4 vertex attribute directly, so we receive 4 vec4s and rebuild it.
+    @location(0) m0: vec4<f32>,
+    @location(1) m1: vec4<f32>,
+    @location(2) m2: vec4<f32>,
+    @location(3) m3: vec4<f32>,
 };
 
 struct VsOut {
@@ -103,9 +111,10 @@ fn vs_main(in: VsIn) -> VsOut {
         vec3<f32>(0.25, 1.0, 0.4),
         vec3<f32>(0.3, 0.5, 1.0),
     );
-    let world = local[in.vidx] + in.instance_pos;
+    let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
+    let world = model * vec4<f32>(local[in.vidx], 1.0);
     var out: VsOut;
-    out.clip = camera.view_proj * vec4<f32>(world, 1.0);
+    out.clip = camera.view_proj * world;
     out.colour = colours[in.vidx];
     return out;
 }
@@ -117,7 +126,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 const MAX_INSTANCES: u64 = 256;
-const INSTANCE_SIZE: u64 = std::mem::size_of::<[f32; 3]>() as u64;
+const INSTANCE_SIZE: u64 = std::mem::size_of::<Mat4>() as u64;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 struct SimDriven {
@@ -126,7 +135,7 @@ struct SimDriven {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
-    instance_scratch: Vec<[f32; 3]>,
+    instance_scratch: Vec<Mat4>,
     started: Instant,
 }
 
@@ -196,11 +205,29 @@ impl View for SimDriven {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: INSTANCE_SIZE,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &[wgpu::VertexAttribute {
-                        offset: 0,
-                        shader_location: 0,
-                        format: wgpu::VertexFormat::Float32x3,
-                    }],
+                    // Mat4 as four vec4 columns at consecutive locations.
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 16,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 32,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 48,
+                            shader_location: 3,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                    ],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -264,11 +291,12 @@ impl View for SimDriven {
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_proj));
 
-        // Extract WorldObject positions across all zones into the instance buffer.
+        // Extract per-object model matrices across all zones.
         self.instance_scratch.clear();
         for (_, zone) in sim.zones.iter() {
             for (_, obj) in zone.iter() {
-                self.instance_scratch.push(obj.position.to_array());
+                self.instance_scratch
+                    .push(Mat4::from_rotation_translation(obj.rotation, obj.position));
                 if self.instance_scratch.len() == MAX_INSTANCES as usize {
                     break;
                 }
