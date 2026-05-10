@@ -1,0 +1,139 @@
+//! Window + GPU surface, device, queue, and (optional) depth attachment.
+
+use std::sync::Arc;
+
+use winit::window::Window;
+
+/// Owns the window and the wgpu device/queue/surface.
+pub struct Renderer {
+    pub window: Arc<Window>,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub(super) surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    depth: Option<DepthAttachment>,
+}
+
+struct DepthAttachment {
+    format: wgpu::TextureFormat,
+    view: wgpu::TextureView,
+}
+
+impl Renderer {
+    /// Format pipelines targeting the swapchain should declare.
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.config.format
+    }
+
+    /// Depth format the engine has allocated for this view, if any. Pipelines
+    /// using depth must declare this format in their `DepthStencilState`.
+    pub fn depth_format(&self) -> Option<wgpu::TextureFormat> {
+        self.depth.as_ref().map(|d| d.format)
+    }
+
+    /// Depth texture view, if a depth attachment was requested. Used by the
+    /// engine's frame loop to attach to the render pass — not normally
+    /// needed by views.
+    pub(super) fn depth_view(&self) -> Option<&wgpu::TextureView> {
+        self.depth.as_ref().map(|d| &d.view)
+    }
+
+    pub(super) async fn new(
+        window: Arc<Window>,
+        depth_format: Option<wgpu::TextureFormat>,
+    ) -> Self {
+        let size = window.inner_size();
+
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let surface = instance.create_surface(window.clone()).unwrap();
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .expect("no suitable GPU adapter found");
+
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("currawong device"),
+                ..Default::default()
+            })
+            .await
+            .expect("failed to request device");
+
+        let caps = surface.get_capabilities(&adapter);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: caps.present_modes[0],
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &config);
+
+        let depth = depth_format.map(|format| DepthAttachment {
+            format,
+            view: create_depth_view(&device, config.width, config.height, format),
+        });
+
+        Self {
+            window,
+            device,
+            queue,
+            surface,
+            config,
+            depth,
+        }
+    }
+
+    pub(super) fn resize(&mut self, width: u32, height: u32) {
+        self.config.width = width.max(1);
+        self.config.height = height.max(1);
+        self.surface.configure(&self.device, &self.config);
+        if let Some(depth) = self.depth.as_mut() {
+            depth.view = create_depth_view(
+                &self.device,
+                self.config.width,
+                self.config.height,
+                depth.format,
+            );
+        }
+    }
+}
+
+fn create_depth_view(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("currawong depth"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
