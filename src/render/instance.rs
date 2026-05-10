@@ -123,3 +123,43 @@ where
         })
     }
 }
+
+/// Vertex attributes for a stream of `glam::Mat4`s consumed per-instance.
+///
+/// `Mat4` can't be a single vertex attribute (WGSL caps vertex attributes at
+/// `vec4`), so it's spelled as four consecutive `Float32x4` columns at
+/// offsets 0/16/32/48. Pick `start_location` to match the first `@location(N)`
+/// the vertex shader reserves for the matrix columns.
+///
+/// ```text
+/// let mat4_attrs = currawong::mat4_instance_attributes(2);
+/// let buffer_layout = wgpu::VertexBufferLayout {
+///     array_stride: std::mem::size_of::<glam::Mat4>() as u64,
+///     step_mode: wgpu::VertexStepMode::Instance,
+///     attributes: &mat4_attrs,
+/// };
+/// ```
+pub const fn mat4_instance_attributes(start_location: u32) -> [wgpu::VertexAttribute; 4] {
+    [
+        wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: start_location,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 16,
+            shader_location: start_location + 1,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 32,
+            shader_location: start_location + 2,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 48,
+            shader_location: start_location + 3,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+    ]
+}

@@ -29,9 +29,9 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, EmitterReconciler, EmitterTemplate, EngineCtx, InstanceBuckets, ParticleLifecycle,
-    Renderer, Simulation, View, WorldObject, WorldObjectId, WorldObjectRef, Zone, Zones, wgpu,
-    winit,
+    Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, InstanceBuckets,
+    ParticleLifecycle, Renderer, Simulation, View, WorldObject, WorldObjectId, WorldObjectRef,
+    Zone, Zones, mat4_instance_attributes, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -267,18 +267,6 @@ struct ParticleInstance {
 unsafe impl bytemuck::Pod for ParticleInstance {}
 unsafe impl bytemuck::Zeroable for ParticleInstance {}
 
-/// Camera uniform: view-projection plus right/up vectors so the particle
-/// vertex shader can build camera-facing quads from corner offsets.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CameraUniform {
-    view_proj: Mat4,
-    right: Vec4, // xyz = camera right, w unused (padding)
-    up: Vec4,    // xyz = camera up, w unused (padding)
-}
-unsafe impl bytemuck::Pod for CameraUniform {}
-unsafe impl bytemuck::Zeroable for CameraUniform {}
-
 // --- Shaders -------------------------------------------------------------
 
 const MESH_SHADER: &str = r#"
@@ -368,8 +356,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 struct CampfireView {
     camera: Camera,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
+    camera_binding: CameraBinding,
 
     mesh_pipeline: wgpu::RenderPipeline,
     meshes: HashMap<MeshId, Mesh>,
@@ -442,22 +429,6 @@ impl CampfireView {
         v
     }
 
-    fn upload_camera(&self, queue: &wgpu::Queue) {
-        let view_proj = self.camera.view_proj();
-        // Camera basis vectors derived from view matrix. The inverse of a
-        // pure rotation+translation view matrix has the camera's world-space
-        // axes in its first three columns.
-        let view_inv = self.camera.view_matrix().inverse();
-        let right = view_inv.x_axis.truncate();
-        let up = view_inv.y_axis.truncate();
-        let uniform = CameraUniform {
-            view_proj,
-            right: Vec4::new(right.x, right.y, right.z, 0.0),
-            up: Vec4::new(up.x, up.y, up.z, 0.0),
-        };
-        queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
-    }
-
     /// Walk sim once: dispatch each `VisualPart` into the right destination.
     /// Mesh parts go straight into the instance buckets; emitter parts are
     /// declared on the engine reconciler.
@@ -515,39 +486,11 @@ impl View for CampfireView {
     fn init(renderer: &Renderer) -> Self {
         let device = &renderer.device;
 
-        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("camera uniform"),
-            size: std::mem::size_of::<CameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("camera bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera bind group"),
-            layout: &camera_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-        });
+        let camera_binding = CameraBinding::new(device);
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("campfire pipeline layout"),
-            bind_group_layouts: &[Some(&camera_bgl)],
+            bind_group_layouts: &[Some(camera_binding.layout())],
             ..Default::default()
         });
 
@@ -595,8 +538,7 @@ impl View for CampfireView {
                 target: Vec3::new(0.0, 0.6, 0.0),
                 ..Camera::default()
             },
-            camera_buffer,
-            camera_bind_group,
+            camera_binding,
 
             mesh_pipeline,
             meshes,
@@ -634,7 +576,7 @@ impl View for CampfireView {
         self.camera.position = Vec3::new(angle.sin() * radius, 1.8, angle.cos() * radius);
         self.camera.target = Vec3::new(0.0, 0.6, 0.0);
 
-        self.upload_camera(&renderer.queue);
+        self.camera_binding.write(&renderer.queue, &self.camera);
 
         // Wall-clock dt for emitter integration. (We could route sim_time
         // through the Game and use that instead — left as a future toggle.)
@@ -659,7 +601,7 @@ impl View for CampfireView {
 
         // 5. Draw opaque meshes.
         pass.set_pipeline(&self.mesh_pipeline);
-        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         for (mesh_id, instance_buffer, count) in self.mesh_instances.iter_filled() {
             let mesh = &self.meshes[&mesh_id];
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -671,7 +613,7 @@ impl View for CampfireView {
         // 6. Draw particle billboards. Same camera bind group; different
         //    pipeline (alpha blending, no depth write).
         pass.set_pipeline(&self.particle_pipeline);
-        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         for (_emitter_id, instance_buffer, count) in self.particle_instances.iter_filled() {
             pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
@@ -721,6 +663,7 @@ fn build_mesh_pipeline(
         label: Some("mesh shader"),
         source: wgpu::ShaderSource::Wgsl(MESH_SHADER.into()),
     });
+    let mat4_attrs = mat4_instance_attributes(2);
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("mesh pipeline"),
         layout: Some(layout),
@@ -748,28 +691,7 @@ fn build_mesh_pipeline(
                 wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Mat4>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 16,
-                            shader_location: 3,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 32,
-                            shader_location: 4,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 48,
-                            shader_location: 5,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                    ],
+                    attributes: &mat4_attrs,
                 },
             ],
         },
