@@ -441,10 +441,10 @@ impl View for Instances {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
+            // No back-face culling: the hand-rolled mesh windings in this
+            // example aren't all CCW-outward. A real renderer would commit
+            // to consistent winding and turn culling on for the perf win.
+            primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
