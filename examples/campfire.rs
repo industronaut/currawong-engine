@@ -1,26 +1,26 @@
 //! Campfire: a sim object whose visual is mesh + particle emitters.
 //!
-//! Demonstrates step 3 of the visual-system architecture — declarative emitter
-//! attachment with view-side reconciliation:
+//! Demonstrates declarative emitter attachment with engine-managed
+//! reconciliation via [`EmitterReconciler`]:
 //!
 //! - Sim holds only state: `Campfire { lit: bool }`. No visual concepts.
 //! - The View's `extract_visuals` returns one or more `VisualPart`s per
 //!   object. For a campfire that's a log mesh plus, when lit, a flame
 //!   emitter and a smoke emitter (each declared at a `(WorldObjectRef, slot)`
-//!   key so a single object can carry several emitters).
-//! - The View maintains a persistent registry of live emitters. Each frame:
-//!   walk sim and declare → emitters not declared this frame stop spawning
-//!   but their existing particles linger until they die naturally → orphans
-//!   whose `WorldObjectRef` no longer resolves are also stopped.
-//! - Lit state changes propagate automatically: extinguish the fire and the
-//!   flame emitter is no longer declared, so it stops spawning new particles
-//!   and the existing flames fade out over their lifetime.
+//!   key so one sim object can carry several emitters).
+//! - `EmitterReconciler` owns the live emitter registry, particle pool,
+//!   and lifecycle. Each frame the View calls `begin_frame` → `declare` per
+//!   emitter attachment → `integrate(dt)` → `iter_particles()` for the
+//!   render extract.
+//! - Lit-state changes propagate automatically: extinguish the fire and the
+//!   flame emitter is no longer declared, so it stops spawning new
+//!   particles and the existing flames linger out per their template's
+//!   `ParticleLifecycle::Linger` setting.
 //!
-//! The particle pool, emitter template, and billboard render pipeline are
-//! all local to this example for now. Once the shape is settled, the engine
-//! will grow an `EmitterReconciler<E, S>` helper that subsumes the
-//! reconcile/integrate loop, mirroring how `InstanceBuckets` subsumed the
-//! mesh batching loop.
+//! Particle visual interpolation (size and colour curves) lives in this
+//! example as a `HashMap<EmitterId, ParticleVisual>` — the engine helper
+//! deliberately doesn't model visuals, only kinematics and lifecycle, so
+//! the user's render code is free to choose how particles look.
 //!
 //! Controls: Space toggles fire. 0 pause / 1/2/3 sim speed. Esc to quit.
 
@@ -29,8 +29,9 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, EngineCtx, InstanceBuckets, Renderer, Simulation, View, WorldObject, WorldObjectId,
-    WorldObjectRef, Zone, Zones, wgpu, winit,
+    Camera, EmitterReconciler, EmitterTemplate, EngineCtx, InstanceBuckets, ParticleLifecycle,
+    Renderer, Simulation, View, WorldObject, WorldObjectId, WorldObjectRef, Zone, Zones, wgpu,
+    winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -242,62 +243,16 @@ const QUAD_CORNERS: &[QuadCorner] = &[
 ];
 const QUAD_INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
 
-// --- Particle system (CPU-side state, view-only) -------------------------
+// --- Particle visual params (size & colour curves, view-only) ------------
 
-#[derive(Clone, Copy)]
-struct Particle {
-    position: Vec3,
-    velocity: Vec3,
-    age: f32,      // seconds
-    lifetime: f32, // seconds
+/// Per-template visual interpolation that the engine helper doesn't model.
+/// The reconciler tracks particle kinematics; this provides the curves the
+/// user wants to apply when turning a `Particle` into GPU instance data.
+struct ParticleVisual {
     base_size: f32,
+    end_size: f32,
     base_color: Vec4,
-}
-
-/// Static recipe shared by all live emitters that reference it.
-struct EmitterTemplate {
-    spawn_rate: f32,        // particles per second
-    particle_lifetime: f32, // seconds
-    initial_speed: f32,     // m/s
-    speed_jitter: f32,      // ±range on initial speed
-    direction: Vec3,        // unit vector; particles emit roughly along this
-    cone_half_angle: f32,   // radians; 0 = exact direction, π/2 = hemisphere
-    base_size: f32,
-    end_size: f32, // size at end of lifetime
-    base_color: Vec4,
-    end_color: Vec4, // colour at end of lifetime (alpha typically fades to 0)
-}
-
-/// One live, parent-attached emitter. Owned by the View, reconciled each
-/// frame against what `extract_visuals` declares.
-struct LiveEmitter {
-    template_id: EmitterId,
-    /// Last transform declared for this emitter. Particles emit at this
-    /// transform's translation; once spawned they evolve independently in
-    /// world space (so the smoke trail stays put if the campfire moves).
-    transform: Mat4,
-    /// Set true at the start of each frame, set true again if declared, and
-    /// checked during integration. A non-declared emitter stops spawning
-    /// (linger semantics) but keeps ticking its existing particles.
-    declared_this_frame: bool,
-    /// Once true, no new spawns. Set when the emitter wasn't declared OR
-    /// the parent's `WorldObjectRef` no longer resolves.
-    extinguished: bool,
-    spawn_accumulator: f32,
-    particles: Vec<Particle>,
-}
-
-impl LiveEmitter {
-    fn new(template_id: EmitterId, transform: Mat4) -> Self {
-        Self {
-            template_id,
-            transform,
-            declared_this_frame: true,
-            extinguished: false,
-            spawn_accumulator: 0.0,
-            particles: Vec::new(),
-        }
-    }
+    end_color: Vec4,
 }
 
 /// Per-particle data sent to the GPU. The shader expands each instance into
@@ -323,32 +278,6 @@ struct CameraUniform {
 }
 unsafe impl bytemuck::Pod for CameraUniform {}
 unsafe impl bytemuck::Zeroable for CameraUniform {}
-
-// --- Tiny xorshift RNG (deterministic-enough for visuals) ----------------
-
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed.max(1))
-    }
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-    /// Uniform in `[0, 1)`.
-    fn unit(&mut self) -> f32 {
-        (self.next() as f64 / u64::MAX as f64) as f32
-    }
-    /// Uniform in `[-1, 1)`.
-    fn bipolar(&mut self) -> f32 {
-        self.unit() * 2.0 - 1.0
-    }
-}
 
 // --- Shaders -------------------------------------------------------------
 
@@ -451,48 +380,66 @@ struct CampfireView {
     quad_index_buffer: wgpu::Buffer,
     particle_instances: InstanceBuckets<EmitterId, ParticleInstance>,
 
-    emitter_templates: HashMap<EmitterId, EmitterTemplate>,
-    live_emitters: HashMap<(WorldObjectRef, EmitterSlot), LiveEmitter>,
+    /// Engine-managed emitter lifecycle + particle integration.
+    emitters: EmitterReconciler<EmitterId, EmitterSlot>,
+    /// Per-template visual interpolation (size/colour curves) — keyed by
+    /// the same `EmitterId` the reconciler uses.
+    visuals: HashMap<EmitterId, ParticleVisual>,
 
-    rng: Rng,
     started: Instant,
     last_frame: Instant,
 }
 
 impl CampfireView {
-    fn build_emitter_templates() -> HashMap<EmitterId, EmitterTemplate> {
-        let mut t = HashMap::new();
-        t.insert(
+    /// Kinematic recipes for the engine reconciler. Visuals (size, colour)
+    /// live in [`build_visuals`](Self::build_visuals).
+    fn flame_template() -> EmitterTemplate {
+        EmitterTemplate {
+            spawn_rate: 60.0,
+            particle_lifetime: 0.7,
+            initial_speed: 1.4,
+            speed_jitter: 0.5,
+            direction: Vec3::Y,
+            cone_half_angle: 0.45,
+            max_particles: MAX_PARTICLES_PER_TEMPLATE,
+            on_parent_lost: ParticleLifecycle::Linger,
+        }
+    }
+
+    fn smoke_template() -> EmitterTemplate {
+        EmitterTemplate {
+            spawn_rate: 14.0,
+            particle_lifetime: 2.5,
+            initial_speed: 0.45,
+            speed_jitter: 0.15,
+            direction: Vec3::new(0.05, 1.0, 0.0).normalize(),
+            cone_half_angle: 0.55,
+            max_particles: MAX_PARTICLES_PER_TEMPLATE,
+            on_parent_lost: ParticleLifecycle::Linger,
+        }
+    }
+
+    fn build_visuals() -> HashMap<EmitterId, ParticleVisual> {
+        let mut v = HashMap::new();
+        v.insert(
             EmitterId::Flame,
-            EmitterTemplate {
-                spawn_rate: 60.0,
-                particle_lifetime: 0.7,
-                initial_speed: 1.4,
-                speed_jitter: 0.5,
-                direction: Vec3::Y,
-                cone_half_angle: 0.45,
+            ParticleVisual {
                 base_size: 0.18,
                 end_size: 0.05,
                 base_color: Vec4::new(1.0, 0.65, 0.15, 0.95),
                 end_color: Vec4::new(0.6, 0.05, 0.0, 0.0),
             },
         );
-        t.insert(
+        v.insert(
             EmitterId::Smoke,
-            EmitterTemplate {
-                spawn_rate: 14.0,
-                particle_lifetime: 2.5,
-                initial_speed: 0.45,
-                speed_jitter: 0.15,
-                direction: Vec3::new(0.05, 1.0, 0.0).normalize(),
-                cone_half_angle: 0.55,
+            ParticleVisual {
                 base_size: 0.20,
                 end_size: 0.85,
                 base_color: Vec4::new(0.45, 0.45, 0.45, 0.55),
                 end_color: Vec4::new(0.25, 0.25, 0.25, 0.0),
             },
         );
-        t
+        v
     }
 
     fn upload_camera(&self, queue: &wgpu::Queue) {
@@ -511,17 +458,12 @@ impl CampfireView {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
-    /// Reconcile pass: walk sim, dispatch each VisualPart into the right
-    /// destination. Mesh parts go straight into the instance buckets;
-    /// emitter parts update the live emitter registry (lazy create, mark
-    /// declared, refresh transform).
-    fn extract_and_reconcile(&mut self, sim: &Game) {
-        // Mark all live emitters as not-declared at the start of the frame.
-        for emitter in self.live_emitters.values_mut() {
-            emitter.declared_this_frame = false;
-        }
+    /// Walk sim once: dispatch each `VisualPart` into the right destination.
+    /// Mesh parts go straight into the instance buckets; emitter parts are
+    /// declared on the engine reconciler.
+    fn extract_and_declare(&mut self, sim: &Game) {
         self.mesh_instances.begin_frame();
-
+        self.emitters.begin_frame();
         for (zone_id, zone) in sim.zones.iter() {
             for (id, obj) in zone.iter() {
                 let world_ref = WorldObjectRef { zone: zone_id, id };
@@ -534,129 +476,37 @@ impl CampfireView {
                         slot,
                         transform,
                     } => {
-                        let key = (world_ref, slot);
-                        let emitter = self
-                            .live_emitters
-                            .entry(key)
-                            .or_insert_with(|| LiveEmitter::new(template, transform));
-                        emitter.template_id = template;
-                        emitter.transform = transform;
-                        emitter.declared_this_frame = true;
-                        emitter.extinguished = false;
+                        self.emitters.declare(world_ref, slot, template, transform);
                     }
                 });
             }
         }
     }
 
-    /// Integrate live emitters: spawn new particles (if not extinguished),
-    /// advance existing ones, drop dead. Drop emitters that have no
-    /// declaration AND no live particles left.
-    fn integrate_emitters(&mut self, zones: &Zones, dt: f32) {
-        let templates = &self.emitter_templates;
-        let rng = &mut self.rng;
-        self.live_emitters.retain(|key, emitter| {
-            // If parent no longer resolves, the emitter is also extinguished.
-            let parent_alive = key.0.resolve(zones).is_some();
-            if !emitter.declared_this_frame || !parent_alive {
-                emitter.extinguished = true;
-            }
-
-            let template = templates
-                .get(&emitter.template_id)
-                .expect("emitter references a registered template");
-
-            // Tick existing particles.
-            for p in emitter.particles.iter_mut() {
-                p.age += dt;
-                p.position += p.velocity * dt;
-            }
-            emitter.particles.retain(|p| p.age < p.lifetime);
-
-            // Spawn new particles unless extinguished. Spawn count derived
-            // from rate × dt with fractional carry-over so low rates still
-            // emit at the right average frequency.
-            if !emitter.extinguished {
-                emitter.spawn_accumulator += template.spawn_rate * dt;
-                while emitter.spawn_accumulator >= 1.0
-                    && (emitter.particles.len() as u32) < MAX_PARTICLES_PER_TEMPLATE
-                {
-                    emitter.spawn_accumulator -= 1.0;
-                    emitter
-                        .particles
-                        .push(spawn_particle(template, emitter.transform, rng));
-                }
-            } else {
-                // Don't accumulate while extinguished.
-                emitter.spawn_accumulator = 0.0;
-            }
-
-            // Keep emitter if it could still spawn or has live particles.
-            !emitter.extinguished || !emitter.particles.is_empty()
-        });
-    }
-
-    /// Build the per-emitter-template particle instance buckets from live
-    /// state. This is the equivalent of "extract" for particles, except the
-    /// data comes from view-side state (the particle pool) not from sim.
+    /// Walk every live particle, look up its template's visual params, and
+    /// push GPU instance data. The reconciler tracks kinematics; this turns
+    /// each particle into the size + colour the user wants drawn.
     fn build_particle_buckets(&mut self) {
         self.particle_instances.begin_frame();
-        for emitter in self.live_emitters.values() {
-            let template = self
-                .emitter_templates
-                .get(&emitter.template_id)
-                .expect("template registered");
-            for p in &emitter.particles {
-                let life = (p.age / p.lifetime).clamp(0.0, 1.0);
-                let size = lerp(p.base_size, template.end_size, life);
-                let color = p.base_color.lerp(template.end_color, life);
-                self.particle_instances.push(
-                    emitter.template_id,
-                    ParticleInstance {
-                        position: [p.position.x, p.position.y, p.position.z],
-                        size,
-                        color: [color.x, color.y, color.z, color.w],
-                    },
-                );
-            }
+        for (template_id, particle) in self.emitters.iter_particles() {
+            let v = &self.visuals[&template_id];
+            let life = particle.life();
+            let size = v.base_size + (v.end_size - v.base_size) * life;
+            let color = v.base_color.lerp(v.end_color, life);
+            self.particle_instances.push(
+                template_id,
+                ParticleInstance {
+                    position: [
+                        particle.position.x,
+                        particle.position.y,
+                        particle.position.z,
+                    ],
+                    size,
+                    color: [color.x, color.y, color.z, color.w],
+                },
+            );
         }
     }
-}
-
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
-fn spawn_particle(template: &EmitterTemplate, transform: Mat4, rng: &mut Rng) -> Particle {
-    // Random direction in a cone around `template.direction`.
-    let dir = jitter_direction(template.direction, template.cone_half_angle, rng);
-    let speed = template.initial_speed + rng.bipolar() * template.speed_jitter;
-    let position = transform.transform_point3(Vec3::ZERO);
-    Particle {
-        position,
-        velocity: dir * speed.max(0.0),
-        age: 0.0,
-        lifetime: template.particle_lifetime,
-        base_size: template.base_size,
-        base_color: template.base_color,
-    }
-}
-
-/// Random unit vector within `half_angle` radians of `axis`.
-fn jitter_direction(axis: Vec3, half_angle: f32, rng: &mut Rng) -> Vec3 {
-    if half_angle <= 0.0 {
-        return axis.normalize();
-    }
-    // Pick a tangent basis to `axis`.
-    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-    let tangent = axis.cross(helper).normalize();
-    let bitangent = axis.cross(tangent);
-    // Cone sample: angle from axis uniform in [0, half_angle), azimuth in [0, 2π).
-    let theta = rng.unit() * half_angle;
-    let phi = rng.unit() * std::f32::consts::TAU;
-    let st = theta.sin();
-    let ct = theta.cos();
-    (axis * ct + tangent * (st * phi.cos()) + bitangent * (st * phi.sin())).normalize()
 }
 
 impl View for CampfireView {
@@ -735,6 +585,10 @@ impl View for CampfireView {
             particle_instances.register(device, k);
         }
 
+        let mut emitters = EmitterReconciler::<EmitterId, EmitterSlot>::new(0xC0FFEE);
+        emitters.register_template(EmitterId::Flame, Self::flame_template());
+        emitters.register_template(EmitterId::Smoke, Self::smoke_template());
+
         Self {
             camera: Camera {
                 position: Vec3::new(0.0, 1.6, 4.0),
@@ -753,10 +607,9 @@ impl View for CampfireView {
             quad_index_buffer,
             particle_instances,
 
-            emitter_templates: Self::build_emitter_templates(),
-            live_emitters: HashMap::new(),
+            emitters,
+            visuals: Self::build_visuals(),
 
-            rng: Rng::new(0xC0FFEE),
             started: Instant::now(),
             last_frame: Instant::now(),
         }
@@ -790,11 +643,14 @@ impl View for CampfireView {
         self.last_frame = now;
 
         // 1. Walk sim, declare visuals: mesh parts → mesh_instances bucket;
-        //    emitter parts → live_emitter reconciliation.
-        self.extract_and_reconcile(sim);
-        // 2. Tick particles + spawn new ones (or stop spawning if undeclared).
-        self.integrate_emitters(&sim.zones, dt);
-        // 3. Build per-template particle instance buffers from live state.
+        //    emitter parts → engine reconciler (lazy create / refresh
+        //    transform / mark declared).
+        self.extract_and_declare(sim);
+        // 2. Engine ticks particles + spawns new ones (or stops spawning if
+        //    undeclared / parent gone, per template lifecycle).
+        self.emitters.integrate(&sim.zones, dt);
+        // 3. Build per-template particle instance buffers, applying the
+        //    user-side visual interpolation curves to each live particle.
         self.build_particle_buckets();
 
         // 4. Upload all instance buffers in one pass.
