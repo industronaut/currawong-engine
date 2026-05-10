@@ -26,6 +26,16 @@ cargo run --example headless --no-default-features   # proves headless excludes 
 
 A successful build under `--no-default-features` is the primary architectural test — it proves the simulation layer compiles without any rendering dependencies.
 
+## Setup
+
+Activate the in-repo git hooks once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This wires up `.githooks/pre-commit`, which runs `cargo fmt --check` and blocks unformatted commits. Run `cargo fmt` to fix.
+
 ## Architecture
 
 The central commitment is **sim/view separation**, modelled on UE-style proxy extraction rather than Unity/Godot scene-graph integration. The codebase splits into two modules with a build-system-enforced boundary:
