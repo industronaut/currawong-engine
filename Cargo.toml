@@ -1,0 +1,7 @@
+[package]
+name = "currawong"
+version = "0.1.0"
+edition = "2024"
+description = "A game engine written in Rust, named after the Australian bird."
+
+[dependencies]
