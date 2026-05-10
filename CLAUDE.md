@@ -1,0 +1,96 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+currawong is a Rust game engine being built from scratch, targeted at simulation-style games (Dwarf Fortress, Factorio, RimWorld). The engine itself is the deliverable — this is an architectural learning project, not a means to ship a specific game. Bias toward building things from scratch when the topic is architecturally interesting; pull in libraries only for orthogonal plumbing (`wgpu`, `winit`, `glam`, `bytemuck`).
+
+## Commands
+
+```bash
+cargo build                              # full build (render + sim)
+cargo build --no-default-features        # sim-only (no wgpu/winit/pollster)
+cargo test                               # all tests
+cargo test --no-default-features         # sim tests only — proves sim layer has no render deps
+cargo clippy --all-targets
+cargo clippy --no-default-features --all-targets
+
+cargo run --example clear                # window with cleared background
+cargo run --example triangle             # static colored triangle
+cargo run --example input                # input demo + sim speed controls
+cargo run --example camera               # sim/view extract + camera demo
+cargo run --example headless             # sim ticking without any window
+cargo run --example headless --no-default-features   # proves headless excludes wgpu/winit at compile time
+```
+
+A successful build under `--no-default-features` is the primary architectural test — it proves the simulation layer compiles without any rendering dependencies.
+
+## Architecture
+
+The central commitment is **sim/view separation**, modelled on UE-style proxy extraction rather than Unity/Godot scene-graph integration. The codebase splits into two modules with a build-system-enforced boundary:
+
+- `src/sim.rs` — sim layer. Always compiled. Depends only on `glam` and `std`. Never imports `wgpu` or `winit`.
+- `src/render.rs` — view layer. Compiled only with the `render` feature (default on). Owns all GPU + windowing.
+- `src/lib.rs` — re-exporter. Conditionally exposes the render layer behind `#[cfg(feature = "render")]`.
+
+The `render` Cargo feature gates `pollster`, `wgpu`, `winit`, `bytemuck`, and `glam/bytemuck`. Render-side examples declare `required-features = ["render"]` in `Cargo.toml`, so `cargo build --no-default-features` skips them and refuses to compile if requested explicitly.
+
+### Sim hierarchy
+
+`Simulation → Zones → Zone → WorldObject`, all built on a generic generational slot-map:
+
+- `SlotMap<K: SlotKey, V>` — generic generational storage.
+- `WorldObjectId`, `ZoneId` — newtype keys; the type system rejects mismatched lookups.
+- `Zone = SlotMap<WorldObjectId, WorldObject>` (type alias).
+- `Zones = SlotMap<ZoneId, Zone>` (type alias). User's `Simulation` impl owns one.
+- `WorldObjectRef { zone, id }` with `resolve(&zones)` / `resolve_mut` — fully-qualified cross-zone handle for camera targets, AI memory, save pointers.
+
+### View hierarchy
+
+The user implements the `View` trait with an associated `Sim: Simulation`:
+
+- `init(&Renderer) -> Self` — build pipelines, allocate buffers.
+- `render(&self, &Sim, alpha, &Renderer, &mut RenderPass)` — read sim, record draw calls. `&Sim` is read-only by signature, structurally preventing sim mutation from the render path.
+- `input(&mut self, &mut Sim, &mut EngineCtx, &WindowEvent)` — sim-mutating user actions go through here.
+- `Camera` is a helper struct; the View opts in by holding one (UI/2D views don't need cameras).
+
+`run::<MyView>(sim)` wires it all up: creates the event loop, builds a `Renderer`, calls `init`, and dispatches events. `run_with_clock` takes a custom `SimClock`.
+
+### Tick model
+
+Fixed-tick (default 60 Hz) with an accumulator. The simulation always sees a constant `tick_period` regardless of speed; varying `SimClock::speed` only changes how many ticks fire per wall-clock second, which keeps sim logic deterministic at any playback rate. Pause is `set_speed(0.0)`. `MAX_TICKS_PER_FRAME = 16` prevents spiral-of-death. `SimClock::alpha()` returns `[0, 1]` interpolation factor for smooth motion (currently plumbed through but no example uses it).
+
+## Architectural invariants
+
+These are load-bearing — don't propose changes that violate them without checking first.
+
+- **Sim is renderer-ignorant.** No `wgpu`/`winit` imports in `src/sim.rs`. The build-level test for this is `cargo build --no-default-features`.
+- **Storage is the source of truth for "where is this object."** `WorldObject` does not carry a `ZoneId` field. Its zone is implicit in which `Zone` holds it. Same for objects within a zone — no denormalised location data.
+- **Zones are coordinate-isolated.** Each zone has its own local frame; the engine provides no cross-zone positional math. Movement between zones is a storage operation (remove + insert), not a position update. (Considered an intermediate `Surface` layer for multi-floor buildings; rejected because isolated surfaces are the same shape as zones — multi-floor buildings become multi-zone with stair triggers.)
+- **Single sim-wide tick.** No per-zone clocks. LOD-by-distance happens within the single tick by doing less work for distant zones, not by scheduling them differently.
+- **Don't fuse sim and view.** No "Sprite component on WorldObject", no scene-graph parent/child on the sim side. Rendering data lives in the View, not the WorldObject.
+
+## wgpu 29 / winit 0.30 quirks
+
+The codebase pins to wgpu 29.0.3 and winit 0.30.13. Recent API changes that have caught out the existing examples:
+
+- `wgpu::Instance::new` takes `InstanceDescriptor` by value, not by reference.
+- Use `wgpu::InstanceDescriptor::new_without_display_handle_from_env()` (or with-display variants) — there is no `default()`.
+- `Surface::get_current_texture()` returns the `CurrentSurfaceTexture` enum (`Success | Suboptimal | Outdated | Lost | Timeout | Occluded | Validation`), not `Result<SurfaceTexture, SurfaceError>`. Match all variants.
+- `RenderPassDescriptor` requires `multiview_mask: Option<NonZeroU32>` (use `..Default::default()` if you don't need it).
+- `RenderPipelineDescriptor` field is `multiview_mask`, not `multiview`.
+- `RenderPassColorAttachment` has a `depth_slice` field (use `None` for 2D).
+- `PipelineLayoutDescriptor` no longer has `push_constant_ranges`; it has `immediate_size`. Use `..Default::default()`.
+- `DeviceDescriptor` has `experimental_features` and `trace` fields. Use `..Default::default()` for non-essential setup.
+- `PipelineLayoutDescriptor::bind_group_layouts` is `&[Option<&BindGroupLayout>]` — wrap entries in `Some(...)`.
+- winit 0.30 uses `ApplicationHandler` trait pattern (`run_app(&mut handler)`), not the old closure-based `run`.
+
+When adding render code, copy from `examples/camera.rs` (instance buffer + uniforms) or `examples/triangle.rs` (no buffers) rather than referring to older wgpu tutorials.
+
+## Conventions
+
+- Edition 2024.
+- Examples are runnable demos that exercise specific subsystems; the sim/view boundary is preserved even in examples (sim types in the `Sim` field of the user's `Game` struct, view-side state in the `View` impl).
+- Tests live in `#[cfg(test)] mod tests` blocks within the file under test (currently only `src/sim.rs`). Render-side code has no tests yet — it's covered by running examples manually.
+- Re-export third-party crates from `currawong` (`glam`, `wgpu`, `winit` under `render`) so consumers don't need to pin versions themselves.
