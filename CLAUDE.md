@@ -40,7 +40,7 @@ This wires up `.githooks/pre-commit`, which runs `cargo fmt --check` and blocks 
 
 The central commitment is **sim/view separation**, modelled on UE-style proxy extraction rather than Unity/Godot scene-graph integration. The codebase splits into two modules with a build-system-enforced boundary:
 
-- `src/sim.rs` — sim layer. Always compiled. Depends only on `glam` and `std`. Never imports `wgpu` or `winit`.
+- `src/sim.rs` + `src/sim/` (submodules `slot_map`, `zone`, `components`, `clock`) — sim layer. `sim.rs` is a thin parent that owns the `Simulation` trait and re-exports the submodules' public types so callers see a flat surface. Always compiled. Depends only on `glam` and `std`. Never imports `wgpu` or `winit`.
 - `src/render.rs` — view layer. Compiled only with the `render` feature (default on). Owns all GPU + windowing.
 - `src/lib.rs` — re-exporter. Conditionally exposes the render layer behind `#[cfg(feature = "render")]`.
 
@@ -77,7 +77,7 @@ Fixed-tick (default 60 Hz) with an accumulator. The simulation always sees a con
 
 These are load-bearing — don't propose changes that violate them without checking first.
 
-- **Sim is renderer-ignorant.** No `wgpu`/`winit` imports in `src/sim.rs`. The build-level test for this is `cargo build --no-default-features`.
+- **Sim is renderer-ignorant.** No `wgpu`/`winit` imports anywhere in the sim module tree (`src/sim.rs` + `src/sim/`). The build-level test for this is `cargo build --no-default-features`.
 - **Storage is the source of truth for "where is this object."** `WorldObject` does not carry a `ZoneId` field. Its zone is implicit in which `Zone` holds it. Same for objects within a zone — no denormalised location data.
 - **Zones are coordinate-isolated.** Each zone has its own local frame; the engine provides no cross-zone positional math. Movement between zones is a storage operation (remove + insert), not a position update. (Considered an intermediate `Surface` layer for multi-floor buildings; rejected because isolated surfaces are the same shape as zones — multi-floor buildings become multi-zone with stair triggers.)
 - **Single sim-wide tick.** No per-zone clocks. LOD-by-distance happens within the single tick by doing less work for distant zones, not by scheduling them differently.
@@ -107,5 +107,5 @@ When adding render code, copy from `examples/camera.rs` (instance buffer + unifo
 
 - Edition 2024.
 - Examples are runnable demos that exercise specific subsystems; the sim/view boundary is preserved even in examples (sim types in the `Sim` field of the user's `Game` struct, view-side state in the `View` impl).
-- Tests live in `#[cfg(test)] mod tests` blocks within the file under test (currently only `src/sim.rs`). Render-side code has no tests yet — it's covered by running examples manually.
+- Tests live in `#[cfg(test)] mod tests` blocks within the file under test, placed in the slice that owns the public API being asserted (currently `src/sim/zone.rs` and `src/sim/components.rs`). Render-side code has no tests yet — it's covered by running examples manually.
 - Re-export third-party crates from `currawong` (`glam`, `wgpu`, `winit` under `render`) so consumers don't need to pin versions themselves.
