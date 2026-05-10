@@ -1,10 +1,12 @@
 //! Minimal example: open a window and clear it each frame.
 
-use currawong::{App, Renderer};
+use currawong::{Renderer, View};
 
 struct Clear;
 
-impl App for Clear {
+impl View for Clear {
+    type Sim = ();
+
     fn init(_: &Renderer) -> Self {
         Clear
     }
@@ -15,5 +17,5 @@ impl App for Clear {
 }
 
 fn main() {
-    currawong::run::<Clear>();
+    currawong::run::<Clear>(());
 }

@@ -1,6 +1,6 @@
 //! Draws a coloured triangle into the engine-provided render pass.
 
-use currawong::{App, Renderer, wgpu};
+use currawong::{Renderer, View, wgpu};
 
 const SHADER: &str = r#"
 struct VsOut {
@@ -36,7 +36,9 @@ struct Triangle {
     pipeline: wgpu::RenderPipeline,
 }
 
-impl App for Triangle {
+impl View for Triangle {
+    type Sim = ();
+
     fn init(renderer: &Renderer) -> Self {
         let shader = renderer
             .device
@@ -84,7 +86,7 @@ impl App for Triangle {
         Self { pipeline }
     }
 
-    fn render(&mut self, _: &Renderer, pass: &mut wgpu::RenderPass<'_>) {
+    fn render(&mut self, _: &(), _: &Renderer, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
         pass.draw(0..3, 0..1);
     }
@@ -95,5 +97,5 @@ impl App for Triangle {
 }
 
 fn main() {
-    currawong::run::<Triangle>();
+    currawong::run::<Triangle>(());
 }

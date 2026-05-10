@@ -2,19 +2,21 @@
 //!
 //! Logs key and mouse-button presses to stdout. Press Escape to quit.
 
-use currawong::{App, Renderer, winit};
+use currawong::{Renderer, View, winit};
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 struct Input;
 
-impl App for Input {
+impl View for Input {
+    type Sim = ();
+
     fn init(_: &Renderer) -> Self {
         Input
     }
 
-    fn input(&mut self, event_loop: &ActiveEventLoop, event: &WindowEvent) {
+    fn input(&mut self, _: &mut (), event_loop: &ActiveEventLoop, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
@@ -36,5 +38,5 @@ impl App for Input {
 }
 
 fn main() {
-    currawong::run::<Input>();
+    currawong::run::<Input>(());
 }
