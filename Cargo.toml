@@ -7,10 +7,11 @@ description = "A game engine written in Rust, named after the Australian bird."
 [features]
 default = ["render"]
 # Render side: window, GPU, View, run(). Disable for headless sim-only builds.
-render = ["dep:pollster", "dep:wgpu", "dep:winit"]
+render = ["dep:bytemuck", "dep:pollster", "dep:wgpu", "dep:winit", "glam/bytemuck"]
 
 [dependencies]
 glam = "0.32.1"
+bytemuck = { version = "1", optional = true }
 pollster = { version = "0.4.0", optional = true }
 wgpu = { version = "29.0.3", optional = true }
 winit = { version = "0.30.13", optional = true }
@@ -25,6 +26,10 @@ required-features = ["render"]
 
 [[example]]
 name = "input"
+required-features = ["render"]
+
+[[example]]
+name = "camera"
 required-features = ["render"]
 
 [[example]]
