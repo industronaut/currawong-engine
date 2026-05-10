@@ -85,10 +85,17 @@ impl Renderer {
 /// User application driven by the engine's event loop.
 ///
 /// `init` runs once after the GPU is ready (build pipelines, load assets, etc.).
+/// `input` runs for every window event (keyboard, mouse, resize, etc.) — call
+/// `event_loop.exit()` from here to quit. The engine still applies its own
+/// handling afterwards (resize, redraw, close).
 /// `render` runs each frame with a render pass that has already been started
 /// with the configured clear colour — record draw calls into it.
 pub trait App: Sized + 'static {
     fn init(renderer: &Renderer) -> Self;
+
+    fn input(&mut self, event_loop: &ActiveEventLoop, event: &WindowEvent) {
+        let _ = (event_loop, event);
+    }
 
     fn render(&mut self, renderer: &Renderer, pass: &mut wgpu::RenderPass<'_>) {
         let _ = (renderer, pass);
@@ -140,6 +147,7 @@ impl<A: App> ApplicationHandler for Handler<A> {
         event: WindowEvent,
     ) {
         let Some((renderer, app)) = self.state.as_mut() else { return };
+        app.input(event_loop, &event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
