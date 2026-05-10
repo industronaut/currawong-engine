@@ -11,26 +11,30 @@
 use std::time::{Duration, Instant};
 
 use currawong::glam::{Quat, Vec3};
-use currawong::{Simulation, WorldObject, Zone};
+use currawong::{Simulation, WorldObject, WorldObjectId, Zone};
 
 struct Game {
-    zones: Vec<Zone>,
+    zone: Zone,
+    obj_a: WorldObjectId,
+    obj_b: WorldObjectId,
     elapsed: Duration,
 }
 
 impl Game {
     fn new() -> Self {
-        let mut zone = Zone::default();
-        zone.objects.push(WorldObject {
+        let mut zone = Zone::new();
+        let obj_a = zone.insert(WorldObject {
             position: Vec3::new(0.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         });
-        zone.objects.push(WorldObject {
+        let obj_b = zone.insert(WorldObject {
             position: Vec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         });
         Self {
-            zones: vec![zone],
+            zone,
+            obj_a,
+            obj_b,
             elapsed: Duration::ZERO,
         }
     }
@@ -40,10 +44,8 @@ impl Simulation for Game {
     fn tick(&mut self, dt: Duration) {
         self.elapsed += dt;
         let dx = dt.as_secs_f32();
-        for zone in &mut self.zones {
-            for obj in &mut zone.objects {
-                obj.position.x += dx;
-            }
+        for (_, obj) in self.zone.iter_mut() {
+            obj.position.x += dx;
         }
     }
 }
@@ -61,15 +63,19 @@ fn main() {
         game.tick(dt);
         if frame % 20 == 0 {
             println!(
-                "frame {frame:3}: elapsed={:.3}s obj0.x={:.3} obj1.x={:.3}",
+                "frame {frame:3}: elapsed={:.3}s obj_a.x={:.3} obj_b.x={:.3}",
                 game.elapsed.as_secs_f32(),
-                game.zones[0].objects[0].position.x,
-                game.zones[0].objects[1].position.x,
+                game.zone.get(game.obj_a).unwrap().position.x,
+                game.zone.get(game.obj_b).unwrap().position.x,
             );
         }
         if let Some(remaining) = target_dt.checked_sub(now.elapsed()) {
             std::thread::sleep(remaining);
         }
     }
-    println!("done. total elapsed: {:.3?}", game.elapsed);
+    println!(
+        "done. total elapsed: {:.3?}, zone size: {}",
+        game.elapsed,
+        game.zone.len(),
+    );
 }
