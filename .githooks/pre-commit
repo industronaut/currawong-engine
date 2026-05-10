@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Block commits that aren't rustfmt-clean.
+# Activate once per clone with: git config core.hooksPath .githooks
+set -e
+
+if ! cargo fmt --check; then
+    echo
+    echo "✗ rustfmt found unformatted code. Run 'cargo fmt' and stage the result." >&2
+    exit 1
+fi
