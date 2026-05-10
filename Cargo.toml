@@ -37,4 +37,8 @@ name = "instances"
 required-features = ["render"]
 
 [[example]]
+name = "campfire"
+required-features = ["render"]
+
+[[example]]
 name = "headless"
