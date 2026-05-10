@@ -33,4 +33,8 @@ name = "camera"
 required-features = ["render"]
 
 [[example]]
+name = "instances"
+required-features = ["render"]
+
+[[example]]
 name = "headless"
