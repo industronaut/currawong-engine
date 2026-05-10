@@ -10,7 +10,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use crate::sim::Simulation;
+use crate::sim::{SimClock, Simulation};
 
 /// Owns the window and the wgpu device/queue/surface.
 pub struct Renderer {
@@ -81,6 +81,13 @@ impl Renderer {
     }
 }
 
+/// Mutable engine state passed to view callbacks. Use `event_loop` to
+/// request exit and `clock` to read or change sim speed and tick rate.
+pub struct EngineCtx<'a> {
+    pub event_loop: &'a ActiveEventLoop,
+    pub clock: &'a mut SimClock,
+}
+
 /// A view onto a [`Simulation`].
 ///
 /// `render` receives `&Sim` (read-only), so the rendering path is structurally
@@ -94,22 +101,29 @@ pub trait View: 'static {
 
     fn init(renderer: &Renderer) -> Self;
 
+    /// Render a frame.
+    ///
+    /// `alpha` is the interpolation factor in `[0, 1]` between the most recent
+    /// completed tick and the next pending tick — useful for smooth animation
+    /// when tick rate is below refresh rate. Views that don't interpolate can
+    /// ignore it.
     fn render(
         &mut self,
         sim: &Self::Sim,
+        alpha: f32,
         renderer: &Renderer,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        let _ = (sim, renderer, pass);
+        let _ = (sim, alpha, renderer, pass);
     }
 
     fn input(
         &mut self,
         sim: &mut Self::Sim,
-        event_loop: &ActiveEventLoop,
+        ctx: &mut EngineCtx,
         event: &WindowEvent,
     ) {
-        let _ = (sim, event_loop, event);
+        let _ = (sim, ctx, event);
     }
 
     fn title() -> &'static str {
@@ -121,15 +135,19 @@ pub trait View: 'static {
     }
 }
 
-/// Run an application with the given simulation and a `View` type.
-///
-/// The simulation ticks once per redraw with wall-clock dt. Fixed-tick will
-/// be added later as a separate scheduler.
+/// Run an application with the given simulation. Uses [`SimClock::new`] —
+/// 60 Hz fixed tick at speed 1.0.
 pub fn run<V: View>(sim: V::Sim) {
+    run_with_clock::<V>(sim, SimClock::new());
+}
+
+/// Run an application with a custom [`SimClock`].
+pub fn run_with_clock<V: View>(sim: V::Sim, clock: SimClock) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut handler = Handler::<V> {
         sim: Some(sim),
+        clock: Some(clock),
         state: None,
     };
     event_loop
@@ -139,6 +157,7 @@ pub fn run<V: View>(sim: V::Sim) {
 
 struct Handler<V: View> {
     sim: Option<V::Sim>,
+    clock: Option<SimClock>,
     state: Option<RunState<V>>,
 }
 
@@ -146,7 +165,8 @@ struct RunState<V: View> {
     renderer: Renderer,
     view: V,
     sim: V::Sim,
-    last_tick: Instant,
+    clock: SimClock,
+    last_redraw: Instant,
 }
 
 impl<V: View> ApplicationHandler for Handler<V> {
@@ -163,11 +183,13 @@ impl<V: View> ApplicationHandler for Handler<V> {
         let renderer = pollster::block_on(Renderer::new(window));
         let view = V::init(&renderer);
         let sim = self.sim.take().expect("simulation already taken");
+        let clock = self.clock.take().expect("clock already taken");
         self.state = Some(RunState {
             renderer,
             view,
             sim,
-            last_tick: Instant::now(),
+            clock,
+            last_redraw: Instant::now(),
         });
     }
 
@@ -178,7 +200,13 @@ impl<V: View> ApplicationHandler for Handler<V> {
         event: WindowEvent,
     ) {
         let Some(state) = self.state.as_mut() else { return };
-        state.view.input(&mut state.sim, event_loop, &event);
+        {
+            let mut ctx = EngineCtx {
+                event_loop,
+                clock: &mut state.clock,
+            };
+            state.view.input(&mut state.sim, &mut ctx, &event);
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -187,10 +215,16 @@ impl<V: View> ApplicationHandler for Handler<V> {
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
-                let dt = now - state.last_tick;
-                state.last_tick = now;
-                state.sim.tick(dt);
-                render_frame::<V>(state);
+                let wall_dt = now - state.last_redraw;
+                state.last_redraw = now;
+
+                let ticks = state.clock.advance(wall_dt);
+                let tick_period = state.clock.tick_period();
+                for _ in 0..ticks {
+                    state.sim.tick(tick_period);
+                }
+                let alpha = state.clock.alpha();
+                render_frame::<V>(state, alpha);
                 state.renderer.window.request_redraw();
             }
             _ => {}
@@ -198,7 +232,7 @@ impl<V: View> ApplicationHandler for Handler<V> {
     }
 }
 
-fn render_frame<V: View>(state: &mut RunState<V>) {
+fn render_frame<V: View>(state: &mut RunState<V>, alpha: f32) {
     let frame = match state.renderer.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
         wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -236,7 +270,7 @@ fn render_frame<V: View>(state: &mut RunState<V>) {
             })],
             ..Default::default()
         });
-        state.view.render(&state.sim, &state.renderer, &mut pass);
+        state.view.render(&state.sim, alpha, &state.renderer, &mut pass);
     }
 
     state.renderer.queue.submit(std::iter::once(encoder.finish()));

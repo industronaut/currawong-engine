@@ -86,7 +86,7 @@ impl View for Triangle {
         Self { pipeline }
     }
 
-    fn render(&mut self, _: &(), _: &Renderer, pass: &mut wgpu::RenderPass<'_>) {
+    fn render(&mut self, _: &(), _: f32, _: &Renderer, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
         pass.draw(0..3, 0..1);
     }
