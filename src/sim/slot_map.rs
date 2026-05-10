@@ -19,8 +19,14 @@ pub trait SlotKey: Copy + Eq + Hash + std::fmt::Debug + 'static {
 }
 
 enum Slot<V> {
-    Occupied { generation: u32, value: V },
-    Vacant { generation: u32, next_free: Option<u32> },
+    Occupied {
+        generation: u32,
+        value: V,
+    },
+    Vacant {
+        generation: u32,
+        next_free: Option<u32>,
+    },
 }
 
 /// A generational slot-map.
@@ -65,7 +71,10 @@ impl<K: SlotKey, V> SlotMap<K, V> {
         if let Some(idx) = self.free_head {
             let slot = &mut self.slots[idx as usize];
             let (generation, next_free) = match *slot {
-                Slot::Vacant { generation, next_free } => (generation, next_free),
+                Slot::Vacant {
+                    generation,
+                    next_free,
+                } => (generation, next_free),
                 Slot::Occupied { .. } => unreachable!("free_head pointed at occupied slot"),
             };
             self.free_head = next_free;
@@ -73,9 +82,11 @@ impl<K: SlotKey, V> SlotMap<K, V> {
             self.len += 1;
             K::from_raw(idx, generation)
         } else {
-            let idx =
-                u32::try_from(self.slots.len()).expect("slot map capacity exceeded u32::MAX");
-            self.slots.push(Slot::Occupied { generation: 0, value });
+            let idx = u32::try_from(self.slots.len()).expect("slot map capacity exceeded u32::MAX");
+            self.slots.push(Slot::Occupied {
+                generation: 0,
+                value,
+            });
             self.len += 1;
             K::from_raw(idx, 0)
         }
@@ -96,7 +107,10 @@ impl<K: SlotKey, V> SlotMap<K, V> {
         let next_free = self.free_head;
         let prev = std::mem::replace(
             &mut self.slots[idx],
-            Slot::Vacant { generation: new_gen, next_free },
+            Slot::Vacant {
+                generation: new_gen,
+                next_free,
+            },
         );
         self.free_head = Some(key.index());
         self.len -= 1;
@@ -126,20 +140,26 @@ impl<K: SlotKey, V> SlotMap<K, V> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (K, &V)> + '_ {
-        self.slots.iter().enumerate().filter_map(|(i, slot)| match slot {
-            Slot::Occupied { generation, value } => {
-                Some((K::from_raw(i as u32, *generation), value))
-            }
-            Slot::Vacant { .. } => None,
-        })
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| match slot {
+                Slot::Occupied { generation, value } => {
+                    Some((K::from_raw(i as u32, *generation), value))
+                }
+                Slot::Vacant { .. } => None,
+            })
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (K, &mut V)> + '_ {
-        self.slots.iter_mut().enumerate().filter_map(|(i, slot)| match slot {
-            Slot::Occupied { generation, value } => {
-                Some((K::from_raw(i as u32, *generation), value))
-            }
-            Slot::Vacant { .. } => None,
-        })
+        self.slots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, slot)| match slot {
+                Slot::Occupied { generation, value } => {
+                    Some((K::from_raw(i as u32, *generation), value))
+                }
+                Slot::Vacant { .. } => None,
+            })
     }
 }

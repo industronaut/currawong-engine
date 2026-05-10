@@ -137,7 +137,14 @@ impl Renderer {
             view: create_depth_view(&device, config.width, config.height, format),
         });
 
-        Self { window, device, queue, surface, config, depth }
+        Self {
+            window,
+            device,
+            queue,
+            surface,
+            config,
+            depth,
+        }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -145,8 +152,12 @@ impl Renderer {
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
         if let Some(depth) = self.depth.as_mut() {
-            depth.view =
-                create_depth_view(&self.device, self.config.width, self.config.height, depth.format);
+            depth.view = create_depth_view(
+                &self.device,
+                self.config.width,
+                self.config.height,
+                depth.format,
+            );
         }
     }
 }
@@ -210,12 +221,7 @@ pub trait View: 'static {
         let _ = (sim, alpha, renderer, pass);
     }
 
-    fn input(
-        &mut self,
-        sim: &mut Self::Sim,
-        ctx: &mut EngineCtx,
-        event: &WindowEvent,
-    ) {
+    fn input(&mut self, sim: &mut Self::Sim, ctx: &mut EngineCtx, event: &WindowEvent) {
         let _ = (sim, ctx, event);
     }
 
@@ -224,7 +230,12 @@ pub trait View: 'static {
     }
 
     fn clear_colour() -> wgpu::Color {
-        wgpu::Color { r: 0.05, g: 0.07, b: 0.10, a: 1.0 }
+        wgpu::Color {
+            r: 0.05,
+            g: 0.07,
+            b: 0.10,
+            a: 1.0,
+        }
     }
 
     /// Return `Some(format)` to have the engine allocate a depth texture and
@@ -300,7 +311,9 @@ impl<V: View> ApplicationHandler for Handler<V> {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(state) = self.state.as_mut() else { return };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         {
             let mut ctx = EngineCtx {
                 event_loop,
@@ -350,12 +363,13 @@ fn render_frame<V: View>(state: &mut RunState<V>, alpha: f32) {
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
 
-    let mut encoder = state
-        .renderer
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("currawong frame encoder"),
-        });
+    let mut encoder =
+        state
+            .renderer
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("currawong frame encoder"),
+            });
 
     {
         let depth_attachment =
@@ -385,9 +399,14 @@ fn render_frame<V: View>(state: &mut RunState<V>, alpha: f32) {
             depth_stencil_attachment: depth_attachment,
             ..Default::default()
         });
-        state.view.render(&state.sim, alpha, &state.renderer, &mut pass);
+        state
+            .view
+            .render(&state.sim, alpha, &state.renderer, &mut pass);
     }
 
-    state.renderer.queue.submit(std::iter::once(encoder.finish()));
+    state
+        .renderer
+        .queue
+        .submit(std::iter::once(encoder.finish()));
     frame.present();
 }

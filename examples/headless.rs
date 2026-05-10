@@ -37,8 +37,14 @@ impl Game {
 
         Self {
             zones,
-            obj_a: WorldObjectRef { zone: zone_id, id: obj_a_id },
-            obj_b: WorldObjectRef { zone: zone_id, id: obj_b_id },
+            obj_a: WorldObjectRef {
+                zone: zone_id,
+                id: obj_a_id,
+            },
+            obj_b: WorldObjectRef {
+                zone: zone_id,
+                id: obj_b_id,
+            },
             elapsed: Duration::ZERO,
         }
     }

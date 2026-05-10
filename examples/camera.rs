@@ -46,7 +46,12 @@ impl Game {
                 position: Vec3::new(*x, 0.0, *z),
                 rotation: Quat::IDENTITY,
             });
-            zone.components_mut().insert(id, Bobber { phase: i as f32 * 1.5 });
+            zone.components_mut().insert(
+                id,
+                Bobber {
+                    phase: i as f32 * 1.5,
+                },
+            );
         }
         Self {
             zones,

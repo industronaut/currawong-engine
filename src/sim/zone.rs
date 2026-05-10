@@ -146,9 +146,7 @@ impl Zone {
     /// Removing through the returned [`SlotMap`] bypasses
     /// [`Components::remove_all`] and will leak components; use [`Zone::remove`]
     /// for normal removal.
-    pub fn split_mut(
-        &mut self,
-    ) -> (&mut SlotMap<WorldObjectId, WorldObject>, &mut Components) {
+    pub fn split_mut(&mut self) -> (&mut SlotMap<WorldObjectId, WorldObject>, &mut Components) {
         (&mut self.objects, &mut self.components)
     }
 }
@@ -281,7 +279,10 @@ mod tests {
         let mut zones = Zones::new();
         let zone_id = zones.insert(Zone::new());
         let obj_id = zones.get_mut(zone_id).unwrap().insert(obj(7.0));
-        assert_eq!(zones.get(zone_id).unwrap().get(obj_id).unwrap().position.x, 7.0);
+        assert_eq!(
+            zones.get(zone_id).unwrap().get(obj_id).unwrap().position.x,
+            7.0
+        );
     }
 
     #[test]

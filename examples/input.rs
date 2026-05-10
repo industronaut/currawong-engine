@@ -25,7 +25,9 @@ impl View for Input {
     fn input(&mut self, _: &mut (), ctx: &mut EngineCtx, event: &WindowEvent) {
         match event {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let PhysicalKey::Code(code) = event.physical_key else { return };
+                let PhysicalKey::Code(code) = event.physical_key else {
+                    return;
+                };
                 match code {
                     KeyCode::Escape => ctx.event_loop.exit(),
                     KeyCode::Digit0 => set_speed(ctx, 0.0),

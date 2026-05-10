@@ -53,15 +53,18 @@ impl<T: 'static> ComponentStorage for TypedStore<T> {
 
 impl Components {
     pub fn new() -> Self {
-        Self { maps: HashMap::new() }
+        Self {
+            maps: HashMap::new(),
+        }
     }
 
     /// Attach a `T` to `id`, returning the previous value if one was already set.
     pub fn insert<T: 'static>(&mut self, id: WorldObjectId, value: T) -> Option<T> {
-        let store = self
-            .maps
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| Box::new(TypedStore::<T> { map: HashMap::new() }));
+        let store = self.maps.entry(TypeId::of::<T>()).or_insert_with(|| {
+            Box::new(TypedStore::<T> {
+                map: HashMap::new(),
+            })
+        });
         store
             .as_any_mut()
             .downcast_mut::<TypedStore<T>>()
@@ -72,11 +75,7 @@ impl Components {
 
     pub fn get<T: 'static>(&self, id: WorldObjectId) -> Option<&T> {
         let store = self.maps.get(&TypeId::of::<T>())?;
-        store
-            .as_any()
-            .downcast_ref::<TypedStore<T>>()?
-            .map
-            .get(&id)
+        store.as_any().downcast_ref::<TypedStore<T>>()?.map.get(&id)
     }
 
     pub fn get_mut<T: 'static>(&mut self, id: WorldObjectId) -> Option<&mut T> {
@@ -115,9 +114,7 @@ impl Components {
             .flat_map(|store| store.map.iter().map(|(id, v)| (*id, v)))
     }
 
-    pub fn iter_mut<T: 'static>(
-        &mut self,
-    ) -> impl Iterator<Item = (WorldObjectId, &mut T)> + '_ {
+    pub fn iter_mut<T: 'static>(&mut self) -> impl Iterator<Item = (WorldObjectId, &mut T)> + '_ {
         self.maps
             .get_mut(&TypeId::of::<T>())
             .and_then(|store| store.as_any_mut().downcast_mut::<TypedStore<T>>())
@@ -204,8 +201,11 @@ mod tests {
         z.components_mut().insert(a, Health(10));
         z.components_mut().insert(b, Health(20));
         // HashMap iteration order is non-deterministic — sort before comparing.
-        let mut got: Vec<(WorldObjectId, u32)> =
-            z.components().iter::<Health>().map(|(id, h)| (id, h.0)).collect();
+        let mut got: Vec<(WorldObjectId, u32)> = z
+            .components()
+            .iter::<Health>()
+            .map(|(id, h)| (id, h.0))
+            .collect();
         got.sort_by_key(|(_, h)| *h);
         assert_eq!(got, vec![(a, 10), (b, 20)]);
     }
