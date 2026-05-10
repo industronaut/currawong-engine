@@ -11,30 +11,34 @@
 use std::time::{Duration, Instant};
 
 use currawong::glam::{Quat, Vec3};
-use currawong::{Simulation, WorldObject, WorldObjectId, Zone};
+use currawong::{Simulation, WorldObject, WorldObjectRef, Zone, Zones};
 
 struct Game {
-    zone: Zone,
-    obj_a: WorldObjectId,
-    obj_b: WorldObjectId,
+    zones: Zones,
+    obj_a: WorldObjectRef,
+    obj_b: WorldObjectRef,
     elapsed: Duration,
 }
 
 impl Game {
     fn new() -> Self {
-        let mut zone = Zone::new();
-        let obj_a = zone.insert(WorldObject {
+        let mut zones = Zones::new();
+        let zone_id = zones.insert(Zone::new());
+        let zone = zones.get_mut(zone_id).expect("just inserted");
+
+        let obj_a_id = zone.insert(WorldObject {
             position: Vec3::new(0.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         });
-        let obj_b = zone.insert(WorldObject {
+        let obj_b_id = zone.insert(WorldObject {
             position: Vec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         });
+
         Self {
-            zone,
-            obj_a,
-            obj_b,
+            zones,
+            obj_a: WorldObjectRef { zone: zone_id, id: obj_a_id },
+            obj_b: WorldObjectRef { zone: zone_id, id: obj_b_id },
             elapsed: Duration::ZERO,
         }
     }
@@ -44,8 +48,10 @@ impl Simulation for Game {
     fn tick(&mut self, dt: Duration) {
         self.elapsed += dt;
         let dx = dt.as_secs_f32();
-        for (_, obj) in self.zone.iter_mut() {
-            obj.position.x += dx;
+        for (_, zone) in self.zones.iter_mut() {
+            for (_, obj) in zone.iter_mut() {
+                obj.position.x += dx;
+            }
         }
     }
 }
@@ -65,17 +71,18 @@ fn main() {
             println!(
                 "frame {frame:3}: elapsed={:.3}s obj_a.x={:.3} obj_b.x={:.3}",
                 game.elapsed.as_secs_f32(),
-                game.zone.get(game.obj_a).unwrap().position.x,
-                game.zone.get(game.obj_b).unwrap().position.x,
+                game.obj_a.resolve(&game.zones).unwrap().position.x,
+                game.obj_b.resolve(&game.zones).unwrap().position.x,
             );
         }
         if let Some(remaining) = target_dt.checked_sub(now.elapsed()) {
             std::thread::sleep(remaining);
         }
     }
+    let zone_count = game.zones.len();
+    let obj_count: usize = game.zones.iter().map(|(_, z)| z.len()).sum();
     println!(
-        "done. total elapsed: {:.3?}, zone size: {}",
+        "done. total elapsed: {:.3?}, zones: {zone_count}, objects: {obj_count}",
         game.elapsed,
-        game.zone.len(),
     );
 }
