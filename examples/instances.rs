@@ -10,19 +10,21 @@
 //!   state and pushes `(MeshId, Mat4)` for each visible part. Right now each
 //!   sim object yields one part; the same shape extends to N parts (composite
 //!   props, articulated rigs) and later to particle emitter attachments.
-//! - The View owns the mesh table, the per-mesh instance batches, the
-//!   pipeline, and the camera. Sim is renderer-ignorant.
+//! - The View owns the mesh table, the pipeline, and the camera. The
+//!   per-mesh instance scratch + GPU buffers are managed by the engine's
+//!   `InstanceBuckets<MeshId, Mat4>` helper. Sim is renderer-ignorant.
 //!
 //! Controls: 0 pause, 1/2/3 set sim speed, Esc to quit.
 //! Sim ticks drive only the trees' sway rotation — buildings and rocks are
 //! static. Camera orbits on wall-clock so it keeps moving when paused.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3};
 use currawong::{
-    Camera, EngineCtx, Renderer, Simulation, View, WorldObject, WorldObjectId, Zone, ZoneId, Zones,
-    wgpu, winit,
+    Camera, EngineCtx, InstanceBuckets, Renderer, Simulation, View, WorldObject, WorldObjectId,
+    Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -189,17 +191,13 @@ const PLANE_INDICES: &[u16] = &[
 
 // --- View: meshes + bucketed instance batches ----------------------------
 
-/// Identifies a mesh slot in the View's mesh table. Acts as both the GPU
-/// resource handle and the bucket key for instance batching.
-///
-/// The discriminants are explicit so `mesh as usize` indexes the parallel
-/// `meshes` and `batches` arrays.
-#[repr(usize)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Identifies a mesh kind. The View keeps a `HashMap<MeshId, Mesh>` of GPU
+/// data and uses the same key as the bucket key for `InstanceBuckets`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum MeshId {
-    Cube = 0,
-    Tetra = 1,
-    Plane = 2,
+    Cube,
+    Tetra,
+    Plane,
 }
 
 /// GPU-resident mesh data. Uploaded once at init.
@@ -226,30 +224,6 @@ impl Mesh {
             vertex_buffer,
             index_buffer,
             index_count: indices.len() as u32,
-        }
-    }
-}
-
-/// Per-mesh instance bucket. CPU scratch is rebuilt every frame from sim;
-/// GPU buffer is uploaded in one `write_buffer` call before drawing.
-struct InstanceBatch {
-    scratch: Vec<Mat4>,
-    buffer: wgpu::Buffer,
-    capacity: u32,
-}
-
-impl InstanceBatch {
-    fn new(device: &wgpu::Device, label: &str, capacity: u32) -> Self {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: (capacity as u64) * std::mem::size_of::<Mat4>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        Self {
-            scratch: Vec::with_capacity(capacity as usize),
-            buffer,
-            capacity,
         }
     }
 }
@@ -323,8 +297,8 @@ struct Instances {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    meshes: Vec<Mesh>,
-    batches: Vec<InstanceBatch>,
+    meshes: HashMap<MeshId, Mesh>,
+    instances: InstanceBuckets<MeshId, Mat4>,
     started: Instant,
 }
 
@@ -457,18 +431,25 @@ impl View for Instances {
             cache: None,
         });
 
-        // Parallel arrays indexed by `MeshId as usize`. Order must match the
-        // enum's discriminants — `MeshId::Cube` is index 0, etc.
-        let meshes = vec![
+        let mut meshes = HashMap::new();
+        meshes.insert(
+            MeshId::Cube,
             Mesh::new(device, "cube", CUBE_VERTS, CUBE_INDICES),
+        );
+        meshes.insert(
+            MeshId::Tetra,
             Mesh::new(device, "tetra", TETRA_VERTS, TETRA_INDICES),
+        );
+        meshes.insert(
+            MeshId::Plane,
             Mesh::new(device, "plane", PLANE_VERTS, PLANE_INDICES),
-        ];
-        let batches = vec![
-            InstanceBatch::new(device, "cube instances", MAX_INSTANCES_PER_MESH),
-            InstanceBatch::new(device, "tetra instances", MAX_INSTANCES_PER_MESH),
-            InstanceBatch::new(device, "plane instances", MAX_INSTANCES_PER_MESH),
-        ];
+        );
+
+        let mut instances =
+            InstanceBuckets::<MeshId, Mat4>::new("mesh instances", MAX_INSTANCES_PER_MESH);
+        for &key in &[MeshId::Cube, MeshId::Tetra, MeshId::Plane] {
+            instances.register(device, key);
+        }
 
         Self {
             camera,
@@ -476,7 +457,7 @@ impl View for Instances {
             camera_buffer,
             camera_bind_group,
             meshes,
-            batches,
+            instances,
             started: Instant::now(),
         }
     }
@@ -505,41 +486,26 @@ impl View for Instances {
             .queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_proj));
 
-        // --- Extract phase: clear, walk sim, push into per-mesh batches.
-        for batch in &mut self.batches {
-            batch.scratch.clear();
-        }
+        // --- Extract phase: clear, walk sim, push into per-mesh buckets.
+        self.instances.begin_frame();
         for (_, zone) in sim.zones.iter() {
             for (id, obj) in zone.iter() {
                 extract_visuals(zone, id, obj, &mut |mesh, model| {
-                    let batch = &mut self.batches[mesh as usize];
-                    if (batch.scratch.len() as u32) < batch.capacity {
-                        batch.scratch.push(model);
-                    }
+                    self.instances.push(mesh, model);
                 });
             }
         }
 
-        // --- Upload phase: one write per non-empty batch.
-        for batch in &self.batches {
-            if !batch.scratch.is_empty() {
-                renderer
-                    .queue
-                    .write_buffer(&batch.buffer, 0, bytemuck::cast_slice(&batch.scratch));
-            }
-        }
+        // --- Upload phase: one write per non-empty bucket.
+        self.instances.upload(&renderer.queue);
 
-        // --- Draw phase: one instanced draw per non-empty batch.
+        // --- Draw phase: one instanced draw per non-empty bucket.
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.camera_bind_group, &[]);
-        for (i, mesh) in self.meshes.iter().enumerate() {
-            let batch = &self.batches[i];
-            let count = batch.scratch.len() as u32;
-            if count == 0 {
-                continue;
-            }
+        for (mesh_id, instance_buffer, count) in self.instances.iter_filled() {
+            let mesh = &self.meshes[&mesh_id];
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-            pass.set_vertex_buffer(1, batch.buffer.slice(..));
+            pass.set_vertex_buffer(1, instance_buffer.slice(..));
             pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             pass.draw_indexed(0..mesh.index_count, 0, 0..count);
         }
