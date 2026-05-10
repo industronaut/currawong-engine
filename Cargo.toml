@@ -6,3 +6,4 @@ description = "A game engine written in Rust, named after the Australian bird."
 
 [dependencies]
 wgpu = "29.0.3"
+winit = "0.30.13"
