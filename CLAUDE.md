@@ -38,11 +38,12 @@ The `render` Cargo feature gates `pollster`, `wgpu`, `winit`, `bytemuck`, and `g
 
 ### Sim hierarchy
 
-`Simulation → Zones → Zone → WorldObject`, all built on a generic generational slot-map:
+`Simulation → Zones → Zone → { WorldObject, Components }`, with a generic generational slot-map under everything:
 
 - `SlotMap<K: SlotKey, V>` — generic generational storage.
 - `WorldObjectId`, `ZoneId` — newtype keys; the type system rejects mismatched lookups.
-- `Zone = SlotMap<WorldObjectId, WorldObject>` (type alias).
+- `Zone` — struct holding `objects: SlotMap<WorldObjectId, WorldObject>` + `components: Components`. `Zone::remove` is the lifecycle choke point: it removes the object **and** cascades to `components.remove_all(id)`. `Zone::split_mut` returns independent borrows of the two when you need to iterate components and mutate objects in one pass.
+- `Components` — heterogeneous, type-erased registry of sparse per-object state. `HashMap<TypeId, Box<dyn ComponentStorage>>` outer, `HashMap<WorldObjectId, T>` per type, lazy-allocated on first `insert::<T>`. APIs: `insert/get/get_mut/remove/iter/iter_mut`, all generic over `T: 'static`. Closer to RimWorld's `ThingComp` bag than to archetype ECS — the right shape for sim-game state where most facts are sparse and optional.
 - `Zones = SlotMap<ZoneId, Zone>` (type alias). User's `Simulation` impl owns one.
 - `WorldObjectRef { zone, id }` with `resolve(&zones)` / `resolve_mut` — fully-qualified cross-zone handle for camera targets, AI memory, save pointers.
 
@@ -53,6 +54,7 @@ The user implements the `View` trait with an associated `Sim: Simulation`:
 - `init(&Renderer) -> Self` — build pipelines, allocate buffers.
 - `render(&self, &Sim, alpha, &Renderer, &mut RenderPass)` — read sim, record draw calls. `&Sim` is read-only by signature, structurally preventing sim mutation from the render path.
 - `input(&mut self, &mut Sim, &mut EngineCtx, &WindowEvent)` — sim-mutating user actions go through here.
+- `depth_format() -> Option<TextureFormat>` — opt in to engine-managed depth. When `Some`, the renderer allocates a depth texture, recreates it on resize, and pre-attaches it to the frame's render pass. Pipelines must declare the same format in their `DepthStencilState`. Default `None` is right for 2D / UI views drawing in clip space.
 - `Camera` is a helper struct; the View opts in by holding one (UI/2D views don't need cameras).
 
 `run::<MyView>(sim)` wires it all up: creates the event loop, builds a `Renderer`, calls `init`, and dispatches events. `run_with_clock` takes a custom `SimClock`.
@@ -70,6 +72,8 @@ These are load-bearing — don't propose changes that violate them without check
 - **Zones are coordinate-isolated.** Each zone has its own local frame; the engine provides no cross-zone positional math. Movement between zones is a storage operation (remove + insert), not a position update. (Considered an intermediate `Surface` layer for multi-floor buildings; rejected because isolated surfaces are the same shape as zones — multi-floor buildings become multi-zone with stair triggers.)
 - **Single sim-wide tick.** No per-zone clocks. LOD-by-distance happens within the single tick by doing less work for distant zones, not by scheduling them differently.
 - **Don't fuse sim and view.** No "Sprite component on WorldObject", no scene-graph parent/child on the sim side. Rendering data lives in the View, not the WorldObject.
+- **Component lifecycle is bound to object lifecycle.** `Zone::remove` is the only path that keeps the `Components` registry in sync with the object slot-map. `Zone::split_mut` exposes the inner `SlotMap` for split-borrow iteration, but removing through it bypasses `Components::remove_all` and leaks components — don't.
+- **Component iteration is non-deterministic for now.** `Components` uses `HashMap` internally, which has a randomly-seeded hasher in std. Iteration order varies across runs. Acceptable while prototyping; will need to swap for a sparse-set or fixed-seed hasher before sim replay / lockstep networking is on the table.
 
 ## wgpu 29 / winit 0.30 quirks
 
@@ -84,6 +88,7 @@ The codebase pins to wgpu 29.0.3 and winit 0.30.13. Recent API changes that have
 - `PipelineLayoutDescriptor` no longer has `push_constant_ranges`; it has `immediate_size`. Use `..Default::default()`.
 - `DeviceDescriptor` has `experimental_features` and `trace` fields. Use `..Default::default()` for non-essential setup.
 - `PipelineLayoutDescriptor::bind_group_layouts` is `&[Option<&BindGroupLayout>]` — wrap entries in `Some(...)`.
+- `DepthStencilState::depth_write_enabled` is `Option<bool>` (not `bool`) and `depth_compare` is `Option<CompareFunction>` (not `CompareFunction`). Wrap both in `Some(...)`.
 - winit 0.30 uses `ApplicationHandler` trait pattern (`run_app(&mut handler)`), not the old closure-based `run`.
 
 When adding render code, copy from `examples/camera.rs` (instance buffer + uniforms) or `examples/triangle.rs` (no buffers) rather than referring to older wgpu tutorials.

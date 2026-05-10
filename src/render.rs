@@ -68,6 +68,12 @@ pub struct Renderer {
     pub queue: wgpu::Queue,
     pub surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    depth: Option<DepthAttachment>,
+}
+
+struct DepthAttachment {
+    format: wgpu::TextureFormat,
+    view: wgpu::TextureView,
 }
 
 impl Renderer {
@@ -76,7 +82,13 @@ impl Renderer {
         self.config.format
     }
 
-    async fn new(window: Arc<Window>) -> Self {
+    /// Depth format the engine has allocated for this view, if any. Pipelines
+    /// using depth must declare this format in their `DepthStencilState`.
+    pub fn depth_format(&self) -> Option<wgpu::TextureFormat> {
+        self.depth.as_ref().map(|d| d.format)
+    }
+
+    async fn new(window: Arc<Window>, depth_format: Option<wgpu::TextureFormat>) -> Self {
         let size = window.inner_size();
 
         let instance =
@@ -120,14 +132,46 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        Self { window, device, queue, surface, config }
+        let depth = depth_format.map(|format| DepthAttachment {
+            format,
+            view: create_depth_view(&device, config.width, config.height, format),
+        });
+
+        Self { window, device, queue, surface, config, depth }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
+        if let Some(depth) = self.depth.as_mut() {
+            depth.view =
+                create_depth_view(&self.device, self.config.width, self.config.height, depth.format);
+        }
     }
+}
+
+fn create_depth_view(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("currawong depth"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// Mutable engine state passed to view callbacks. Use `event_loop` to
@@ -182,6 +226,14 @@ pub trait View: 'static {
     fn clear_colour() -> wgpu::Color {
         wgpu::Color { r: 0.05, g: 0.07, b: 0.10, a: 1.0 }
     }
+
+    /// Return `Some(format)` to have the engine allocate a depth texture and
+    /// pre-attach it to the frame's render pass. Pipelines must declare the
+    /// same format in their `DepthStencilState`. Default `None` is right for
+    /// 2D / UI views that draw in clip space.
+    fn depth_format() -> Option<wgpu::TextureFormat> {
+        None
+    }
 }
 
 /// Run an application with the given simulation. Uses [`SimClock::new`] —
@@ -229,7 +281,7 @@ impl<V: View> ApplicationHandler for Handler<V> {
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
-        let renderer = pollster::block_on(Renderer::new(window));
+        let renderer = pollster::block_on(Renderer::new(window, V::depth_format()));
         let view = V::init(&renderer);
         let sim = self.sim.take().expect("simulation already taken");
         let clock = self.clock.take().expect("clock already taken");
@@ -306,6 +358,19 @@ fn render_frame<V: View>(state: &mut RunState<V>, alpha: f32) {
         });
 
     {
+        let depth_attachment =
+            state
+                .renderer
+                .depth
+                .as_ref()
+                .map(|d| wgpu::RenderPassDepthStencilAttachment {
+                    view: &d.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("currawong frame pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -317,6 +382,7 @@ fn render_frame<V: View>(state: &mut RunState<V>, alpha: f32) {
                     store: wgpu::StoreOp::Store,
                 },
             })],
+            depth_stencil_attachment: depth_attachment,
             ..Default::default()
         });
         state.view.render(&state.sim, alpha, &state.renderer, &mut pass);

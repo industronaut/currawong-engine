@@ -1,13 +1,15 @@
-//! Sim-driven rendering: three WorldObjects bobbing on Y, viewed through a Camera.
+//! Sim-driven rendering: three WorldObjects bobbing on Y, viewed through an
+//! orbiting Camera with depth-tested rendering.
 //!
 //! Demonstrates the sim/view extract path: `Game` ticks WorldObjects in its
 //! `Zones`; `SimDriven` reads their positions each frame, uploads them as an
 //! instance buffer, and renders one triangle per object through a Camera's
-//! view-projection matrix.
+//! view-projection matrix. Camera orbit runs off a wall-clock Instant, so it
+//! keeps moving even at sim speed 0 — visible proof the view is independent.
 //!
 //! Controls: 0 pause, 1/2/3 set sim speed, Esc to quit.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use currawong::glam::{Quat, Vec3};
 use currawong::{
@@ -24,16 +26,27 @@ struct Game {
     elapsed: Duration,
 }
 
+/// Per-object bobbing parameters, attached as a component. Demonstrates the
+/// component pattern: per-object data the engine doesn't know about, looked
+/// up sparsely by [`WorldObjectId`].
+struct Bobber {
+    phase: f32,
+}
+
 impl Game {
     fn new() -> Self {
         let mut zones = Zones::new();
         let main_zone = zones.insert(Zone::new());
         let zone = zones.get_mut(main_zone).expect("just inserted");
-        for x in [-2.0, 0.0, 2.0] {
-            zone.insert(WorldObject {
-                position: Vec3::new(x, 0.0, 0.0),
+        // Stagger in both X and Z so the orbiting camera sees their depth
+        // ordering swap as it goes around — without depth testing, the wrong
+        // triangle would be on top from half the angles.
+        for (i, (x, z)) in [(-2.0, -1.0), (0.0, 0.0), (2.0, 1.0)].iter().enumerate() {
+            let id = zone.insert(WorldObject {
+                position: Vec3::new(*x, 0.0, *z),
                 rotation: Quat::IDENTITY,
             });
+            zone.components_mut().insert(id, Bobber { phase: i as f32 * 1.5 });
         }
         Self {
             zones,
@@ -47,13 +60,15 @@ impl Simulation for Game {
     fn tick(&mut self, dt: Duration) {
         self.elapsed += dt;
         let t = self.elapsed.as_secs_f32();
-        // Bob each object on Y with a phase offset, so motion is visibly tied
-        // to sim ticks rather than render frames. Watching with speed 0.5x vs
-        // 2x makes the sim/view decoupling obvious.
+        // Iterate the Bobber component and write back to each object's
+        // position. `split_mut` hands out independent borrows of the object
+        // map and the component registry so we can do both in one pass.
         let zone = self.zones.get_mut(self.main_zone).expect("main zone");
-        for (i, (_, obj)) in zone.iter_mut().enumerate() {
-            let phase = i as f32 * 1.5;
-            obj.position.y = (t * 2.0 + phase).sin() * 0.6;
+        let (objects, components) = zone.split_mut();
+        for (id, bobber) in components.iter::<Bobber>() {
+            if let Some(obj) = objects.get_mut(id) {
+                obj.position.y = (t * 2.0 + bobber.phase).sin() * 0.6;
+            }
         }
     }
 }
@@ -103,6 +118,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 const MAX_INSTANCES: u64 = 256;
 const INSTANCE_SIZE: u64 = std::mem::size_of::<[f32; 3]>() as u64;
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 struct SimDriven {
     camera: Camera,
@@ -111,6 +127,7 @@ struct SimDriven {
     camera_bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
     instance_scratch: Vec<[f32; 3]>,
+    started: Instant,
 }
 
 impl View for SimDriven {
@@ -197,7 +214,13 @@ impl View for SimDriven {
                 })],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -210,6 +233,7 @@ impl View for SimDriven {
             camera_bind_group,
             instance_buffer,
             instance_scratch: Vec::with_capacity(MAX_INSTANCES as usize),
+            started: Instant::now(),
         }
     }
 
@@ -225,6 +249,14 @@ impl View for SimDriven {
         if size.height > 0 {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
+
+        // Orbit on a wall-clock timer, deliberately decoupled from sim time:
+        // pausing the sim (speed 0) leaves the camera moving, which makes the
+        // independence of view from sim observable.
+        let t = self.started.elapsed().as_secs_f32();
+        let radius = 5.5;
+        let angle = t * 0.4;
+        self.camera.position = Vec3::new(angle.sin() * radius, 2.0, angle.cos() * radius);
 
         // Upload the view-projection matrix.
         let view_proj = self.camera.view_proj();
@@ -279,6 +311,10 @@ impl View for SimDriven {
 
     fn title() -> &'static str {
         "currawong — camera demo"
+    }
+
+    fn depth_format() -> Option<wgpu::TextureFormat> {
+        Some(DEPTH_FORMAT)
     }
 }
 
