@@ -49,17 +49,17 @@ impl Game {
         let zid = zones.insert(Zone::new());
         let zone = zones.get_mut(zid).expect("just inserted");
 
-        // Three reds on the left, three golds on the right. Vary Y per row
+        // Three reds on the left, three golds on the right. Vary Z per row
         // and tint per cube to show per-instance attribs are independent.
         let reds = [
-            (Vec3::new(-2.2, 0.8, 0.0), Vec4::new(1.0, 1.0, 1.0, 1.0)),
+            (Vec3::new(-2.2, 0.0, 0.8), Vec4::new(1.0, 1.0, 1.0, 1.0)),
             (Vec3::new(-2.2, 0.0, 0.0), Vec4::new(0.7, 0.7, 0.7, 1.0)),
-            (Vec3::new(-2.2, -0.8, 0.0), Vec4::new(0.4, 0.4, 0.4, 1.0)),
+            (Vec3::new(-2.2, 0.0, -0.8), Vec4::new(0.4, 0.4, 0.4, 1.0)),
         ];
         let golds = [
-            (Vec3::new(2.2, 0.8, 0.0), Vec4::new(1.0, 1.0, 1.0, 1.0)),
+            (Vec3::new(2.2, 0.0, 0.8), Vec4::new(1.0, 1.0, 1.0, 1.0)),
             (Vec3::new(2.2, 0.0, 0.0), Vec4::new(0.7, 0.7, 0.7, 1.0)),
-            (Vec3::new(2.2, -0.8, 0.0), Vec4::new(0.4, 0.4, 0.4, 1.0)),
+            (Vec3::new(2.2, 0.0, -0.8), Vec4::new(0.4, 0.4, 0.4, 1.0)),
         ];
 
         for (pos, tint) in reds {
@@ -103,8 +103,8 @@ const CUBE_POSITIONS: &[[f32; 3]] = &[
 ];
 #[rustfmt::skip]
 const CUBE_INDICES: &[u16] = &[
-    0, 1, 2, 0, 2, 3, // -Z
-    4, 6, 5, 4, 7, 6, // +Z
+    0, 1, 2, 0, 2, 3, // -Z (bottom)
+    4, 6, 5, 4, 7, 6, // +Z (top)
     0, 3, 7, 0, 7, 4, // -X
     1, 5, 6, 1, 6, 2, // +X
     3, 2, 6, 3, 6, 7, // +Y
@@ -194,7 +194,7 @@ impl View for Materials {
         let t = self.started.elapsed().as_secs_f32();
         let radius = 6.5;
         let angle = t * 0.35;
-        self.camera.position = Vec3::new(angle.sin() * radius, 1.5, angle.cos() * radius);
+        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 1.5);
         self.camera_binding.write(&renderer.queue, &self.camera);
 
         // Extract: bucket per-instance attribs by material id.

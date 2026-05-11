@@ -270,11 +270,11 @@ fn spawn_particle(template: &EmitterTemplate, transform: Mat4, rng: &mut Rng) ->
 /// Random unit vector within `half_angle` radians of `axis`. `axis` is
 /// expected to be (approximately) normalised; this re-normalises the result.
 fn jitter_direction(axis: Vec3, half_angle: f32, rng: &mut Rng) -> Vec3 {
-    let axis = axis.normalize_or(Vec3::Y);
+    let axis = axis.normalize_or(Vec3::Z);
     if half_angle <= 0.0 {
         return axis;
     }
-    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let helper = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Z };
     let tangent = axis.cross(helper).normalize();
     let bitangent = axis.cross(tangent);
     let theta = rng.unit() * half_angle;
@@ -328,7 +328,7 @@ mod tests {
             particle_lifetime: lifetime,
             initial_speed: 1.0,
             speed_jitter: 0.0,
-            direction: Vec3::Y,
+            direction: Vec3::Z,
             cone_half_angle: 0.0,
             max_particles: 64,
             on_parent_lost: ParticleLifecycle::Linger,

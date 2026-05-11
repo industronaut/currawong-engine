@@ -64,7 +64,7 @@ impl Game {
         // Buildings on the +X side.
         for x in [1.6, 3.0, 4.4] {
             let id = zone.insert(WorldObject {
-                position: Vec3::new(x, 0.5, 0.0),
+                position: Vec3::new(x, 0.0, 0.5),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(id, Kind::Building);
@@ -73,7 +73,7 @@ impl Game {
         // Trees on the -X side. Stagger phase so they don't sway in lock-step.
         for (i, x) in [-1.6, -3.0, -4.4].iter().enumerate() {
             let id = zone.insert(WorldObject {
-                position: Vec3::new(*x, 0.4, 0.0),
+                position: Vec3::new(*x, 0.0, 0.4),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(id, Kind::Tree);
@@ -85,10 +85,10 @@ impl Game {
             );
         }
 
-        // Rocks scattered along Z, sitting low.
-        for z in [-2.2, -0.6, 0.6, 2.2] {
+        // Rocks scattered along Y, sitting low.
+        for y in [-2.2, -0.6, 0.6, 2.2] {
             let id = zone.insert(WorldObject {
-                position: Vec3::new(0.0, -0.45, z),
+                position: Vec3::new(0.0, y, -0.45),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(id, Kind::Rock);
@@ -113,7 +113,9 @@ impl Simulation for Game {
         for (id, sway) in components.iter::<TreeSway>() {
             if let Some(obj) = objects.get_mut(id) {
                 let angle = (t * 1.4 + sway.phase).sin() * 0.22;
-                obj.rotation = Quat::from_rotation_z(angle);
+                // Tilt around the world Y axis so the tree leans in the XZ
+                // plane (a perpendicular sway for trees laid out along X).
+                obj.rotation = Quat::from_rotation_y(angle);
             }
         }
     }
@@ -138,6 +140,7 @@ const fn v(p: [f32; 3], c: [f32; 3]) -> Vertex {
 
 // Unit cube centred on origin. Per-corner colour shows the orientation of
 // each vertex without requiring lighting — adjacent corners differ by axis.
+// Local space is Z-up: top face is +Z, side faces are ±X / ±Y.
 #[rustfmt::skip]
 const CUBE_VERTS: &[Vertex] = &[
     v([-0.5, -0.5, -0.5], [0.25, 0.40, 0.70]),
@@ -151,37 +154,37 @@ const CUBE_VERTS: &[Vertex] = &[
 ];
 #[rustfmt::skip]
 const CUBE_INDICES: &[u16] = &[
-    0, 1, 2, 0, 2, 3, // -Z (back)
-    4, 6, 5, 4, 7, 6, // +Z (front)
+    0, 1, 2, 0, 2, 3, // -Z (bottom)
+    4, 6, 5, 4, 7, 6, // +Z (top)
     0, 3, 7, 0, 7, 4, // -X (left)
     1, 5, 6, 1, 6, 2, // +X (right)
-    3, 2, 6, 3, 6, 7, // +Y (top)
-    0, 4, 5, 0, 5, 1, // -Y (bottom)
+    3, 2, 6, 3, 6, 7, // +Y (back)
+    0, 4, 5, 0, 5, 1, // -Y (front)
 ];
 
-// Regular tetrahedron, point up.
+// Regular tetrahedron, point up along local +Z.
 #[rustfmt::skip]
 const TETRA_VERTS: &[Vertex] = &[
-    v([ 0.0,  0.65,  0.0], [0.30, 0.90, 0.40]),
-    v([-0.55, -0.30,  0.55], [0.20, 0.70, 0.30]),
-    v([ 0.55, -0.30,  0.55], [0.45, 0.85, 0.30]),
-    v([ 0.0, -0.30, -0.55], [0.30, 0.65, 0.20]),
+    v([ 0.0,  0.0,  0.65], [0.30, 0.90, 0.40]),
+    v([-0.55,  0.55, -0.30], [0.20, 0.70, 0.30]),
+    v([ 0.55,  0.55, -0.30], [0.45, 0.85, 0.30]),
+    v([ 0.0, -0.55, -0.30], [0.30, 0.65, 0.20]),
 ];
 #[rustfmt::skip]
 const TETRA_INDICES: &[u16] = &[
-    0, 1, 2, // front face
+    0, 1, 2, // back face
     0, 2, 3, // right face
     0, 3, 1, // left face
     1, 3, 2, // bottom face
 ];
 
-// Quad in the XZ plane. Used flat as ground tiles.
+// Quad in the XY plane (Z-up local space). Used flat as ground tiles.
 #[rustfmt::skip]
 const PLANE_VERTS: &[Vertex] = &[
-    v([-0.6, 0.0, -0.6], [0.55, 0.50, 0.45]),
-    v([ 0.6, 0.0, -0.6], [0.60, 0.55, 0.50]),
-    v([ 0.6, 0.0,  0.6], [0.55, 0.50, 0.45]),
-    v([-0.6, 0.0,  0.6], [0.60, 0.55, 0.50]),
+    v([-0.6, -0.6, 0.0], [0.55, 0.50, 0.45]),
+    v([ 0.6, -0.6, 0.0], [0.60, 0.55, 0.50]),
+    v([ 0.6,  0.6, 0.0], [0.55, 0.50, 0.45]),
+    v([-0.6,  0.6, 0.0], [0.60, 0.55, 0.50]),
 ];
 #[rustfmt::skip]
 const PLANE_INDICES: &[u16] = &[
@@ -479,7 +482,7 @@ impl View for Instances {
         let t = self.started.elapsed().as_secs_f32();
         let radius = 8.5;
         let angle = t * 0.35;
-        self.camera.position = Vec3::new(angle.sin() * radius, 3.5, angle.cos() * radius);
+        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 3.5);
 
         let view_proj = self.camera.view_proj();
         renderer
