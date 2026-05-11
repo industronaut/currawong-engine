@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # winit 0.30 on Linux pulls in X11/Wayland headers at compile time.
+      - name: Install winit system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libxkbcommon-x11-dev \
+            libx11-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # The no-default-features pass is the project's architectural test:
+      # it proves the sim layer compiles without any wgpu/winit deps.
+      - name: cargo clippy (sim-only)
+        run: cargo clippy --no-default-features --all-targets
+
+      - name: cargo clippy (default features)
+        run: cargo clippy --all-targets
+
+      - name: cargo test (sim-only)
+        run: cargo test --no-default-features
+
+      - name: cargo test (default features)
+        run: cargo test
