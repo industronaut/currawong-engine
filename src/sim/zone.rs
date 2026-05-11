@@ -9,6 +9,7 @@ use glam::{Quat, Vec3};
 
 use super::components::Components;
 use super::slot_map::{SlotKey, SlotMap};
+use super::terrain::Terrain;
 
 /// An entity in the simulation.
 ///
@@ -72,15 +73,16 @@ impl SlotKey for ZoneId {
     }
 }
 
-/// A region of the world. Owns the [`WorldObject`]s within it and a
+/// A region of the world. Owns the [`WorldObject`]s within it, a
 /// [`Components`] registry for sparse, optional per-object data (health,
-/// faction, AI state, etc.).
+/// faction, AI state, etc.), and a [`Terrain`] tile grid.
 ///
 /// Use [`Zone::remove`] rather than reaching for the inner storage: it's the
 /// only path that keeps the [`Components`] registry in sync.
 pub struct Zone {
     objects: SlotMap<WorldObjectId, WorldObject>,
     components: Components,
+    terrain: Terrain,
 }
 
 impl Zone {
@@ -88,7 +90,16 @@ impl Zone {
         Self {
             objects: SlotMap::new(),
             components: Components::new(),
+            terrain: Terrain::new(),
         }
+    }
+
+    pub fn terrain(&self) -> &Terrain {
+        &self.terrain
+    }
+
+    pub fn terrain_mut(&mut self) -> &mut Terrain {
+        &mut self.terrain
     }
 
     pub fn len(&self) -> usize {

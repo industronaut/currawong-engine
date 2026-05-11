@@ -1,0 +1,280 @@
+//! Material for terrain meshes.
+//!
+//! Two pipelines compiled from one shader and one vertex format
+//! ([`TerrainVertex`](super::TerrainVertex), `pos` + per-vertex `color`):
+//!
+//! - [`Self::opaque_pipeline`] — opaque solid terrain. Depth write on,
+//!   `BlendState::REPLACE`.
+//! - [`Self::transparent_pipeline`] — alpha-blended liquids. Depth **test**
+//!   on (so solid terrain occludes liquid behind it) but depth **write**
+//!   off (so liquid doesn't occlude subsequent liquid fragments).
+//!
+//! Instances ([`TerrainMaterialInstance`]) hold a tint uniform multiplied
+//! with the per-vertex colour in the shader. Solid terrain uses a white
+//! tint (so per-vertex top/wall shading shows through); each liquid kind
+//! gets its own tinted instance (water blue, lava orange, …).
+//!
+//! ## Wiring
+//!
+//! ```text
+//! init:    let material = TerrainMaterial::new(&renderer, camera.layout());
+//!          let solid = material.create_instance(&renderer, Vec4::splat(1.0));
+//!          let water = material.create_instance(&renderer,
+//!                          Vec4::new(0.2, 0.45, 0.85, 0.55));
+//! draw:    pass.set_pipeline(material.opaque_pipeline());
+//!          pass.set_bind_group(0, camera.bind_group(), &[]);
+//!          pass.set_bind_group(1, solid.bind_group(), &[]);
+//!          // bind chunk vertex/index buffers, draw_indexed
+//!          pass.set_pipeline(material.transparent_pipeline());
+//!          pass.set_bind_group(1, water.bind_group(), &[]);
+//!          // draw liquid chunk meshes
+//! ```
+
+use bytemuck::{Pod, Zeroable};
+use glam::Vec4;
+
+use super::renderer::Renderer;
+use super::terrain::TerrainVertex;
+
+const TERRAIN_SHADER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct Material {
+    tint: vec4<f32>,
+};
+@group(1) @binding(0) var<uniform> material: Material;
+
+struct VsIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+    var out: VsOut;
+    out.clip = camera.view_proj * vec4<f32>(in.pos, 1.0);
+    out.color = in.color * material.tint;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct TerrainUniform {
+    tint: [f32; 4],
+}
+
+/// Terrain material template: opaque + transparent pipelines sharing one
+/// vertex format and bind-group layout. Build once at `View::init`; create
+/// per-purpose instances ([`TerrainMaterialInstance`]) via
+/// [`Self::create_instance`].
+pub struct TerrainMaterial {
+    opaque_pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
+    instance_bgl: wgpu::BindGroupLayout,
+}
+
+impl TerrainMaterial {
+    pub fn new(renderer: &Renderer, camera_layout: &wgpu::BindGroupLayout) -> Self {
+        let device = &renderer.device;
+
+        let instance_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Terrain instance bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Terrain shader"),
+            source: wgpu::ShaderSource::Wgsl(TERRAIN_SHADER.into()),
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Terrain pipeline layout"),
+            bind_group_layouts: &[Some(camera_layout), Some(&instance_bgl)],
+            ..Default::default()
+        });
+
+        let attributes = [
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+        ];
+        let buffers = [wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<TerrainVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &attributes,
+        }];
+
+        // Walls face four directions; mixing top/wall geometry in one mesh
+        // with no fixed winding contract means back-face culling would punch
+        // visible holes. Skip culling — slight overdraw, but correctness.
+        let primitive = wgpu::PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        };
+
+        let opaque_blend = wgpu::BlendState::REPLACE;
+        let alpha_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
+        };
+
+        let depth_opaque = renderer
+            .depth_format()
+            .map(|format| wgpu::DepthStencilState {
+                format,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            });
+        let depth_transparent = renderer
+            .depth_format()
+            .map(|format| wgpu::DepthStencilState {
+                format,
+                // Test against solid terrain depth so liquid behind a cliff
+                // is occluded, but don't write — otherwise the first liquid
+                // fragment would occlude later transparents at the same
+                // depth.
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            });
+
+        let make_pipeline =
+            |label: &'static str,
+             blend: wgpu::BlendState,
+             depth_stencil: Option<wgpu::DepthStencilState>| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &buffers,
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: renderer.surface_format(),
+                            blend: Some(blend),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive,
+                    depth_stencil,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+
+        let opaque_pipeline = make_pipeline("Terrain opaque pipeline", opaque_blend, depth_opaque);
+        let transparent_pipeline = make_pipeline(
+            "Terrain transparent pipeline",
+            alpha_blend,
+            depth_transparent,
+        );
+
+        Self {
+            opaque_pipeline,
+            transparent_pipeline,
+            instance_bgl,
+        }
+    }
+
+    pub fn opaque_pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.opaque_pipeline
+    }
+
+    pub fn transparent_pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.transparent_pipeline
+    }
+
+    /// Create a material instance with a per-instance tint (linear RGBA in
+    /// `[0, 1]`; alpha is meaningful only on the transparent pipeline).
+    pub fn create_instance(&self, renderer: &Renderer, tint: Vec4) -> TerrainMaterialInstance {
+        let data = TerrainUniform {
+            tint: tint.to_array(),
+        };
+        let buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Terrain material instance uniform"),
+            size: std::mem::size_of::<TerrainUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        renderer
+            .queue
+            .write_buffer(&buffer, 0, bytemuck::bytes_of(&data));
+        let bind_group = renderer
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Terrain material instance bg"),
+                layout: &self.instance_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+        TerrainMaterialInstance { buffer, bind_group }
+    }
+}
+
+/// A live instance of [`TerrainMaterial`] — a uniform buffer + bind group
+/// holding one tint. Bind as `@group(1)` when drawing through either of the
+/// material's pipelines.
+pub struct TerrainMaterialInstance {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+impl TerrainMaterialInstance {
+    pub fn bind_group(&self) -> &wgpu::BindGroup {
+        &self.bind_group
+    }
+
+    /// Re-upload the tint without rebuilding the bind group.
+    pub fn write_tint(&self, queue: &wgpu::Queue, tint: Vec4) {
+        let data = TerrainUniform {
+            tint: tint.to_array(),
+        };
+        queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&data));
+    }
+}
