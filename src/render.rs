@@ -69,7 +69,7 @@ pub use runner::{run, run_with_clock};
 pub use terrain::{ChunkMeshes, FlatTopsMesher, MeshData, TerrainMesher, TerrainVertex};
 pub use terrain_material::{TerrainMaterial, TerrainMaterialInstance};
 pub use terrain_renderer::TerrainRenderer;
-pub use texture::{SamplerKind, SamplerRegistry, Texture};
+pub use texture::{SamplerKind, SamplerRegistry, Texture, TextureColorSpace, TextureLoadError};
 pub use vertex::PosNormalUv;
 pub use view::{EngineCtx, View};
 pub use visibility::{Aabb, Frustum};

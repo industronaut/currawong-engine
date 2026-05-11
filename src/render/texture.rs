@@ -15,14 +15,15 @@
 //!
 //! ## What's not here yet
 //!
-//! - Loading from disk via the `image` crate. Procedural textures and
-//!   embedded bytes work today; file loading will land alongside glTF
-//!   import.
+//! - glTF / asset-manager plumbing. [`Texture::from_path`] reads PNG/JPEG
+//!   from disk, but there's no handle system, no async streaming, and no
+//!   texture compression yet.
 //! - Linear-space mipmap downsampling for sRGB. We average in raw 8-bit
 //!   sRGB space, which is slightly wrong but invisible at the quality
 //!   level we render at. Worth revisiting before shipping.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use super::renderer::Renderer;
 
@@ -130,6 +131,112 @@ impl Texture {
             mip_levels,
         }
     }
+
+    /// Load a 2D texture from a PNG or JPEG file on disk, decode it to
+    /// RGBA8, and upload via [`Self::from_rgba8`] (which generates the mip
+    /// chain).
+    ///
+    /// `color_space` is a required parameter, not inferred. Albedo and
+    /// other colour maps want [`TextureColorSpace::Srgb`] — the GPU then
+    /// decodes sRGB → linear on every sample, which is what lighting
+    /// expects. Normal maps, metallic/roughness packs, height maps, and
+    /// other "data" textures want [`TextureColorSpace::Linear`] so their
+    /// bytes pass through untouched. Inferring from filename is fragile;
+    /// callers commit to the correct interpretation here.
+    ///
+    /// Synchronous file read; large textures will block the caller.
+    /// Suitable for example-scale assets.
+    pub fn from_path(
+        renderer: &Renderer,
+        path: impl AsRef<Path>,
+        color_space: TextureColorSpace,
+    ) -> Result<Self, TextureLoadError> {
+        let path = path.as_ref();
+        let (width, height, rgba) = decode_rgba8_from_path(path)?;
+        let label = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        Ok(Self::from_rgba8(
+            renderer,
+            &label,
+            width,
+            height,
+            &rgba,
+            color_space == TextureColorSpace::Srgb,
+        ))
+    }
+}
+
+/// How the GPU should interpret a texture's pixel data on sample.
+///
+/// Required by [`Texture::from_path`] — no default, no inference from
+/// filename. The wrong choice silently darkens or brightens output.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextureColorSpace {
+    /// Albedo / colour maps. Selects `Rgba8UnormSrgb`; samples decode
+    /// sRGB → linear automatically.
+    Srgb,
+    /// Normal maps, metallic/roughness, height — anything whose bytes
+    /// are data, not colour. Selects `Rgba8Unorm`; samples pass through
+    /// untouched.
+    Linear,
+}
+
+/// Failure mode for [`Texture::from_path`]. Wraps the two underlying
+/// error sources — filesystem I/O and image decoding — without leaking
+/// either type into the public API.
+#[derive(Debug)]
+pub enum TextureLoadError {
+    Io(std::io::Error),
+    Decode(image::ImageError),
+}
+
+impl std::fmt::Display for TextureLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "texture I/O error: {e}"),
+            Self::Decode(e) => write!(f, "texture decode error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TextureLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Decode(e) => Some(e),
+        }
+    }
+}
+
+impl From<std::io::Error> for TextureLoadError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<image::ImageError> for TextureLoadError {
+    fn from(value: image::ImageError) -> Self {
+        Self::Decode(value)
+    }
+}
+
+/// Read a file and decode it to RGBA8. Split out so tests can exercise the
+/// decode path without a GPU.
+fn decode_rgba8_from_path(path: &Path) -> Result<(u32, u32, Vec<u8>), TextureLoadError> {
+    let bytes = std::fs::read(path)?;
+    decode_rgba8_from_bytes(&bytes)
+}
+
+/// Decode an in-memory image buffer to RGBA8. Whatever the source pixel
+/// format is, we force-convert to 8-bit RGBA so [`Texture::from_rgba8`]'s
+/// invariants hold.
+fn decode_rgba8_from_bytes(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), TextureLoadError> {
+    let img = image::load_from_memory(bytes)?;
+    let rgba = img.into_rgba8();
+    let (w, h) = rgba.dimensions();
+    Ok((w, h, rgba.into_raw()))
 }
 
 /// Mip levels for a texture of size `width × height`, all the way down to
@@ -276,6 +383,47 @@ mod tests {
         for px in dst.chunks(4) {
             assert_eq!(px, &[255, 0, 0, 255]);
         }
+    }
+
+    #[test]
+    fn decode_png_yields_expected_dimensions_and_mip_count() {
+        // Encode a 16x8 RGB PNG in-memory via `image`, decode it back
+        // through our loader, and verify the dimensions + the mip count
+        // the upload path would compute. Pure CPU — no GPU touched.
+        let (src_w, src_h) = (16u32, 8u32);
+        let mut src = image::RgbImage::new(src_w, src_h);
+        for (x, y, px) in src.enumerate_pixels_mut() {
+            *px = image::Rgb([(x * 16) as u8, (y * 32) as u8, 200]);
+        }
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(src)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode png");
+
+        let (w, h, rgba) = decode_rgba8_from_bytes(&png_bytes).expect("decode png");
+        assert_eq!((w, h), (src_w, src_h));
+        assert_eq!(rgba.len() as u32, w * h * 4);
+        // 16x8 → max dim 16 → 5 mip levels (16, 8, 4, 2, 1).
+        assert_eq!(mip_level_count(w, h), 5);
+    }
+
+    #[test]
+    fn decode_garbage_bytes_returns_decode_error() {
+        let err =
+            decode_rgba8_from_bytes(b"not a real image").expect_err("garbage must not decode");
+        assert!(matches!(err, TextureLoadError::Decode(_)));
+    }
+
+    #[test]
+    fn from_path_missing_file_returns_io_error() {
+        let err = decode_rgba8_from_path(Path::new(
+            "/this/path/should/never/exist/currawong-test-fixture.png",
+        ))
+        .expect_err("missing path must not succeed");
+        assert!(matches!(err, TextureLoadError::Io(_)));
     }
 
     #[test]
