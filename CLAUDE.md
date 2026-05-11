@@ -21,6 +21,7 @@ cargo run --example triangle             # static colored triangle
 cargo run --example input                # input demo + sim speed controls
 cargo run --example camera               # sim/view extract + camera demo
 cargo run --example terrain              # tile-grid terrain meshing + liquids
+cargo run --example trees                # ~200 trees growing under live sim mutation
 cargo run --example textured_pbr         # PBR cubes lit by a sim-driven sun
 cargo run --example textured_pbr --features egui   # same, with debug overlay
 cargo run --example headless             # sim ticking without any window
