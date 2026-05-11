@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
+use super::environment::SceneEnvironmentBinding;
+
 /// Owns the window and the wgpu device/queue/surface.
 pub struct Renderer {
     pub window: Arc<Window>,
@@ -12,6 +14,7 @@ pub struct Renderer {
     pub(super) surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     depth: Option<DepthAttachment>,
+    scene: SceneEnvironmentBinding,
 }
 
 struct DepthAttachment {
@@ -42,6 +45,28 @@ impl Renderer {
     /// needed by views.
     pub(super) fn depth_view(&self) -> Option<&wgpu::TextureView> {
         self.depth.as_ref().map(|d| &d.view)
+    }
+
+    /// Bind-group layout for the engine-managed scene environment uniform.
+    /// Pass to [`PipelineLayoutDescriptor`](wgpu::PipelineLayoutDescriptor)
+    /// when building any pipeline that reads scene lighting (sun direction,
+    /// ambient, etc.). The corresponding bind group is bound by the engine
+    /// before [`View::render`](crate::View::render) runs — your shader just
+    /// needs to declare a `@group(N) @binding(0)` for it.
+    pub fn scene_layout(&self) -> &wgpu::BindGroupLayout {
+        self.scene.layout()
+    }
+
+    /// Bind group for the engine-managed scene environment uniform. Bind at
+    /// the slot your pipeline reserved for [`scene_layout`](Self::scene_layout).
+    /// The engine writes fresh values into it each frame from
+    /// [`View::extract_environment`](crate::View::extract_environment).
+    pub fn scene_bind_group(&self) -> &wgpu::BindGroup {
+        self.scene.bind_group()
+    }
+
+    pub(super) fn write_scene(&self, env: &super::environment::ViewEnvironment) {
+        self.scene.write(&self.queue, env);
     }
 
     pub(super) async fn new(
@@ -96,6 +121,8 @@ impl Renderer {
             view: create_depth_view(&device, config.width, config.height, format),
         });
 
+        let scene = SceneEnvironmentBinding::new(&device);
+
         Self {
             window,
             device,
@@ -103,6 +130,7 @@ impl Renderer {
             surface,
             config,
             depth,
+            scene,
         }
     }
 

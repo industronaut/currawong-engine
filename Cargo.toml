@@ -64,4 +64,8 @@ name = "egui_debug"
 required-features = ["egui"]
 
 [[example]]
+name = "textured_pbr"
+required-features = ["render"]
+
+[[example]]
 name = "headless"
