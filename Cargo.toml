@@ -51,4 +51,8 @@ name = "render_objects"
 required-features = ["render"]
 
 [[example]]
+name = "terrain"
+required-features = ["render"]
+
+[[example]]
 name = "headless"

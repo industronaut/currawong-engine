@@ -14,6 +14,9 @@
 //! - [`emitter`] — declarative emitter reconciliation + particle integration.
 //! - [`render_object`] — render-object templates + registry (planned system; skeleton).
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
+//! - [`terrain`] — view-side meshing of tile-grid terrain into chunk meshes.
+//! - [`terrain_material`] — opaque + transparent terrain material pipelines.
+//! - [`terrain_renderer`] — per-chunk GPU buffer cache + draw routine.
 //! - [`visibility`] — AABB + view-frustum culling primitives.
 //! - [`render_instances`] — live render-object instance reconciler with cull hysteresis.
 //!
@@ -28,6 +31,9 @@ mod render_instances;
 mod render_object;
 mod renderer;
 mod runner;
+mod terrain;
+mod terrain_material;
+mod terrain_renderer;
 mod view;
 mod visibility;
 
@@ -44,5 +50,8 @@ pub use render_object::{
 };
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};
+pub use terrain::{ChunkMeshes, FlatTopsMesher, MeshData, TerrainMesher, TerrainVertex};
+pub use terrain_material::{TerrainMaterial, TerrainMaterialInstance};
+pub use terrain_renderer::TerrainRenderer;
 pub use view::{EngineCtx, View};
 pub use visibility::{Aabb, Frustum};

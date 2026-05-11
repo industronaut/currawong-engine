@@ -18,6 +18,7 @@
 //! - [`slot_map`] — generic generational slot-map (the storage primitive).
 //! - [`zone`] — [`WorldObject`], [`Zone`], [`Zones`], cross-zone refs.
 //! - [`components`] — sparse, type-erased per-object data.
+//! - [`terrain`] — tile-grid terrain with optional liquids per tile.
 //! - [`clock`] — fixed-tick driver with speed scaling.
 //!
 //! Submodules are private; their public types are re-exported here so callers
@@ -28,11 +29,13 @@ use std::time::Duration;
 mod clock;
 mod components;
 mod slot_map;
+mod terrain;
 mod zone;
 
 pub use clock::SimClock;
 pub use components::Components;
 pub use slot_map::{SlotKey, SlotMap};
+pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};
 pub use zone::{WorldObject, WorldObjectId, WorldObjectRef, Zone, ZoneId, Zones};
 
 /// A simulation of the world.
