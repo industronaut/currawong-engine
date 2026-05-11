@@ -47,6 +47,17 @@ pub trait View: 'static {
         let _ = (sim, ctx, event);
     }
 
+    /// Build the per-frame debug UI. Called once per frame after `render`,
+    /// with the engine's `egui::Context`. Mirrors `input`'s mutability:
+    /// widgets can read sim state and drive sim/engine changes (pause,
+    /// speed change, exit) via `ctx`.
+    ///
+    /// Default no-op; opt in by overriding. Behind the `egui` feature.
+    #[cfg(feature = "egui")]
+    fn ui(&mut self, sim: &mut Self::Sim, ctx: &mut EngineCtx, egui_ctx: &egui::Context) {
+        let _ = (sim, ctx, egui_ctx);
+    }
+
     fn title() -> &'static str {
         "currawong"
     }

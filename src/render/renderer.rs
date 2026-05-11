@@ -25,6 +25,12 @@ impl Renderer {
         self.config.format
     }
 
+    /// Current swapchain size in pixels. Useful for screen-space rendering
+    /// (e.g. egui's `ScreenDescriptor`).
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     /// Depth format the engine has allocated for this view, if any. Pipelines
     /// using depth must declare this format in their `DepthStencilState`.
     pub fn depth_format(&self) -> Option<wgpu::TextureFormat> {

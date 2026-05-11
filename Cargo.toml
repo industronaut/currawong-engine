@@ -10,6 +10,8 @@ readme = "README.md"
 default = ["render"]
 # Render side: window, GPU, View, run(). Disable for headless sim-only builds.
 render = ["dep:bytemuck", "dep:pollster", "dep:wgpu", "dep:winit", "glam/bytemuck"]
+# egui-based debug UI overlay. Implies `render`. Adds `View::ui` opt-in hook.
+egui = ["render", "dep:egui", "dep:egui-winit", "dep:egui-wgpu"]
 
 [dependencies]
 glam = "0.32.1"
@@ -17,6 +19,9 @@ bytemuck = { version = "1", optional = true }
 pollster = { version = "0.4.0", optional = true }
 wgpu = { version = "29.0.3", optional = true }
 winit = { version = "0.30.13", optional = true }
+egui = { version = "0.34.2", optional = true }
+egui-winit = { version = "0.34.2", optional = true }
+egui-wgpu = { version = "0.34.2", optional = true }
 
 [[example]]
 name = "clear"
@@ -53,6 +58,10 @@ required-features = ["render"]
 [[example]]
 name = "terrain"
 required-features = ["render"]
+
+[[example]]
+name = "egui_debug"
+required-features = ["egui"]
 
 [[example]]
 name = "headless"

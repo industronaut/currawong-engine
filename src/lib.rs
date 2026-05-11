@@ -25,6 +25,9 @@ pub use wgpu;
 #[cfg(feature = "render")]
 pub use winit;
 
+#[cfg(feature = "egui")]
+pub use egui;
+
 #[cfg(feature = "render")]
 mod render;
 #[cfg(feature = "render")]
