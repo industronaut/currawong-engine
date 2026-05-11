@@ -34,7 +34,7 @@ pub use material::{
     MaterialInstanceRegistry, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial,
 };
 pub use render_object::{
-    MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotValue,
+    EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotValue,
 };
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};

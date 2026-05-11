@@ -1,27 +1,33 @@
-//! Sim → `RenderId` → `RenderTemplate` → mesh parts → instanced draws.
+//! Sim → `RenderId` → `RenderTemplate` → (mesh parts + emitter parts) → draws.
 //!
 //! Two render templates are registered at init:
-//! - `Campfire` — two parts (log + stone base), two materials.
-//! - `Stake` — one part, single material.
+//! - `Campfire` — mesh parts (log + stone base) **and** emitter parts
+//!   (flame at top of log, smoke higher up).
+//! - `Stake` — single mesh part.
 //!
 //! Sim has five objects, each tagged with a `RenderId` component. Every frame:
-//! 1. Walk the sim, look up each object's template by `RenderId`.
-//! 2. For each part in the template, compose `world = object_xform *
+//! 1. Walk the sim. For each object look up its template by `RenderId`.
+//! 2. For each `MeshPart`, compose `world = object_xform *
 //!    part.local_transform` and push an [`UnlitColoredAttribs`] into the
 //!    bucket keyed by `(mesh, material)`.
-//! 3. One indexed-instanced draw per non-empty bucket.
+//! 3. For each `EmitterPart`, declare it on the [`EmitterReconciler`] at
+//!    `world = object_xform * part.local_transform`.
+//! 4. Integrate the reconciler, build a per-emitter-template particle
+//!    bucket, draw meshes then particles.
 //!
-//! Shows: many sim objects share one template; one template fans out into
-//! multiple draw parts; parts of different templates can share material
-//! instances and accumulate into the same bucket.
+//! Shows: a single template fans out into multiple draw kinds; emitter
+//! parts on a template route into [`EmitterReconciler`] without the sim
+//! ever touching an emitter concept.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry, RenderRegistry,
-    RenderTemplate, Renderer, Simulation, UnlitColoredAttribs, UnlitColoredInstance,
-    UnlitColoredMaterial, View, WorldObject, Zone, Zones, wgpu, winit,
+    Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, InstanceBuckets,
+    MaterialInstanceRegistry, ParticleLifecycle, RenderRegistry, RenderTemplate, Renderer,
+    Simulation, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject,
+    WorldObjectRef, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -61,6 +67,23 @@ enum MatKey {
 struct BucketKey {
     mesh: MeshHandle,
     material: MatKey,
+}
+
+/// Emitter template id. One template per *kind of effect* (flame, smoke);
+/// many live emitters share one template.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum EmitterId {
+    Flame,
+    Smoke,
+}
+
+/// Which emitter "slot" on a parent object an attachment fills. Lets one
+/// render template carry several emitters keyed independently — the
+/// campfire has both a flame slot and a smoke slot.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum EmitterSlot {
+    Flame,
+    Smoke,
 }
 
 // --- Sim ----------------------------------------------------------------
@@ -116,21 +139,115 @@ const CUBE_INDICES: &[u16] = &[
     0, 4, 5, 0, 5, 1, // -Y
 ];
 
+// --- Particle plumbing (billboard quad expanded by camera basis) --------
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct QuadCorner {
+    offset: [f32; 2],
+}
+unsafe impl bytemuck::Pod for QuadCorner {}
+unsafe impl bytemuck::Zeroable for QuadCorner {}
+
+#[rustfmt::skip]
+const QUAD_CORNERS: &[QuadCorner] = &[
+    QuadCorner { offset: [-0.5, -0.5] },
+    QuadCorner { offset: [ 0.5, -0.5] },
+    QuadCorner { offset: [ 0.5,  0.5] },
+    QuadCorner { offset: [-0.5,  0.5] },
+];
+const QUAD_INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
+
+/// Size/colour interpolation curve per emitter template. The engine
+/// reconciler doesn't model visuals; this lives view-side, keyed by the
+/// same id the reconciler uses.
+struct ParticleVisual {
+    base_size: f32,
+    end_size: f32,
+    base_color: Vec4,
+    end_color: Vec4,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ParticleInstance {
+    position: [f32; 3],
+    size: f32,
+    color: [f32; 4],
+}
+unsafe impl bytemuck::Pod for ParticleInstance {}
+unsafe impl bytemuck::Zeroable for ParticleInstance {}
+
+const PARTICLE_SHADER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    right: vec4<f32>,
+    up: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> camera: Camera;
+
+struct VsIn {
+    @location(0) corner: vec2<f32>,
+    @location(1) particle_pos: vec3<f32>,
+    @location(2) size: f32,
+    @location(3) color: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(in: VsIn) -> VsOut {
+    let world_pos = in.particle_pos
+        + camera.right.xyz * in.corner.x * in.size
+        + camera.up.xyz * in.corner.y * in.size;
+    var out: VsOut;
+    out.clip = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.color = in.color;
+    out.uv = in.corner * 2.0;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let r = length(in.uv);
+    let mask = smoothstep(1.0, 0.4, r);
+    return vec4<f32>(in.color.rgb, in.color.a * mask);
+}
+"#;
+
 // --- View ---------------------------------------------------------------
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MAX_INSTANCES: u32 = 64;
+const MAX_PARTICLES_PER_TEMPLATE: u32 = 1024;
+
+/// Five generics on `RenderRegistry` adds up — pin them once.
+type Templates = RenderRegistry<RenderId, MeshHandle, MatKey, EmitterId, EmitterSlot>;
 
 struct Demo {
     camera: Camera,
     camera_binding: CameraBinding,
     material: UnlitColoredMaterial,
     instances: MaterialInstanceRegistry<UnlitColoredInstance, MatKey>,
-    templates: RenderRegistry<RenderId, MeshHandle, MatKey>,
+    templates: Templates,
     cube_vertices: wgpu::Buffer,
     cube_indices: wgpu::Buffer,
     buckets: InstanceBuckets<BucketKey, UnlitColoredAttribs>,
+
+    // Particle path.
+    particle_pipeline: wgpu::RenderPipeline,
+    quad_vertex_buffer: wgpu::Buffer,
+    quad_index_buffer: wgpu::Buffer,
+    particle_instances: InstanceBuckets<EmitterId, ParticleInstance>,
+    emitters: EmitterReconciler<EmitterId, EmitterSlot>,
+    visuals: HashMap<EmitterId, ParticleVisual>,
+
     started: Instant,
+    last_frame: Instant,
 }
 
 impl View for Demo {
@@ -155,9 +272,10 @@ impl View for Demo {
         );
 
         // Two render templates. The Campfire fans out into a log (long, low)
-        // and a stone base (wide, flatter, sits underneath). The Stake is a
-        // single tall column.
-        let mut templates: RenderRegistry<RenderId, MeshHandle, MatKey> = RenderRegistry::new();
+        // and a stone base (wide, flatter, sits underneath), plus a flame
+        // emitter at the log top and a smoke emitter above. The Stake is a
+        // single tall column with no emitters.
+        let mut templates: Templates = RenderRegistry::new();
         templates.register(
             RenderId::Campfire,
             RenderTemplate::new("campfire")
@@ -180,6 +298,18 @@ impl View for Demo {
                         Quat::IDENTITY,
                         Vec3::new(0.0, 0.0, 0.0),
                     ),
+                )
+                // Flame at the top of the log.
+                .with_emitter_part(
+                    EmitterId::Flame,
+                    EmitterSlot::Flame,
+                    Mat4::from_translation(Vec3::new(0.0, 0.65, 0.0)),
+                )
+                // Smoke a little higher, drifts up.
+                .with_emitter_part(
+                    EmitterId::Smoke,
+                    EmitterSlot::Smoke,
+                    Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)),
                 ),
         );
         templates.register(
@@ -221,6 +351,79 @@ impl View for Demo {
             );
         }
 
+        // Particle pipeline: reads camera, expands a unit quad per particle
+        // using camera right/up basis (alpha-blended, depth-test but no
+        // depth-write so overlapping particles blend).
+        let particle_pipeline =
+            build_particle_pipeline(device, camera_binding.layout(), renderer.surface_format());
+        let quad_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quad corners"),
+            contents: bytemuck::cast_slice(QUAD_CORNERS),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let quad_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("quad indices"),
+            contents: bytemuck::cast_slice(QUAD_INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut particle_instances = InstanceBuckets::<EmitterId, ParticleInstance>::new(
+            "particles",
+            MAX_PARTICLES_PER_TEMPLATE,
+        );
+        for emitter in [EmitterId::Flame, EmitterId::Smoke] {
+            particle_instances.register(device, emitter);
+        }
+
+        let mut emitters = EmitterReconciler::<EmitterId, EmitterSlot>::new(0xCAFEF00D);
+        emitters.register_template(
+            EmitterId::Flame,
+            EmitterTemplate {
+                spawn_rate: 60.0,
+                particle_lifetime: 0.7,
+                initial_speed: 1.4,
+                speed_jitter: 0.5,
+                direction: Vec3::Y,
+                cone_half_angle: 0.45,
+                max_particles: MAX_PARTICLES_PER_TEMPLATE,
+                on_parent_lost: ParticleLifecycle::Linger,
+            },
+        );
+        emitters.register_template(
+            EmitterId::Smoke,
+            EmitterTemplate {
+                spawn_rate: 14.0,
+                particle_lifetime: 2.5,
+                initial_speed: 0.45,
+                speed_jitter: 0.15,
+                direction: Vec3::new(0.05, 1.0, 0.0).normalize(),
+                cone_half_angle: 0.55,
+                max_particles: MAX_PARTICLES_PER_TEMPLATE,
+                on_parent_lost: ParticleLifecycle::Linger,
+            },
+        );
+
+        let mut visuals = HashMap::new();
+        visuals.insert(
+            EmitterId::Flame,
+            ParticleVisual {
+                base_size: 0.18,
+                end_size: 0.05,
+                base_color: Vec4::new(1.0, 0.65, 0.15, 0.95),
+                end_color: Vec4::new(0.6, 0.05, 0.0, 0.0),
+            },
+        );
+        visuals.insert(
+            EmitterId::Smoke,
+            ParticleVisual {
+                base_size: 0.20,
+                end_size: 0.85,
+                base_color: Vec4::new(0.45, 0.45, 0.45, 0.55),
+                end_color: Vec4::new(0.25, 0.25, 0.25, 0.0),
+            },
+        );
+
+        let now = Instant::now();
         Self {
             camera,
             camera_binding,
@@ -230,7 +433,14 @@ impl View for Demo {
             cube_vertices,
             cube_indices,
             buckets,
-            started: Instant::now(),
+            particle_pipeline,
+            quad_vertex_buffer,
+            quad_index_buffer,
+            particle_instances,
+            emitters,
+            visuals,
+            started: now,
+            last_frame: now,
         }
     }
 
@@ -246,7 +456,8 @@ impl View for Demo {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
 
-        // Wall-clock orbit.
+        // Wall-clock orbit and dt — particle integration runs on wall-clock
+        // so emitters keep ticking even when the sim is paused.
         let t = self.started.elapsed().as_secs_f32();
         let radius = 7.5;
         let angle = t * 0.35;
@@ -254,9 +465,17 @@ impl View for Demo {
         self.camera.target = Vec3::ZERO;
         self.camera_binding.write(&renderer.queue, &self.camera);
 
-        // Extract: walk sim, look up template, fan out into parts, bucket.
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+
+        // Extract: walk sim, look up template, fan out into mesh + emitter
+        // parts. Mesh parts go into instance buckets; emitter parts are
+        // declared on the reconciler (which lazily creates or refreshes the
+        // live emitter at this frame's world transform).
         self.buckets.begin_frame();
-        for (_, zone) in sim.zones.iter() {
+        self.emitters.begin_frame();
+        for (zone_id, zone) in sim.zones.iter() {
             for (id, obj) in zone.iter() {
                 let Some(&rid) = zone.components().get::<RenderId>(id) else {
                     continue;
@@ -265,6 +484,7 @@ impl View for Demo {
                     continue;
                 };
                 let object_xform = Mat4::from_rotation_translation(obj.rotation, obj.position);
+                let world_ref = WorldObjectRef { zone: zone_id, id };
                 for part in template.mesh_parts() {
                     let world = object_xform * part.local_transform;
                     self.buckets.push(
@@ -275,11 +495,41 @@ impl View for Demo {
                         UnlitColoredAttribs::new(world, Vec4::ONE),
                     );
                 }
+                for part in template.emitter_parts() {
+                    let world = object_xform * part.local_transform;
+                    self.emitters
+                        .declare(world_ref, part.slot, part.template, world);
+                }
             }
         }
-        self.buckets.upload(&renderer.queue);
 
-        // Draw: one indexed-instanced call per non-empty bucket.
+        // Tick particles, then turn each into a billboard instance with the
+        // template's size/colour curves applied.
+        self.emitters.integrate(&sim.zones, dt);
+        self.particle_instances.begin_frame();
+        for (template_id, particle) in self.emitters.iter_particles() {
+            let v = &self.visuals[&template_id];
+            let life = particle.life();
+            let size = v.base_size + (v.end_size - v.base_size) * life;
+            let color = v.base_color.lerp(v.end_color, life);
+            self.particle_instances.push(
+                template_id,
+                ParticleInstance {
+                    position: [
+                        particle.position.x,
+                        particle.position.y,
+                        particle.position.z,
+                    ],
+                    size,
+                    color: [color.x, color.y, color.z, color.w],
+                },
+            );
+        }
+
+        self.buckets.upload(&renderer.queue);
+        self.particle_instances.upload(&renderer.queue);
+
+        // Opaque mesh pass: one indexed-instanced call per non-empty bucket.
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_vertex_buffer(0, self.cube_vertices.slice(..));
@@ -291,6 +541,16 @@ impl View for Demo {
             pass.set_bind_group(1, instance.bind_group(), &[]);
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
             pass.draw_indexed(0..CUBE_INDICES.len() as u32, 0, 0..count);
+        }
+
+        // Particle pass: alpha-blended billboards.
+        pass.set_pipeline(&self.particle_pipeline);
+        pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
+        pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
+        pass.set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        for (_emitter_id, instance_buffer, count) in self.particle_instances.iter_filled() {
+            pass.set_vertex_buffer(1, instance_buffer.slice(..));
+            pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..count);
         }
     }
 
@@ -313,6 +573,88 @@ impl View for Demo {
     fn depth_format() -> Option<wgpu::TextureFormat> {
         Some(DEPTH_FORMAT)
     }
+}
+
+fn build_particle_pipeline(
+    device: &wgpu::Device,
+    camera_layout: &wgpu::BindGroupLayout,
+    surface_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("particle shader"),
+        source: wgpu::ShaderSource::Wgsl(PARTICLE_SHADER.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("particle pipeline layout"),
+        bind_group_layouts: &[Some(camera_layout)],
+        ..Default::default()
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("particle pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[
+                // Slot 0: per-vertex quad corner.
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<QuadCorner>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 0,
+                        format: wgpu::VertexFormat::Float32x2,
+                    }],
+                },
+                // Slot 1: per-instance ParticleInstance.
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ParticleInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 12,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 16,
+                            shader_location: 3,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                    ],
+                },
+            ],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            // Particles read depth (so they're occluded by the log) but
+            // don't write depth (so overlapping particles blend correctly).
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 fn main() {

@@ -8,18 +8,20 @@
 //!
 //! Templates declare typed **slots** — named parameters with a fixed
 //! [`SlotKind`] — that instances later bind to concrete [`SlotValue`]s.
-//! Templates also carry a list of [`MeshPart`]s, each naming a user-typed
-//! mesh handle `M` and material key `MK` plus a local transform. The
-//! live-instance side (emitter parts, behaviour bindings, slot-driven
-//! parameter routing) lands in later steps. Re-registering an id silently
-//! replaces the previous template — same idiom as
+//! Templates carry two kinds of parts: [`MeshPart<M, MK>`] for static
+//! geometry and [`EmitterPart<E, S>`] for particle emitter attachments.
+//! Each part has a local transform from the template root. Slot-driven
+//! parameter routing and visual-behaviour bindings land in later steps.
+//! Re-registering an id silently replaces the previous template — same
+//! idiom as
 //! [`EmitterReconciler::register_template`](super::EmitterReconciler::register_template)
 //! and [`InstanceBuckets::register`](super::InstanceBuckets::register).
 //!
-//! `RenderTemplate` and `RenderRegistry` default `M` and `MK` to `()` so
-//! callers that haven't yet committed to concrete mesh/material types (or
-//! that don't yet need parts) can use the simpler form `RenderTemplate` /
-//! `RenderRegistry<R>`.
+//! `RenderTemplate` and `RenderRegistry` default `M`, `MK`, `E`, `S` to
+//! `()` so callers that haven't committed to a given part kind can use the
+//! shorter forms — e.g. `RenderTemplate<MyMesh, MyMat>` for mesh-only
+//! templates, or just `RenderTemplate` / `RenderRegistry<R>` for
+//! slot-schema-only templates.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -113,27 +115,59 @@ impl<M, MK> MeshPart<M, MK> {
     }
 }
 
+/// An emitter attachment declared by a [`RenderTemplate`]: which emitter
+/// template `E` to spawn, which `S` slot the attachment fills (so one
+/// template can carry several emitters keyed independently — e.g. flame +
+/// smoke + sparks), and a transform relative to the template root.
+///
+/// The View resolves `E` and `S` against an
+/// [`EmitterReconciler<E, S>`](super::EmitterReconciler), which owns the
+/// emitter lifecycle and particle integration. The render-object system
+/// only declares attachments; the reconciler handles state.
+#[derive(Clone, Debug)]
+pub struct EmitterPart<E, S> {
+    pub template: E,
+    pub slot: S,
+    /// Transform from the part's local frame to the template's root frame.
+    /// World transform of a declared emitter is
+    /// `world_xform_of_object * local_transform`.
+    pub local_transform: Mat4,
+}
+
+impl<E, S> EmitterPart<E, S> {
+    pub fn new(template: E, slot: S, local_transform: Mat4) -> Self {
+        Self {
+            template,
+            slot,
+            local_transform,
+        }
+    }
+}
+
 /// Static template describing a renderable object. Many sim objects may
 /// reference one template (every oak tree → `tree_oak`); per-instance
 /// variation lives in transforms and slot values.
 ///
 /// Templates are built with [`Self::new`] then chained
-/// [`Self::with_slot`] / [`Self::with_mesh_part`] calls. `M` and `MK`
-/// default to `()` for callers that don't need mesh parts yet.
+/// [`Self::with_slot`] / [`Self::with_mesh_part`] / [`Self::with_emitter_part`]
+/// calls. `M`, `MK`, `E`, `S` default to `()` for callers that don't need
+/// the corresponding part kind yet.
 #[derive(Clone, Debug)]
-pub struct RenderTemplate<M = (), MK = ()> {
+pub struct RenderTemplate<M = (), MK = (), E = (), S = ()> {
     /// Human-readable name. Used in panics, logs, and tracing.
     pub label: String,
     slots: Vec<SlotDescriptor>,
     mesh_parts: Vec<MeshPart<M, MK>>,
+    emitter_parts: Vec<EmitterPart<E, S>>,
 }
 
-impl<M, MK> RenderTemplate<M, MK> {
+impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             slots: Vec::new(),
             mesh_parts: Vec::new(),
+            emitter_parts: Vec::new(),
         }
     }
 
@@ -161,6 +195,16 @@ impl<M, MK> RenderTemplate<M, MK> {
         self
     }
 
+    /// Add an [`EmitterPart`] to the template. The View walks emitter parts
+    /// during extraction and declares each on an
+    /// [`EmitterReconciler<E, S>`](super::EmitterReconciler), composing the
+    /// part's local transform with the sim object's world transform.
+    pub fn with_emitter_part(mut self, template: E, slot: S, local_transform: Mat4) -> Self {
+        self.emitter_parts
+            .push(EmitterPart::new(template, slot, local_transform));
+        self
+    }
+
     /// All slots in declaration order.
     pub fn slots(&self) -> &[SlotDescriptor] {
         &self.slots
@@ -175,23 +219,28 @@ impl<M, MK> RenderTemplate<M, MK> {
     pub fn mesh_parts(&self) -> &[MeshPart<M, MK>] {
         &self.mesh_parts
     }
+
+    /// All emitter parts in declaration order.
+    pub fn emitter_parts(&self) -> &[EmitterPart<E, S>] {
+        &self.emitter_parts
+    }
 }
 
 /// Registry of [`RenderTemplate`]s keyed by a user-chosen id type `R`.
 ///
 /// Generic over `R` so callers pick the id flavour: a small enum for
 /// hand-authored content (`enum RenderId { TreeOak, Campfire }`) or a
-/// numeric/asset handle later when templates are data-driven. `M` and `MK`
-/// flow through to [`RenderTemplate`]; they default to `()` for callers
-/// that haven't yet committed to concrete mesh/material types.
-pub struct RenderRegistry<R, M = (), MK = ()>
+/// numeric/asset handle later when templates are data-driven. `M`, `MK`,
+/// `E`, `S` flow through to [`RenderTemplate`]; they default to `()` for
+/// callers that haven't yet committed to the corresponding part kind.
+pub struct RenderRegistry<R, M = (), MK = (), E = (), S = ()>
 where
     R: Copy + Eq + Hash,
 {
-    templates: HashMap<R, RenderTemplate<M, MK>>,
+    templates: HashMap<R, RenderTemplate<M, MK, E, S>>,
 }
 
-impl<R, M, MK> RenderRegistry<R, M, MK>
+impl<R, M, MK, E, S> RenderRegistry<R, M, MK, E, S>
 where
     R: Copy + Eq + Hash,
 {
@@ -204,12 +253,12 @@ where
     /// Register `template` under `id`. Replaces any existing template
     /// with the same id; live instances built from the old template
     /// are unaffected until they are rebuilt (a later-step concern).
-    pub fn register(&mut self, id: R, template: RenderTemplate<M, MK>) {
+    pub fn register(&mut self, id: R, template: RenderTemplate<M, MK, E, S>) {
         self.templates.insert(id, template);
     }
 
     /// Look up the template registered under `id`, if any.
-    pub fn get(&self, id: R) -> Option<&RenderTemplate<M, MK>> {
+    pub fn get(&self, id: R) -> Option<&RenderTemplate<M, MK, E, S>> {
         self.templates.get(&id)
     }
 
@@ -224,7 +273,7 @@ where
     }
 }
 
-impl<R, M, MK> Default for RenderRegistry<R, M, MK>
+impl<R, M, MK, E, S> Default for RenderRegistry<R, M, MK, E, S>
 where
     R: Copy + Eq + Hash,
 {
@@ -349,7 +398,7 @@ mod tests {
 
     #[test]
     fn with_mesh_part_preserves_declaration_order() {
-        let t = RenderTemplate::new("campfire")
+        let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("campfire")
             .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY)
             .with_mesh_part(
                 TestMesh::Plane,
@@ -369,7 +418,7 @@ mod tests {
 
     #[test]
     fn template_carries_slots_and_parts_together() {
-        let t = RenderTemplate::new("torch")
+        let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("torch")
             .with_slot("intensity", SlotKind::F32)
             .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY);
 
@@ -399,5 +448,60 @@ mod tests {
         let template = reg.get(RId::Campfire).expect("registered");
         assert_eq!(template.label, "campfire");
         assert_eq!(template.mesh_parts().len(), 2);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum TestEmitter {
+        Flame,
+        Smoke,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum TestEmitterSlot {
+        Main,
+        Secondary,
+    }
+
+    #[test]
+    fn template_has_no_emitter_parts_by_default() {
+        let t: RenderTemplate = RenderTemplate::new("bare");
+        assert!(t.emitter_parts().is_empty());
+    }
+
+    #[test]
+    fn with_emitter_part_preserves_declaration_order() {
+        let t: RenderTemplate<(), (), TestEmitter, TestEmitterSlot> =
+            RenderTemplate::new("campfire")
+                .with_emitter_part(
+                    TestEmitter::Flame,
+                    TestEmitterSlot::Main,
+                    Mat4::from_translation(Vec3::new(0.0, 0.45, 0.0)),
+                )
+                .with_emitter_part(
+                    TestEmitter::Smoke,
+                    TestEmitterSlot::Secondary,
+                    Mat4::from_translation(Vec3::new(0.0, 0.85, 0.0)),
+                );
+
+        let parts = t.emitter_parts();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].template, TestEmitter::Flame);
+        assert_eq!(parts[0].slot, TestEmitterSlot::Main);
+        assert_eq!(parts[1].template, TestEmitter::Smoke);
+        assert_eq!(parts[1].slot, TestEmitterSlot::Secondary);
+        assert_eq!(parts[1].local_transform.col(3).truncate().y, 0.85);
+    }
+
+    #[test]
+    fn template_can_carry_all_part_kinds() {
+        let t: RenderTemplate<TestMesh, TestMat, TestEmitter, TestEmitterSlot> =
+            RenderTemplate::new("rich")
+                .with_slot("intensity", SlotKind::F32)
+                .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY)
+                .with_emitter_part(TestEmitter::Flame, TestEmitterSlot::Main, Mat4::IDENTITY);
+
+        assert_eq!(t.slots().len(), 1);
+        assert_eq!(t.mesh_parts().len(), 1);
+        assert_eq!(t.emitter_parts().len(), 1);
     }
 }
