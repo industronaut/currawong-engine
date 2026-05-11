@@ -23,8 +23,9 @@ use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Aabb, Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, Frustum,
     InstanceBuckets, MaterialInstanceRegistry, ParticleLifecycle, RenderInstances, RenderRegistry,
-    RenderTemplate, Renderer, Simulation, UnlitColoredAttribs, UnlitColoredInstance,
-    UnlitColoredMaterial, View, WorldObject, WorldObjectRef, Zone, Zones, wgpu, winit,
+    RenderTemplate, Renderer, Simulation, SlotKind, SlotValue, SlotValues, UnlitColoredAttribs,
+    UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject, WorldObjectRef, Zone, Zones,
+    wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -89,6 +90,27 @@ struct Game {
     zones: Zones,
 }
 
+/// Per-object tints used to demonstrate slot-driven per-instance
+/// variation. Picked along the rainbow so each campfire is visually
+/// distinct, and so it's obvious that one template can yield many
+/// differently-coloured live instances.
+const CAMPFIRE_TINTS: &[(f32, Vec4)] = &[
+    (-9.0, Vec4::new(1.00, 0.55, 0.20, 1.0)), // amber
+    (-6.0, Vec4::new(0.45, 0.85, 0.55, 1.0)), // moss
+    (-3.0, Vec4::new(0.40, 0.65, 1.00, 1.0)), // ice
+    (0.0, Vec4::new(1.00, 1.00, 1.00, 1.0)),  // neutral
+    (3.0, Vec4::new(1.00, 0.40, 0.40, 1.0)),  // ember
+    (6.0, Vec4::new(0.85, 0.55, 1.00, 1.0)),  // violet
+    (9.0, Vec4::new(1.00, 0.95, 0.45, 1.0)),  // gold
+];
+
+const STAKE_TINTS: &[(f32, Vec4)] = &[
+    (-8.0, Vec4::new(0.95, 0.65, 0.30, 1.0)),
+    (-4.0, Vec4::new(0.40, 0.95, 0.60, 1.0)),
+    (4.0, Vec4::new(0.40, 0.70, 1.00, 1.0)),
+    (8.0, Vec4::new(1.00, 0.50, 0.85, 1.0)),
+];
+
 impl Game {
     fn new() -> Self {
         let mut zones = Zones::new();
@@ -97,21 +119,26 @@ impl Game {
 
         // Campfires strung along Z, wider than the camera frustum at
         // radius 7.5 — guarantees the orbit shows some of them entering
-        // and leaving view.
-        for z in [-9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0] {
+        // and leaving view. Each carries a SlotValues component holding a
+        // "tint" slot the View routes into per-instance attribs.
+        for &(z, tint) in CAMPFIRE_TINTS {
             let id = zone.insert(WorldObject {
                 position: Vec3::new(0.0, 0.0, z),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(id, RenderId::Campfire);
+            zone.components_mut()
+                .insert(id, SlotValues::new().with("tint", SlotValue::Color(tint)));
         }
         // Stakes strung along X, perpendicular to the campfires.
-        for x in [-8.0, -4.0, 4.0, 8.0] {
+        for &(x, tint) in STAKE_TINTS {
             let id = zone.insert(WorldObject {
                 position: Vec3::new(x, 0.0, 0.0),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(id, RenderId::Stake);
+            zone.components_mut()
+                .insert(id, SlotValues::new().with("tint", SlotValue::Color(tint)));
         }
         Self { zones }
     }
@@ -282,6 +309,10 @@ impl View for Demo {
         templates.register(
             RenderId::Campfire,
             RenderTemplate::new("campfire")
+                // Schema: this template accepts a per-instance Color tint
+                // applied to its Wood parts. Sim attaches a matching
+                // SlotValues; the render path looks it up by name.
+                .with_slot("tint", SlotKind::Color)
                 // Log: stretched along X, sitting just above the ground.
                 .with_mesh_part(
                     MeshHandle::Cube,
@@ -325,6 +356,7 @@ impl View for Demo {
         templates.register(
             RenderId::Stake,
             RenderTemplate::new("stake")
+                .with_slot("tint", SlotKind::Color)
                 .with_mesh_part(
                     MeshHandle::Cube,
                     MatKey::Wood,
@@ -520,20 +552,44 @@ impl View for Demo {
         // bucket pushes plus emitter-part reconciler declarations. Emitter
         // declarations only fire for alive instances, so a culled
         // campfire's flame and smoke fade out via Linger semantics.
+        //
+        // For each alive instance we look up its per-object SlotValues
+        // back through sim components. The "tint" slot drives the
+        // per-instance attrib tint for *Wood* parts only — the stone base
+        // stays neutral, so the campfire's coloured-log identity reads
+        // clearly without staining the rock.
         self.buckets.begin_frame();
         self.emitters.begin_frame();
         for (parent, rid, instance) in self.live_instances.iter() {
             let Some(template) = self.templates.get(rid) else {
                 continue;
             };
+            let zone = sim
+                .zones
+                .get(parent.zone)
+                .expect("zone alive while instance lives");
+            let tint = zone
+                .components()
+                .get::<SlotValues>(parent.id)
+                .and_then(|sv| sv.get("tint"))
+                .and_then(|v| match v {
+                    SlotValue::Color(c) => Some(c),
+                    _ => None,
+                })
+                .unwrap_or(Vec4::ONE);
+
             for part in template.mesh_parts() {
                 let world = instance.world_xform * part.local_transform;
+                let part_tint = match part.material {
+                    MatKey::Wood => tint,
+                    MatKey::Stone => Vec4::ONE,
+                };
                 self.buckets.push(
                     BucketKey {
                         mesh: part.mesh,
                         material: part.material,
                     },
-                    UnlitColoredAttribs::new(world, Vec4::ONE),
+                    UnlitColoredAttribs::new(world, part_tint),
                 );
             }
             for part in template.emitter_parts() {

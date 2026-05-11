@@ -40,6 +40,7 @@ pub use material::{
 pub use render_instances::{RenderInstance, RenderInstances};
 pub use render_object::{
     EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotValue,
+    SlotValues,
 };
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};

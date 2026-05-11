@@ -89,6 +89,66 @@ pub struct SlotDescriptor {
     pub kind: SlotKind,
 }
 
+/// Named [`SlotValue`]s for one render instance. The sim provides these
+/// per object (typically as a component on the `WorldObject`); the View
+/// reads them at render time to drive per-instance attribs, material
+/// instance selection, visual-script state, and so on. Templates declare
+/// the *schema* — names and kinds — via [`RenderTemplate::with_slot`];
+/// `SlotValues` is the *data* matching that schema.
+///
+/// Storage is a small `Vec` of `(name, value)` pairs — slot counts are
+/// expected to be low (single digits per template), so linear scans win
+/// over hash lookups. Slot-kind validation against a template's schema is
+/// deferred until templates start *consuming* slots structurally; today's
+/// consumers (example code) match by name and `match` on the
+/// [`SlotValue`] variant directly.
+#[derive(Clone, Debug, Default)]
+pub struct SlotValues {
+    values: Vec<(String, SlotValue)>,
+}
+
+impl SlotValues {
+    pub fn new() -> Self {
+        Self { values: Vec::new() }
+    }
+
+    /// Set the value for `name`, replacing any existing entry. Returns
+    /// `self` for chained builder use at sim-init time.
+    pub fn with(mut self, name: impl Into<String>, value: SlotValue) -> Self {
+        self.set(name, value);
+        self
+    }
+
+    /// In-place set / overwrite.
+    pub fn set(&mut self, name: impl Into<String>, value: SlotValue) {
+        let name = name.into();
+        if let Some(slot) = self.values.iter_mut().find(|(n, _)| *n == name) {
+            slot.1 = value;
+        } else {
+            self.values.push((name, value));
+        }
+    }
+
+    /// Look up a value by name. Returns the `SlotValue` by value (it's
+    /// `Copy`); the caller `match`es to extract the typed inner.
+    pub fn get(&self, name: &str) -> Option<SlotValue> {
+        self.values.iter().find(|(n, _)| n == name).map(|(_, v)| *v)
+    }
+
+    /// `(name, value)` iterator, in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, SlotValue)> + '_ {
+        self.values.iter().map(|(n, v)| (n.as_str(), *v))
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
 /// One drawable piece of a [`RenderTemplate`]: a mesh handle, the material
 /// key it draws with, and a transform relative to the template root.
 ///
@@ -538,5 +598,49 @@ mod tests {
         let bounds = Aabb::new(Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 2.5, 1.0));
         let t: RenderTemplate = RenderTemplate::new("campfire").with_visual_bounds(bounds);
         assert_eq!(t.visual_bounds(), Some(bounds));
+    }
+
+    #[test]
+    fn slot_values_empty_by_default() {
+        let sv = SlotValues::new();
+        assert!(sv.is_empty());
+        assert_eq!(sv.len(), 0);
+        assert!(sv.get("anything").is_none());
+    }
+
+    #[test]
+    fn slot_values_with_and_get() {
+        let sv = SlotValues::new()
+            .with("intensity", SlotValue::F32(0.7))
+            .with("tint", SlotValue::Color(Vec4::new(1.0, 0.5, 0.2, 1.0)));
+
+        assert_eq!(sv.len(), 2);
+        assert_eq!(sv.get("intensity"), Some(SlotValue::F32(0.7)));
+        assert_eq!(
+            sv.get("tint"),
+            Some(SlotValue::Color(Vec4::new(1.0, 0.5, 0.2, 1.0)))
+        );
+        assert!(sv.get("missing").is_none());
+    }
+
+    #[test]
+    fn slot_values_set_overwrites() {
+        let mut sv = SlotValues::new();
+        sv.set("intensity", SlotValue::F32(0.5));
+        sv.set("intensity", SlotValue::F32(0.9));
+
+        assert_eq!(sv.len(), 1, "set must overwrite, not append");
+        assert_eq!(sv.get("intensity"), Some(SlotValue::F32(0.9)));
+    }
+
+    #[test]
+    fn slot_values_iter_preserves_insertion_order() {
+        let sv = SlotValues::new()
+            .with("a", SlotValue::I32(1))
+            .with("b", SlotValue::I32(2))
+            .with("c", SlotValue::I32(3));
+
+        let names: Vec<&str> = sv.iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
     }
 }
