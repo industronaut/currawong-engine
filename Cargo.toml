@@ -41,4 +41,8 @@ name = "campfire"
 required-features = ["render"]
 
 [[example]]
+name = "materials"
+required-features = ["render"]
+
+[[example]]
 name = "headless"
