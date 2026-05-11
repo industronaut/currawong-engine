@@ -11,11 +11,18 @@
 //! No edits to the render walk itself — the v1 ergonomics goal from #8.
 //!
 //! Controls: `0`/`P` pause, `1`/`2`/`3` set sim speed, `Esc` to quit.
+//!
+//! Build with `--features egui` for a debug overlay: FPS, a rolling
+//! frametime strip chart with a 60 Hz reference line, and sim-clock controls.
 
 use std::collections::HashMap;
+#[cfg(feature = "egui")]
+use std::collections::VecDeque;
 use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "egui")]
+use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, InstanceBuckets,
@@ -136,6 +143,8 @@ impl Rng {
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MAX_INSTANCES: u32 = 512;
+#[cfg(feature = "egui")]
+const FRAMETIME_HISTORY: usize = 240; // ~4 s at 60 fps.
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum MeshHandle {
@@ -164,6 +173,11 @@ struct Demo {
     terrain_solid: TerrainMaterialInstance,
     terrain: TerrainRenderer,
     started: Instant,
+    last_draws: u32,
+    #[cfg(feature = "egui")]
+    last_frame: Instant,
+    #[cfg(feature = "egui")]
+    frame_samples: VecDeque<f32>,
 }
 
 struct GpuMesh {
@@ -237,6 +251,11 @@ impl View for Demo {
             terrain_solid,
             terrain: TerrainRenderer::new(),
             started: Instant::now(),
+            last_draws: 0,
+            #[cfg(feature = "egui")]
+            last_frame: Instant::now(),
+            #[cfg(feature = "egui")]
+            frame_samples: VecDeque::with_capacity(FRAMETIME_HISTORY),
         }
     }
 
@@ -302,6 +321,9 @@ impl View for Demo {
         pass.set_pipeline(self.terrain_material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         self.terrain.draw_solid(pass, &self.terrain_solid);
+        // Every chunk in this example has a solid mesh (all tiles set their
+        // floor_height), so chunk_count is the exact terrain draw total.
+        let mut draws = self.terrain.chunk_count() as u32;
 
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
@@ -323,7 +345,9 @@ impl View for Demo {
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint16);
             pass.draw_indexed(0..mesh.index_count, 0, 0..count);
+            draws += 1;
         }
+        self.last_draws = draws;
     }
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
@@ -346,12 +370,131 @@ impl View for Demo {
         }
     }
 
+    #[cfg(feature = "egui")]
+    fn ui(&mut self, _: &mut Game, ctx: &mut EngineCtx, egui_ctx: &egui::Context) {
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32();
+        self.last_frame = now;
+        if self.frame_samples.len() == FRAMETIME_HISTORY {
+            self.frame_samples.pop_front();
+        }
+        self.frame_samples.push_back(dt);
+        let n = self.frame_samples.len().max(1);
+        let avg = self.frame_samples.iter().sum::<f32>() / n as f32;
+        let max = self.frame_samples.iter().copied().fold(0.0f32, f32::max);
+        let fps = if avg > 0.0 { 1.0 / avg } else { 0.0 };
+
+        egui::Window::new("debug")
+            .default_pos([12.0, 12.0])
+            .resizable(false)
+            .show(egui_ctx, |ui| {
+                ui.label(format!(
+                    "fps: {fps:5.1}   avg {:.2} ms   max {:.2} ms",
+                    avg * 1000.0,
+                    max * 1000.0
+                ));
+                draw_frametime_chart(ui, &self.frame_samples, max);
+                ui.label(format!("draws: {}", self.last_draws));
+                ui.separator();
+                ui.label(format!("sim ticks: {}", ctx.clock.total_ticks()));
+                let mut speed = ctx.clock.speed();
+                ui.horizontal(|ui| {
+                    let label = if ctx.clock.is_paused() {
+                        "play"
+                    } else {
+                        "pause"
+                    };
+                    if ui.button(label).clicked() {
+                        let new = if ctx.clock.is_paused() { 1.0 } else { 0.0 };
+                        ctx.clock.set_speed(new);
+                        speed = new;
+                    }
+                    ui.add(egui::Slider::new(&mut speed, 0.0..=4.0).text("speed"));
+                });
+                if (speed - ctx.clock.speed()).abs() > f32::EPSILON {
+                    ctx.clock.set_speed(speed);
+                }
+            });
+    }
+
     fn title() -> &'static str {
         "currawong — trees demo"
     }
     fn depth_format() -> Option<wgpu::TextureFormat> {
         Some(DEPTH_FORMAT)
     }
+}
+
+/// Rolling frametime strip chart drawn straight into the egui window via
+/// `Painter` — no extra deps. The 16.6 ms (60 Hz) line is the budget;
+/// samples poking above it are dropped frames.
+#[cfg(feature = "egui")]
+fn draw_frametime_chart(ui: &mut egui::Ui, samples: &VecDeque<f32>, max_sample: f32) {
+    const REF_DT: f32 = 1.0 / 60.0;
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 60.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(22));
+
+    // Y scale: 1.2× the higher of the worst sample and the 60 Hz budget,
+    // so the reference line is always inside the chart.
+    let y_max = (max_sample.max(REF_DT) * 1.2).max(1e-4);
+    let y_for = |dt: f32| {
+        let n = (dt / y_max).clamp(0.0, 1.0);
+        rect.bottom() - n * rect.height()
+    };
+
+    let y_ref = y_for(REF_DT);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), y_ref),
+            egui::pos2(rect.right(), y_ref),
+        ],
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 130, 80)),
+    );
+
+    if samples.len() >= 2 {
+        let last_idx = (samples.len() - 1) as f32;
+        let pts: Vec<egui::Pos2> = samples
+            .iter()
+            .enumerate()
+            .map(|(i, dt)| {
+                let x = rect.left() + (i as f32 / last_idx) * rect.width();
+                egui::pos2(x, y_for(*dt))
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            pts,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(210, 220, 240)),
+        ));
+    }
+
+    // Labels sit in low-traffic regions of the chart so the trace doesn't run
+    // through them: y-scale bounds in the corners, "60 Hz" just *below* the
+    // reference line on the left (samples above the line are spikes, samples
+    // below are rare on vsync — so the under-line area stays clear).
+    let label_font = egui::FontId::monospace(9.0);
+    painter.text(
+        rect.left_top() + egui::vec2(3.0, 1.0),
+        egui::Align2::LEFT_TOP,
+        format!("{:.1} ms", y_max * 1000.0),
+        label_font.clone(),
+        egui::Color32::from_gray(210),
+    );
+    painter.text(
+        rect.left_bottom() + egui::vec2(3.0, -1.0),
+        egui::Align2::LEFT_BOTTOM,
+        "0 ms",
+        label_font.clone(),
+        egui::Color32::from_gray(140),
+    );
+    painter.text(
+        egui::pos2(rect.left() + 3.0, y_ref + 1.0),
+        egui::Align2::LEFT_TOP,
+        "60 Hz",
+        label_font,
+        egui::Color32::from_rgb(150, 200, 150),
+    );
 }
 
 /// Slot-extraction closure for one mesh part of one tree. Owns the
