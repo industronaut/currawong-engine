@@ -68,16 +68,16 @@ impl Game {
             }
         }
 
-        // 3×3 pool of water in the -X -Z corner: floor dropped to -1, full
-        // depth water sits the surface back at y=0 (flush with surrounding
-        // ground).
+        // 3×3 pool of water in the -X -Z corner: floor dropped to -10 (a
+        // deep pit), filled with 10 steps of water so the surface sits flush
+        // with the surrounding ground at y=0.
         for ty in -6..-3 {
             for tx in -6..-3 {
                 let tile = terrain.tile_mut(TileCoord::new(tx, ty));
-                tile.floor_height = -1;
+                tile.floor_height = -10;
                 tile.liquid = Some(Liquid {
                     kind: WATER,
-                    depth: 255,
+                    depth: 10,
                 });
             }
         }

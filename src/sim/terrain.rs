@@ -46,11 +46,18 @@ pub type ChunkCoord = IVec2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LiquidId(pub u32);
 
-/// A liquid occupying part or all of a tile's vertical extent.
+/// A liquid sitting on top of a tile's floor.
 ///
-/// `depth` is measured in 1/255ths of one tile-height, so `255` is a tile
-/// fully filled and `1` is a film. The visible surface height is
-/// `floor_height + depth as f32 / 255.0`.
+/// `depth` is measured in `floor_height` steps — the same vertical unit the
+/// terrain itself is built in. `depth: 1` is one step's worth of liquid;
+/// `depth: 10` fills a 10-step pit to the brim. Visible surface height is
+/// `(floor_height + depth) * height_unit`, where `height_unit` is the
+/// mesher's setting (not part of sim state).
+///
+/// Single-layer only — a tile carries one liquid kind, filled to an integer
+/// number of steps. Multi-layer (oil-on-water) and sub-step precision are
+/// deferred; sim games rarely need either, and either can be added later by
+/// growing this encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Liquid {
     pub kind: LiquidId,

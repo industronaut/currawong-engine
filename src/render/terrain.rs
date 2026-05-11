@@ -252,7 +252,7 @@ impl TerrainMesher for FlatTopsMesher {
                 }
 
                 if let Some(liq) = tile.liquid {
-                    let surface = self.world_h(h) + (liq.depth as f32 / 255.0) * self.height_unit;
+                    let surface = self.world_h(h + liq.depth as i32);
                     let bucket = out.liquids.entry(liq.kind).or_default();
                     self.emit_liquid_quad(bucket, tx, ty, surface);
                 }
@@ -369,22 +369,27 @@ mod tests {
     }
 
     #[test]
-    fn liquid_surface_sits_above_floor_by_depth() {
+    fn liquid_surface_is_floor_plus_depth_steps() {
+        // The canonical "pit filled to the brim" case: a 10-step pit (floor
+        // at -10) with `depth: 10` brings the surface back to the
+        // surrounding ground level (y=0 at height_unit=1).
         let mut t = Terrain::new();
         allocate_chunk(&mut t, ChunkCoord::ZERO);
         let water = LiquidId(1);
         let tile = t.tile_mut(TileCoord::new(0, 0));
-        tile.floor_height = 4;
+        tile.floor_height = -10;
         tile.liquid = Some(Liquid {
             kind: water,
-            depth: 255,
+            depth: 10,
         });
         let m = FlatTopsMesher::new().mesh_chunk(&t, ChunkCoord::ZERO);
         let bucket = m.liquids.get(&water).unwrap();
-        let ys: Vec<f32> = bucket.vertices.iter().map(|v| v.pos[1]).collect();
-        // floor_height 4 + depth-fraction 1.0 = world Y 5.0 (height_unit = 1).
-        for y in ys {
-            assert!((y - 5.0).abs() < 1e-6, "expected y=5.0, got {y}");
+        for v in &bucket.vertices {
+            assert!(
+                (v.pos[1] - 0.0).abs() < 1e-6,
+                "expected y=0.0, got {}",
+                v.pos[1]
+            );
         }
     }
 }
