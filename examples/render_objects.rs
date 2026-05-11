@@ -8,7 +8,7 @@
 //! - `Stake` — single tall mesh, tight visual AABB.
 //!
 //! The scene is intentionally wider than the camera frustum: a row of
-//! campfires along Z and a row of stakes along X. As the camera orbits
+//! campfires along Y and a row of stakes along X. As the camera orbits
 //! the origin, different objects enter and leave view; the
 //! `RenderInstances` reconciler keeps each instance alive for 30 frames
 //! after it leaves the frustum (the hysteresis window) so grazing-angle
@@ -117,13 +117,13 @@ impl Game {
         let zid = zones.insert(Zone::new());
         let zone = zones.get_mut(zid).expect("just inserted");
 
-        // Campfires strung along Z, wider than the camera frustum at
+        // Campfires strung along Y, wider than the camera frustum at
         // radius 7.5 — guarantees the orbit shows some of them entering
         // and leaving view. Each carries a SlotValues component holding a
         // "tint" slot the View routes into per-instance attribs.
-        for &(z, tint) in CAMPFIRE_TINTS {
+        for &(y, tint) in CAMPFIRE_TINTS {
             let id = zone.insert(WorldObject {
-                position: Vec3::new(0.0, 0.0, z),
+                position: Vec3::new(0.0, y, 0.0),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(id, RenderId::Campfire);
@@ -320,7 +320,7 @@ impl View for Demo {
                     Mat4::from_scale_rotation_translation(
                         Vec3::new(1.4, 0.35, 0.35),
                         Quat::IDENTITY,
-                        Vec3::new(0.0, 0.4, 0.0),
+                        Vec3::new(0.0, 0.0, 0.4),
                     ),
                 )
                 // Base: flat slab beneath the log.
@@ -328,7 +328,7 @@ impl View for Demo {
                     MeshHandle::Cube,
                     MatKey::Stone,
                     Mat4::from_scale_rotation_translation(
-                        Vec3::new(1.8, 0.18, 1.0),
+                        Vec3::new(1.8, 1.0, 0.18),
                         Quat::IDENTITY,
                         Vec3::new(0.0, 0.0, 0.0),
                     ),
@@ -337,20 +337,20 @@ impl View for Demo {
                 .with_emitter_part(
                     EmitterId::Flame,
                     EmitterSlot::Flame,
-                    Mat4::from_translation(Vec3::new(0.0, 0.65, 0.0)),
+                    Mat4::from_translation(Vec3::new(0.0, 0.0, 0.65)),
                 )
                 // Smoke a little higher, drifts up.
                 .with_emitter_part(
                     EmitterId::Smoke,
                     EmitterSlot::Smoke,
-                    Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)),
+                    Mat4::from_translation(Vec3::new(0.0, 0.0, 1.0)),
                 )
                 // Visual AABB encloses log + base + the smoke column's
                 // approximate vertical reach (~2.5 m at 0.45 m/s × 2.5 s
                 // lifetime, plus headroom for the cone spread).
                 .with_visual_bounds(Aabb::new(
-                    Vec3::new(-0.95, -0.10, -0.55),
-                    Vec3::new(0.95, 3.20, 0.55),
+                    Vec3::new(-0.95, -0.55, -0.10),
+                    Vec3::new(0.95, 0.55, 3.20),
                 )),
         );
         templates.register(
@@ -361,15 +361,15 @@ impl View for Demo {
                     MeshHandle::Cube,
                     MatKey::Wood,
                     Mat4::from_scale_rotation_translation(
-                        Vec3::new(0.25, 1.6, 0.25),
+                        Vec3::new(0.25, 0.25, 1.6),
                         Quat::IDENTITY,
-                        Vec3::new(0.0, 0.8, 0.0),
+                        Vec3::new(0.0, 0.0, 0.8),
                     ),
                 )
                 // Tight AABB: just the column, no emitter reach.
                 .with_visual_bounds(Aabb::new(
-                    Vec3::new(-0.15, 0.0, -0.15),
-                    Vec3::new(0.15, 1.65, 0.15),
+                    Vec3::new(-0.15, -0.15, 0.0),
+                    Vec3::new(0.15, 0.15, 1.65),
                 )),
         );
 
@@ -431,7 +431,7 @@ impl View for Demo {
                 particle_lifetime: 0.7,
                 initial_speed: 1.4,
                 speed_jitter: 0.5,
-                direction: Vec3::Y,
+                direction: Vec3::Z,
                 cone_half_angle: 0.45,
                 max_particles: MAX_PARTICLES_PER_TEMPLATE,
                 on_parent_lost: ParticleLifecycle::Linger,
@@ -444,7 +444,7 @@ impl View for Demo {
                 particle_lifetime: 2.5,
                 initial_speed: 0.45,
                 speed_jitter: 0.15,
-                direction: Vec3::new(0.05, 1.0, 0.0).normalize(),
+                direction: Vec3::new(0.05, 0.0, 1.0).normalize(),
                 cone_half_angle: 0.55,
                 max_particles: MAX_PARTICLES_PER_TEMPLATE,
                 on_parent_lost: ParticleLifecycle::Linger,
@@ -513,7 +513,7 @@ impl View for Demo {
         let t = self.started.elapsed().as_secs_f32();
         let radius = 7.5;
         let angle = t * 0.35;
-        self.camera.position = Vec3::new(angle.sin() * radius, 2.5, angle.cos() * radius);
+        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 2.5);
         self.camera.target = Vec3::ZERO;
         self.camera_binding.write(&renderer.queue, &self.camera);
 

@@ -175,16 +175,16 @@ mod tests {
 
     #[test]
     fn transformed_rotation_grows_aabb() {
-        // A unit cube rotated 45° around Y has a larger XZ AABB than the
+        // A unit cube rotated 45° around Z has a larger XY AABB than the
         // original — the corners stick out further along the rotated diagonals.
         let a = Aabb::cube(0.5);
-        let r = a.transformed(Mat4::from_rotation_y(std::f32::consts::FRAC_PI_4));
-        // Diagonal across X and Z is sqrt(2)/2 ≈ 0.707 — larger than the
+        let r = a.transformed(Mat4::from_rotation_z(std::f32::consts::FRAC_PI_4));
+        // Diagonal across X and Y is sqrt(2)/2 ≈ 0.707 — larger than the
         // original 0.5 half-extent.
         assert!(r.extents().x > 0.7 && r.extents().x < 0.71);
-        assert!(r.extents().z > 0.7 && r.extents().z < 0.71);
-        // Y is unaffected by rotation around Y.
-        assert!((r.extents().y - 0.5).abs() < 1e-4);
+        assert!(r.extents().y > 0.7 && r.extents().y < 0.71);
+        // Z is unaffected by rotation around Z.
+        assert!((r.extents().z - 0.5).abs() < 1e-4);
     }
 
     fn perspective(aspect: f32) -> Mat4 {
@@ -192,45 +192,45 @@ mod tests {
     }
 
     fn look_at(eye: Vec3, target: Vec3) -> Mat4 {
-        Mat4::look_at_rh(eye, target, Vec3::Y)
+        Mat4::look_at_rh(eye, target, Vec3::Z)
     }
 
     #[test]
     fn frustum_accepts_box_at_origin_with_camera_back() {
-        // Camera at (0, 0, 5) looking at origin: a unit cube at origin is
-        // squarely in view.
-        let vp = perspective(1.0) * look_at(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO);
+        // Camera at (0, -5, 0) looking at origin (Z-up): a unit cube at the
+        // origin is squarely in view.
+        let vp = perspective(1.0) * look_at(Vec3::new(0.0, -5.0, 0.0), Vec3::ZERO);
         let f = Frustum::from_view_proj(vp);
         assert!(f.contains_aabb(&Aabb::cube(0.5)));
     }
 
     #[test]
     fn frustum_rejects_box_behind_camera() {
-        // Camera at (0, 0, 5) looking at origin: a cube at z = +20 is
+        // Camera at (0, -5, 0) looking at origin: a cube at y = -20 is
         // behind the camera.
-        let vp = perspective(1.0) * look_at(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO);
+        let vp = perspective(1.0) * look_at(Vec3::new(0.0, -5.0, 0.0), Vec3::ZERO);
         let f = Frustum::from_view_proj(vp);
-        let behind = Aabb::new(Vec3::new(-0.5, -0.5, 19.5), Vec3::new(0.5, 0.5, 20.5));
+        let behind = Aabb::new(Vec3::new(-0.5, -20.5, -0.5), Vec3::new(0.5, -19.5, 0.5));
         assert!(!f.contains_aabb(&behind));
     }
 
     #[test]
     fn frustum_rejects_box_outside_side() {
-        // Camera at origin looking -Z: a cube at (100, 0, -5) is way
+        // Camera at origin looking +Y: a cube at (100, 5, 0) is way
         // outside the side.
-        let vp = perspective(1.0) * look_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+        let vp = perspective(1.0) * look_at(Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0));
         let f = Frustum::from_view_proj(vp);
-        let far_right = Aabb::new(Vec3::new(99.5, -0.5, -5.5), Vec3::new(100.5, 0.5, -4.5));
+        let far_right = Aabb::new(Vec3::new(99.5, 4.5, -0.5), Vec3::new(100.5, 5.5, 0.5));
         assert!(!f.contains_aabb(&far_right));
     }
 
     #[test]
     fn frustum_rejects_box_past_far_plane() {
-        // far = 100; a box at z = -200 (i.e., 200m in front of camera) is
+        // far = 100; a box at y = 200 (i.e., 200m in front of camera) is
         // beyond the far plane.
-        let vp = perspective(1.0) * look_at(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+        let vp = perspective(1.0) * look_at(Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0));
         let f = Frustum::from_view_proj(vp);
-        let too_far = Aabb::new(Vec3::new(-0.5, -0.5, -200.5), Vec3::new(0.5, 0.5, -199.5));
+        let too_far = Aabb::new(Vec3::new(-0.5, 199.5, -0.5), Vec3::new(0.5, 200.5, 0.5));
         assert!(!f.contains_aabb(&too_far));
     }
 }

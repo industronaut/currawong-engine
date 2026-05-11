@@ -1,7 +1,7 @@
 //! Tile-grid terrain with flat tops, cliff walls, and a pool of water.
 //!
-//! Builds a small zone with a multi-step hill in the +X +Z corner and a 3×3
-//! pool of water in the -X -Z corner. The camera orbits on a wall-clock
+//! Builds a small zone with a multi-step hill in the +X +Y corner and a 3×3
+//! pool of water in the -X -Y corner. The camera orbits on a wall-clock
 //! timer (so the view stays alive even at sim speed 0) while the static
 //! terrain re-issues its draw calls each frame.
 //!
@@ -68,9 +68,9 @@ impl Game {
             }
         }
 
-        // 3×3 pool of water in the -X -Z corner: floor dropped to -10 (a
+        // 3×3 pool of water in the -X -Y corner: floor dropped to -10 (a
         // deep pit), filled with 10 steps of water so the surface sits flush
-        // with the surrounding ground at y=0.
+        // with the surrounding ground at z=0.
         for ty in -6..-3 {
             for tx in -6..-3 {
                 let tile = terrain.tile_mut(TileCoord::new(tx, ty));
@@ -164,8 +164,8 @@ impl View for TerrainView {
         let t = self.started.elapsed().as_secs_f32();
         let radius = 18.0;
         let angle = t * 0.25;
-        self.camera.position = Vec3::new(angle.sin() * radius, 12.0, angle.cos() * radius);
-        self.camera.target = Vec3::new(0.0, 0.5, 0.0);
+        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 12.0);
+        self.camera.target = Vec3::new(0.0, 0.0, 0.5);
         self.camera.far = 200.0;
         self.camera_binding.write(&renderer.queue, &self.camera);
 

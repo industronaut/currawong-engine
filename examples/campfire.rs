@@ -142,14 +142,14 @@ fn extract_visuals(
         });
         if fire.lit {
             // Flame at the top of the log.
-            let flame_origin = obj.position + Vec3::new(0.0, 0.45, 0.0);
+            let flame_origin = obj.position + Vec3::new(0.0, 0.0, 0.45);
             push(VisualPart::AttachEmitter {
                 template: EmitterId::Flame,
                 slot: EmitterSlot::Flame,
                 transform: Mat4::from_translation(flame_origin),
             });
             // Smoke a bit higher, drifting up and slightly off-axis.
-            let smoke_origin = obj.position + Vec3::new(0.0, 0.85, 0.0);
+            let smoke_origin = obj.position + Vec3::new(0.0, 0.0, 0.85);
             push(VisualPart::AttachEmitter {
                 template: EmitterId::Smoke,
                 slot: EmitterSlot::Smoke,
@@ -175,17 +175,17 @@ const fn v(p: [f32; 3], c: [f32; 3]) -> Vertex {
 }
 
 // A short cylinder-ish "log" — really just a tall thin rectangular prism for
-// this demo, in dark woody tones.
+// this demo, in dark woody tones. Z-up: rests on z=0, top at z=0.40.
 #[rustfmt::skip]
 const LOG_VERTS: &[Vertex] = &[
-    v([-0.40, 0.00, -0.40], [0.30, 0.18, 0.10]),
-    v([ 0.40, 0.00, -0.40], [0.32, 0.20, 0.12]),
-    v([ 0.40, 0.40, -0.40], [0.40, 0.26, 0.16]),
-    v([-0.40, 0.40, -0.40], [0.38, 0.24, 0.14]),
-    v([-0.40, 0.00,  0.40], [0.30, 0.18, 0.10]),
-    v([ 0.40, 0.00,  0.40], [0.32, 0.20, 0.12]),
-    v([ 0.40, 0.40,  0.40], [0.40, 0.26, 0.16]),
-    v([-0.40, 0.40,  0.40], [0.38, 0.24, 0.14]),
+    v([-0.40, -0.40, 0.00], [0.30, 0.18, 0.10]),
+    v([ 0.40, -0.40, 0.00], [0.32, 0.20, 0.12]),
+    v([ 0.40, -0.40, 0.40], [0.40, 0.26, 0.16]),
+    v([-0.40, -0.40, 0.40], [0.38, 0.24, 0.14]),
+    v([-0.40,  0.40, 0.00], [0.30, 0.18, 0.10]),
+    v([ 0.40,  0.40, 0.00], [0.32, 0.20, 0.12]),
+    v([ 0.40,  0.40, 0.40], [0.40, 0.26, 0.16]),
+    v([-0.40,  0.40, 0.40], [0.38, 0.24, 0.14]),
 ];
 #[rustfmt::skip]
 const LOG_INDICES: &[u16] = &[
@@ -386,7 +386,7 @@ impl CampfireView {
             particle_lifetime: 0.7,
             initial_speed: 1.4,
             speed_jitter: 0.5,
-            direction: Vec3::Y,
+            direction: Vec3::Z,
             cone_half_angle: 0.45,
             max_particles: MAX_PARTICLES_PER_TEMPLATE,
             on_parent_lost: ParticleLifecycle::Linger,
@@ -399,7 +399,7 @@ impl CampfireView {
             particle_lifetime: 2.5,
             initial_speed: 0.45,
             speed_jitter: 0.15,
-            direction: Vec3::new(0.05, 1.0, 0.0).normalize(),
+            direction: Vec3::new(0.05, 0.0, 1.0).normalize(),
             cone_half_angle: 0.55,
             max_particles: MAX_PARTICLES_PER_TEMPLATE,
             on_parent_lost: ParticleLifecycle::Linger,
@@ -534,8 +534,8 @@ impl View for CampfireView {
 
         Self {
             camera: Camera {
-                position: Vec3::new(0.0, 1.6, 4.0),
-                target: Vec3::new(0.0, 0.6, 0.0),
+                position: Vec3::new(0.0, -4.0, 1.6),
+                target: Vec3::new(0.0, 0.0, 0.6),
                 ..Camera::default()
             },
             camera_binding,
@@ -573,8 +573,8 @@ impl View for CampfireView {
         let t = self.started.elapsed().as_secs_f32();
         let radius = 4.5;
         let angle = t * 0.25;
-        self.camera.position = Vec3::new(angle.sin() * radius, 1.8, angle.cos() * radius);
-        self.camera.target = Vec3::new(0.0, 0.6, 0.0);
+        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 1.8);
+        self.camera.target = Vec3::new(0.0, 0.0, 0.6);
 
         self.camera_binding.write(&renderer.queue, &self.camera);
 

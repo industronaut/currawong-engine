@@ -32,9 +32,9 @@ use glam::UVec2;
 
 use crate::sim::{CHUNK_SIZE, ChunkCoord, LiquidId, Terrain, TileCoord};
 
-/// One vertex of a terrain mesh. Position is in zone-local world space (Y-up,
-/// matching the engine's camera convention); colour is linear RGBA in
-/// `[0, 1]`.
+/// One vertex of a terrain mesh. Position is in zone-local world space (Z-up,
+/// matching the engine's camera convention): tile X/Y map to world X/Y,
+/// `floor_height` maps to world Z. Colour is linear RGBA in `[0, 1]`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct TerrainVertex {
@@ -83,9 +83,9 @@ pub trait TerrainMesher {
 /// Liquid surfaces are flat quads at `floor_height + depth`; liquid "side
 /// faces" between tiles of different liquid surface height are deferred.
 pub struct FlatTopsMesher {
-    /// World units per tile (XZ extent of one tile's footprint).
+    /// World units per tile (XY extent of one tile's footprint).
     pub tile_size: f32,
-    /// World units per one integer step of `floor_height`.
+    /// World units per one integer step of `floor_height` (Z extent).
     pub height_unit: f32,
     pub top_color: [f32; 4],
     pub wall_color: [f32; 4],
@@ -107,7 +107,7 @@ impl FlatTopsMesher {
         Self::default()
     }
 
-    fn world_xz(&self, tx: i32, ty: i32) -> (f32, f32) {
+    fn world_xy(&self, tx: i32, ty: i32) -> (f32, f32) {
         (tx as f32 * self.tile_size, ty as f32 * self.tile_size)
     }
 
@@ -125,81 +125,82 @@ impl FlatTopsMesher {
     }
 
     fn emit_top_quad(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32) {
-        let (x0, z0) = self.world_xz(tx, ty);
+        let (x0, y0) = self.world_xy(tx, ty);
         let x1 = x0 + self.tile_size;
-        let z1 = z0 + self.tile_size;
-        let y = self.world_h(h);
+        let y1 = y0 + self.tile_size;
+        let z = self.world_h(h);
         Self::push_quad(
             mesh,
-            [[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]],
+            [[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]],
             self.top_color,
         );
     }
 
     /// Wall on the tile's +x face, descending from `h` to `h_low`.
     fn emit_wall_px(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
-        let (x0, z0) = self.world_xz(tx, ty);
+        let (x0, y0) = self.world_xy(tx, ty);
         let x = x0 + self.tile_size;
-        let z1 = z0 + self.tile_size;
-        let yt = self.world_h(h);
-        let yb = self.world_h(h_low);
+        let y1 = y0 + self.tile_size;
+        let zt = self.world_h(h);
+        let zb = self.world_h(h_low);
         Self::push_quad(
             mesh,
-            [[x, yb, z0], [x, yb, z1], [x, yt, z1], [x, yt, z0]],
+            [[x, y0, zb], [x, y1, zb], [x, y1, zt], [x, y0, zt]],
             self.wall_color,
         );
     }
 
     fn emit_wall_nx(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
-        let (x0, z0) = self.world_xz(tx, ty);
+        let (x0, y0) = self.world_xy(tx, ty);
         let x = x0;
-        let z1 = z0 + self.tile_size;
-        let yt = self.world_h(h);
-        let yb = self.world_h(h_low);
+        let y1 = y0 + self.tile_size;
+        let zt = self.world_h(h);
+        let zb = self.world_h(h_low);
         Self::push_quad(
             mesh,
-            [[x, yb, z1], [x, yb, z0], [x, yt, z0], [x, yt, z1]],
+            [[x, y1, zb], [x, y0, zb], [x, y0, zt], [x, y1, zt]],
             self.wall_color,
         );
     }
 
-    fn emit_wall_pz(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
-        let (x0, z0) = self.world_xz(tx, ty);
+    /// Wall on the tile's +y face, descending from `h` to `h_low`.
+    fn emit_wall_py(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
+        let (x0, y0) = self.world_xy(tx, ty);
         let x1 = x0 + self.tile_size;
-        let z = z0 + self.tile_size;
-        let yt = self.world_h(h);
-        let yb = self.world_h(h_low);
+        let y = y0 + self.tile_size;
+        let zt = self.world_h(h);
+        let zb = self.world_h(h_low);
         Self::push_quad(
             mesh,
-            [[x1, yb, z], [x0, yb, z], [x0, yt, z], [x1, yt, z]],
+            [[x1, y, zb], [x0, y, zb], [x0, y, zt], [x1, y, zt]],
             self.wall_color,
         );
     }
 
-    fn emit_wall_nz(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
-        let (x0, z0) = self.world_xz(tx, ty);
+    fn emit_wall_ny(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
+        let (x0, y0) = self.world_xy(tx, ty);
         let x1 = x0 + self.tile_size;
-        let z = z0;
-        let yt = self.world_h(h);
-        let yb = self.world_h(h_low);
+        let y = y0;
+        let zt = self.world_h(h);
+        let zb = self.world_h(h_low);
         Self::push_quad(
             mesh,
-            [[x0, yb, z], [x1, yb, z], [x1, yt, z], [x0, yt, z]],
+            [[x0, y, zb], [x1, y, zb], [x1, y, zt], [x0, y, zt]],
             self.wall_color,
         );
     }
 
-    fn emit_liquid_quad(&self, mesh: &mut MeshData, tx: i32, ty: i32, surface_y: f32) {
-        let (x0, z0) = self.world_xz(tx, ty);
+    fn emit_liquid_quad(&self, mesh: &mut MeshData, tx: i32, ty: i32, surface_z: f32) {
+        let (x0, y0) = self.world_xy(tx, ty);
         let x1 = x0 + self.tile_size;
-        let z1 = z0 + self.tile_size;
+        let y1 = y0 + self.tile_size;
         Self::push_quad(
             mesh,
             [
-                [x0, surface_y, z0],
-                [x1, surface_y, z0],
-                [x1, surface_y, z1],
-                [x0, surface_y, z1],
+                [x0, y0, surface_z],
+                [x1, y0, surface_z],
+                [x1, y1, surface_z],
+                [x0, y1, surface_z],
             ],
             [1.0, 1.0, 1.0, 1.0],
         );
@@ -238,17 +239,17 @@ impl TerrainMesher for FlatTopsMesher {
                 if h > h_nx {
                     self.emit_wall_nx(&mut out.solid, tx, ty, h, h_nx);
                 }
-                let h_pz = terrain
+                let h_py = terrain
                     .tile_or_default(TileCoord::new(tx, ty + 1))
                     .floor_height;
-                if h > h_pz {
-                    self.emit_wall_pz(&mut out.solid, tx, ty, h, h_pz);
+                if h > h_py {
+                    self.emit_wall_py(&mut out.solid, tx, ty, h, h_py);
                 }
-                let h_nz = terrain
+                let h_ny = terrain
                     .tile_or_default(TileCoord::new(tx, ty - 1))
                     .floor_height;
-                if h > h_nz {
-                    self.emit_wall_nz(&mut out.solid, tx, ty, h, h_nz);
+                if h > h_ny {
+                    self.emit_wall_ny(&mut out.solid, tx, ty, h, h_ny);
                 }
 
                 if let Some(liq) = tile.liquid {
@@ -372,7 +373,7 @@ mod tests {
     fn liquid_surface_is_floor_plus_depth_steps() {
         // The canonical "pit filled to the brim" case: a 10-step pit (floor
         // at -10) with `depth: 10` brings the surface back to the
-        // surrounding ground level (y=0 at height_unit=1).
+        // surrounding ground level (z=0 at height_unit=1).
         let mut t = Terrain::new();
         allocate_chunk(&mut t, ChunkCoord::ZERO);
         let water = LiquidId(1);
@@ -386,9 +387,9 @@ mod tests {
         let bucket = m.liquids.get(&water).unwrap();
         for v in &bucket.vertices {
             assert!(
-                (v.pos[1] - 0.0).abs() < 1e-6,
-                "expected y=0.0, got {}",
-                v.pos[1]
+                (v.pos[2] - 0.0).abs() < 1e-6,
+                "expected z=0.0, got {}",
+                v.pos[2]
             );
         }
     }

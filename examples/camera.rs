@@ -1,4 +1,4 @@
-//! Sim-driven rendering: three WorldObjects bobbing on Y, viewed through an
+//! Sim-driven rendering: three WorldObjects bobbing on Z, viewed through an
 //! orbiting Camera with depth-tested rendering.
 //!
 //! Demonstrates the sim/view extract path: `Game` ticks WorldObjects in its
@@ -39,12 +39,12 @@ impl Game {
         let mut zones = Zones::new();
         let main_zone = zones.insert(Zone::new());
         let zone = zones.get_mut(main_zone).expect("just inserted");
-        // Stagger in both X and Z so the orbiting camera sees their depth
+        // Stagger in both X and Y so the orbiting camera sees their depth
         // ordering swap as it goes around — without depth testing, the wrong
         // triangle would be on top from half the angles.
-        for (i, (x, z)) in [(-2.0, -1.0), (0.0, 0.0), (2.0, 1.0)].iter().enumerate() {
+        for (i, (x, y)) in [(-2.0, -1.0), (0.0, 0.0), (2.0, 1.0)].iter().enumerate() {
             let id = zone.insert(WorldObject {
-                position: Vec3::new(*x, 0.0, *z),
+                position: Vec3::new(*x, *y, 0.0),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(
@@ -73,9 +73,10 @@ impl Simulation for Game {
         let (objects, components) = zone.split_mut();
         for (id, bobber) in components.iter::<Bobber>() {
             if let Some(obj) = objects.get_mut(id) {
-                obj.position.y = (t * 2.0 + bobber.phase).sin() * 0.6;
-                // Spin around local Z so the rotation is visible from the
-                // orbiting camera — different rates per object via phase.
+                obj.position.z = (t * 2.0 + bobber.phase).sin() * 0.6;
+                // Spin around the world up axis (Z) so the rotation is
+                // visible as a yaw from the orbiting camera — different rates
+                // per object via phase.
                 obj.rotation = Quat::from_rotation_z(t * 0.8 + bobber.phase);
             }
         }
@@ -107,10 +108,12 @@ struct VsOut {
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
+    // Z-up local space: triangle stands upright in the XZ plane so the
+    // orbiting camera sees it face-on rather than edge-on.
     var local = array<vec3<f32>, 3>(
-        vec3<f32>( 0.0,  0.4, 0.0),
-        vec3<f32>(-0.4, -0.4, 0.0),
-        vec3<f32>( 0.4, -0.4, 0.0),
+        vec3<f32>( 0.0, 0.0,  0.4),
+        vec3<f32>(-0.4, 0.0, -0.4),
+        vec3<f32>( 0.4, 0.0, -0.4),
     );
     var colours = array<vec3<f32>, 3>(
         vec3<f32>(1.0, 0.25, 0.25),
@@ -237,7 +240,7 @@ impl View for SimDriven {
         let t = self.started.elapsed().as_secs_f32();
         let radius = 5.5;
         let angle = t * 0.4;
-        self.camera.position = Vec3::new(angle.sin() * radius, 2.0, angle.cos() * radius);
+        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 2.0);
 
         // Upload the camera uniform (view-proj + billboard basis; this view's
         // shader only reads view_proj but the engine helper writes both).
