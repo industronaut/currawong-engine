@@ -149,8 +149,14 @@ impl View for TerrainView {
         // is the caller's job (this demo's terrain is static).
         let zone = sim.zones.get(sim.main_zone).expect("main zone");
         if self.terrain.is_empty() {
-            self.terrain
-                .rebuild_all(renderer, zone.terrain(), &FlatTopsMesher::new());
+            // Short height steps so a 1-level cliff is one-tenth of a tile
+            // tall rather than a full cube — closer to the RimWorld / DF
+            // sim-game aesthetic than a Minecraft voxel look.
+            let mesher = FlatTopsMesher {
+                height_unit: 0.1,
+                ..FlatTopsMesher::new()
+            };
+            self.terrain.rebuild_all(renderer, zone.terrain(), &mesher);
         }
 
         // Wall-clock orbit so pausing the sim doesn't freeze the camera —
