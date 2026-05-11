@@ -15,10 +15,19 @@
 //! - Space      — toggle pause.
 //! - `1..=4`    — sim speed: 1×, 4×, 16×, 64× (default 1×).
 //! - Esc        — quit.
+//!
+//! Build with `--features egui` to enable a small debug panel: FPS, sim
+//! clock readout, pause/speed widgets, and a time-of-day slider you can
+//! drag to move the sun directly. Without the feature the example still
+//! runs; it just lacks the overlay.
 
+#[cfg(feature = "egui")]
+use std::collections::VecDeque;
 use std::time::Duration;
 use std::time::Instant;
 
+#[cfg(feature = "egui")]
+use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
@@ -216,6 +225,10 @@ struct TexturedPbr {
     cube_index_count: u32,
     buckets: InstanceBuckets<MaterialId, PbrInstanceAttribs>,
     started: Instant,
+    #[cfg(feature = "egui")]
+    frame_samples: VecDeque<f32>,
+    #[cfg(feature = "egui")]
+    last_frame: Instant,
 }
 
 impl View for TexturedPbr {
@@ -288,6 +301,10 @@ impl View for TexturedPbr {
             cube_index_count: indices.len() as u32,
             buckets,
             started: Instant::now(),
+            #[cfg(feature = "egui")]
+            frame_samples: VecDeque::with_capacity(120),
+            #[cfg(feature = "egui")]
+            last_frame: Instant::now(),
         }
     }
 
@@ -399,6 +416,69 @@ impl View for TexturedPbr {
         }
     }
 
+    #[cfg(feature = "egui")]
+    fn ui(&mut self, sim: &mut Game, ctx: &mut EngineCtx, egui_ctx: &egui::Context) {
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32();
+        self.last_frame = now;
+        if self.frame_samples.len() == 120 {
+            self.frame_samples.pop_front();
+        }
+        self.frame_samples.push_back(dt);
+        let avg_dt = self.frame_samples.iter().sum::<f32>() / self.frame_samples.len() as f32;
+        let fps = if avg_dt > 0.0 { 1.0 / avg_dt } else { 0.0 };
+
+        egui::Window::new("debug")
+            .default_pos([12.0, 12.0])
+            .resizable(false)
+            .show(egui_ctx, |ui| {
+                ui.label(format!("fps: {fps:5.1}  ({:.2} ms)", avg_dt * 1000.0));
+                ui.separator();
+
+                ui.label(format!("sim ticks: {}", ctx.clock.total_ticks()));
+                let mut speed = ctx.clock.speed();
+                ui.horizontal(|ui| {
+                    let label = if ctx.clock.is_paused() {
+                        "play"
+                    } else {
+                        "pause"
+                    };
+                    if ui.button(label).clicked() {
+                        let new = if ctx.clock.is_paused() { 1.0 } else { 0.0 };
+                        ctx.clock.set_speed(new);
+                        speed = new;
+                    }
+                    ui.add(egui::Slider::new(&mut speed, 0.0..=64.0).text("speed"));
+                });
+                if (speed - ctx.clock.speed()).abs() > f32::EPSILON {
+                    ctx.clock.set_speed(speed);
+                }
+                ui.separator();
+
+                ui.label(format!("day: {}", sim.env.day));
+                ui.add(
+                    egui::Slider::new(&mut sim.env.time_of_day, 0.0..=1.0)
+                        .text("time of day")
+                        .custom_formatter(|v, _| format_time_of_day(v as f32)),
+                );
+                let sun = sun_direction_for(sim.env.time_of_day);
+                ui.label(format!(
+                    "sun dir: ({:+.2}, {:+.2}, {:+.2})",
+                    sun.x, sun.y, sun.z
+                ));
+                ui.label(if sun.z > 0.0 {
+                    "above horizon"
+                } else {
+                    "below horizon"
+                });
+                ui.separator();
+
+                if ui.button("quit").clicked() {
+                    ctx.event_loop.exit();
+                }
+            });
+    }
+
     fn title() -> &'static str {
         "currawong — textured PBR cubes under a moving sun"
     }
@@ -418,6 +498,14 @@ impl View for TexturedPbr {
     fn depth_format() -> Option<wgpu::TextureFormat> {
         Some(DEPTH_FORMAT)
     }
+}
+
+#[cfg(feature = "egui")]
+fn format_time_of_day(t: f32) -> String {
+    let total_minutes = (t.rem_euclid(1.0) * 24.0 * 60.0) as i32;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    format!("{hours:02}:{minutes:02}")
 }
 
 fn main() {
