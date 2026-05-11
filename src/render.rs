@@ -23,9 +23,9 @@ mod renderer;
 mod runner;
 mod view;
 
-pub use camera::Camera;
+pub use camera::{Camera, CameraBinding, CameraUniformData};
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
-pub use instance::InstanceBuckets;
+pub use instance::{InstanceBuckets, mat4_instance_attributes};
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};
 pub use view::{EngineCtx, View};

@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3};
 use currawong::{
-    Camera, EngineCtx, Renderer, Simulation, View, WorldObject, Zone, ZoneId, Zones, wgpu, winit,
+    Camera, CameraBinding, EngineCtx, Renderer, Simulation, View, WorldObject, Zone, ZoneId, Zones,
+    mat4_instance_attributes, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -136,9 +137,8 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 struct SimDriven {
     camera: Camera,
+    camera_binding: CameraBinding,
     pipeline: wgpu::RenderPipeline,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
     instance_scratch: Vec<Mat4>,
     started: Instant,
@@ -151,36 +151,7 @@ impl View for SimDriven {
         let device = &renderer.device;
 
         let camera = Camera::default();
-
-        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("camera uniform"),
-            size: std::mem::size_of::<[f32; 16]>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("camera bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera bind group"),
-            layout: &camera_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-        });
+        let camera_binding = CameraBinding::new(device);
 
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instance buffer"),
@@ -196,10 +167,11 @@ impl View for SimDriven {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("camera demo layout"),
-            bind_group_layouts: &[Some(&camera_bgl)],
+            bind_group_layouts: &[Some(camera_binding.layout())],
             ..Default::default()
         });
 
+        let mat4_attrs = mat4_instance_attributes(0);
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("camera demo pipeline"),
             layout: Some(&layout),
@@ -210,29 +182,7 @@ impl View for SimDriven {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: INSTANCE_SIZE,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    // Mat4 as four vec4 columns at consecutive locations.
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 16,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 32,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 48,
-                            shader_location: 3,
-                            format: wgpu::VertexFormat::Float32x4,
-                        },
-                    ],
+                    attributes: &mat4_attrs,
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -260,9 +210,8 @@ impl View for SimDriven {
 
         Self {
             camera,
+            camera_binding,
             pipeline,
-            camera_buffer,
-            camera_bind_group,
             instance_buffer,
             instance_scratch: Vec::with_capacity(MAX_INSTANCES as usize),
             started: Instant::now(),
@@ -290,11 +239,9 @@ impl View for SimDriven {
         let angle = t * 0.4;
         self.camera.position = Vec3::new(angle.sin() * radius, 2.0, angle.cos() * radius);
 
-        // Upload the view-projection matrix.
-        let view_proj = self.camera.view_proj();
-        renderer
-            .queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&view_proj));
+        // Upload the camera uniform (view-proj + billboard basis; this view's
+        // shader only reads view_proj but the engine helper writes both).
+        self.camera_binding.write(&renderer.queue, &self.camera);
 
         // Extract per-object model matrices across all zones.
         self.instance_scratch.clear();
@@ -317,7 +264,7 @@ impl View for SimDriven {
         }
 
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.draw(0..3, 0..count);
     }
