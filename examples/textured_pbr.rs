@@ -3,8 +3,8 @@
 //! sim ticks — the cleanest possible demonstration of sim → view extraction
 //! producing the lighting.
 //!
-//! Five cubes share one albedo texture (a procedural checkerboard) and
-//! differ only in `(metallic, roughness)`:
+//! Five cubes share one albedo texture (loaded from
+//! `assets/checker_albedo.png`) and differ only in `(metallic, roughness)`:
 //!
 //! ```text
 //! left ←-------------------------------------------------→ right
@@ -32,8 +32,8 @@ use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
     PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PosNormalUv, Renderer,
-    SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, View, ViewEnvironment,
-    WorldObject, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, TextureColorSpace, View,
+    ViewEnvironment, WorldObject, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -188,28 +188,6 @@ fn cube_mesh() -> (Vec<PosNormalUv>, Vec<u16>) {
     (verts, indices)
 }
 
-/// Procedural 64×64 RGBA8 checkerboard. Two tones of warm grey so the PBR
-/// lighting reads against a neutral surface.
-fn checkerboard_rgba(width: u32, height: u32, cells: u32) -> Vec<u8> {
-    let cell_w = width / cells;
-    let cell_h = height / cells;
-    let mut out = Vec::with_capacity((width * height * 4) as usize);
-    for y in 0..height {
-        for x in 0..width {
-            let cx = x / cell_w;
-            let cy = y / cell_h;
-            let dark = (cx + cy) & 1 == 0;
-            let (r, g, b) = if dark {
-                (170u8, 165, 158)
-            } else {
-                (220u8, 215, 205)
-            };
-            out.extend_from_slice(&[r, g, b, 255]);
-        }
-    }
-    out
-}
-
 // --- View ---------------------------------------------------------------
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -247,9 +225,12 @@ impl View for TexturedPbr {
         let samplers = SamplerRegistry::new(device);
         let material = PbrMaterial::new(renderer, camera_binding.layout());
 
-        // One albedo texture shared by all five instances.
-        let checker = checkerboard_rgba(64, 64, 8);
-        let albedo = Texture::from_rgba8(renderer, "checkerboard", 64, 64, &checker, true);
+        // One albedo texture shared by all five instances. Resolved
+        // relative to the crate root so the example runs from any cwd.
+        let albedo_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/checker_albedo.png");
+        let albedo = Texture::from_path(renderer, &albedo_path, TextureColorSpace::Srgb)
+            .expect("load assets/checker_albedo.png");
 
         let make = |metallic: f32, roughness: f32| {
             material.create_instance(
