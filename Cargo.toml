@@ -45,4 +45,8 @@ name = "materials"
 required-features = ["render"]
 
 [[example]]
+name = "render_objects"
+required-features = ["render"]
+
+[[example]]
 name = "headless"

@@ -8,16 +8,23 @@
 //!
 //! Templates declare typed **slots** — named parameters with a fixed
 //! [`SlotKind`] — that instances later bind to concrete [`SlotValue`]s.
-//! Mesh hierarchies, material references, and the live-instance side land
-//! in subsequent steps. Re-registering an id silently replaces the previous
-//! template — same idiom as
+//! Templates also carry a list of [`MeshPart`]s, each naming a user-typed
+//! mesh handle `M` and material key `MK` plus a local transform. The
+//! live-instance side (emitter parts, behaviour bindings, slot-driven
+//! parameter routing) lands in later steps. Re-registering an id silently
+//! replaces the previous template — same idiom as
 //! [`EmitterReconciler::register_template`](super::EmitterReconciler::register_template)
 //! and [`InstanceBuckets::register`](super::InstanceBuckets::register).
+//!
+//! `RenderTemplate` and `RenderRegistry` default `M` and `MK` to `()` so
+//! callers that haven't yet committed to concrete mesh/material types (or
+//! that don't yet need parts) can use the simpler form `RenderTemplate` /
+//! `RenderRegistry<R>`.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use glam::{Vec2, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 
 /// Type of a parameter slot on a [`RenderTemplate`]. Each variant pairs with
 /// a [`SlotValue`] of the same name. The set is deliberately closed: adding
@@ -78,25 +85,55 @@ pub struct SlotDescriptor {
     pub kind: SlotKind,
 }
 
+/// One drawable piece of a [`RenderTemplate`]: a mesh handle, the material
+/// key it draws with, and a transform relative to the template root.
+///
+/// `M` is the user's mesh-handle type (commonly a small enum like
+/// `enum MeshId { Cube, Tetra }`); `MK` is the user's material-instance
+/// key (commonly `enum MaterialKey { Wood, Stone }`). The engine doesn't
+/// own meshes or material instances — it stores these handles and the
+/// View resolves them against its own tables when rendering.
+#[derive(Clone, Debug)]
+pub struct MeshPart<M, MK> {
+    pub mesh: M,
+    pub material: MK,
+    /// Transform from the part's local frame to the template's root frame.
+    /// World transform of a drawn instance is
+    /// `world_xform_of_object * local_transform`.
+    pub local_transform: Mat4,
+}
+
+impl<M, MK> MeshPart<M, MK> {
+    pub fn new(mesh: M, material: MK, local_transform: Mat4) -> Self {
+        Self {
+            mesh,
+            material,
+            local_transform,
+        }
+    }
+}
+
 /// Static template describing a renderable object. Many sim objects may
 /// reference one template (every oak tree → `tree_oak`); per-instance
 /// variation lives in transforms and slot values.
 ///
-/// Templates are built with the [`Self::new`] / [`Self::with_slot`] builder
-/// pair. Mesh hierarchy, material references, and visual-behaviour bindings
-/// land in subsequent steps as the system grows.
+/// Templates are built with [`Self::new`] then chained
+/// [`Self::with_slot`] / [`Self::with_mesh_part`] calls. `M` and `MK`
+/// default to `()` for callers that don't need mesh parts yet.
 #[derive(Clone, Debug)]
-pub struct RenderTemplate {
+pub struct RenderTemplate<M = (), MK = ()> {
     /// Human-readable name. Used in panics, logs, and tracing.
     pub label: String,
     slots: Vec<SlotDescriptor>,
+    mesh_parts: Vec<MeshPart<M, MK>>,
 }
 
-impl RenderTemplate {
+impl<M, MK> RenderTemplate<M, MK> {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             slots: Vec::new(),
+            mesh_parts: Vec::new(),
         }
     }
 
@@ -115,6 +152,15 @@ impl RenderTemplate {
         self
     }
 
+    /// Add a [`MeshPart`] to the template. Parts are stored in insertion
+    /// order; the View walks them per drawn instance, composing each part's
+    /// `local_transform` with the sim object's world transform.
+    pub fn with_mesh_part(mut self, mesh: M, material: MK, local_transform: Mat4) -> Self {
+        self.mesh_parts
+            .push(MeshPart::new(mesh, material, local_transform));
+        self
+    }
+
     /// All slots in declaration order.
     pub fn slots(&self) -> &[SlotDescriptor] {
         &self.slots
@@ -124,22 +170,28 @@ impl RenderTemplate {
     pub fn slot(&self, name: &str) -> Option<&SlotDescriptor> {
         self.slots.iter().find(|s| s.name == name)
     }
+
+    /// All mesh parts in declaration order.
+    pub fn mesh_parts(&self) -> &[MeshPart<M, MK>] {
+        &self.mesh_parts
+    }
 }
 
 /// Registry of [`RenderTemplate`]s keyed by a user-chosen id type `R`.
 ///
 /// Generic over `R` so callers pick the id flavour: a small enum for
 /// hand-authored content (`enum RenderId { TreeOak, Campfire }`) or a
-/// numeric/asset handle later when templates are data-driven. The
-/// registry is the same shape either way.
-pub struct RenderRegistry<R>
+/// numeric/asset handle later when templates are data-driven. `M` and `MK`
+/// flow through to [`RenderTemplate`]; they default to `()` for callers
+/// that haven't yet committed to concrete mesh/material types.
+pub struct RenderRegistry<R, M = (), MK = ()>
 where
     R: Copy + Eq + Hash,
 {
-    templates: HashMap<R, RenderTemplate>,
+    templates: HashMap<R, RenderTemplate<M, MK>>,
 }
 
-impl<R> RenderRegistry<R>
+impl<R, M, MK> RenderRegistry<R, M, MK>
 where
     R: Copy + Eq + Hash,
 {
@@ -152,12 +204,12 @@ where
     /// Register `template` under `id`. Replaces any existing template
     /// with the same id; live instances built from the old template
     /// are unaffected until they are rebuilt (a later-step concern).
-    pub fn register(&mut self, id: R, template: RenderTemplate) {
+    pub fn register(&mut self, id: R, template: RenderTemplate<M, MK>) {
         self.templates.insert(id, template);
     }
 
     /// Look up the template registered under `id`, if any.
-    pub fn get(&self, id: R) -> Option<&RenderTemplate> {
+    pub fn get(&self, id: R) -> Option<&RenderTemplate<M, MK>> {
         self.templates.get(&id)
     }
 
@@ -172,7 +224,7 @@ where
     }
 }
 
-impl<R> Default for RenderRegistry<R>
+impl<R, M, MK> Default for RenderRegistry<R, M, MK>
 where
     R: Copy + Eq + Hash,
 {
@@ -201,7 +253,7 @@ mod tests {
 
     #[test]
     fn register_then_lookup_returns_template() {
-        let mut reg = RenderRegistry::new();
+        let mut reg: RenderRegistry<RenderId> = RenderRegistry::new();
         reg.register(RenderId::TreeOak, RenderTemplate::new("tree_oak"));
 
         assert_eq!(reg.len(), 1);
@@ -214,7 +266,7 @@ mod tests {
 
     #[test]
     fn re_register_replaces_template() {
-        let mut reg = RenderRegistry::new();
+        let mut reg: RenderRegistry<RenderId> = RenderRegistry::new();
         reg.register(RenderId::TreeOak, RenderTemplate::new("first"));
         reg.register(RenderId::TreeOak, RenderTemplate::new("second"));
 
@@ -227,14 +279,14 @@ mod tests {
 
     #[test]
     fn template_has_no_slots_by_default() {
-        let t = RenderTemplate::new("bare");
+        let t: RenderTemplate = RenderTemplate::new("bare");
         assert!(t.slots().is_empty());
         assert!(t.slot("anything").is_none());
     }
 
     #[test]
     fn with_slot_preserves_declaration_order() {
-        let t = RenderTemplate::new("campfire")
+        let t: RenderTemplate = RenderTemplate::new("campfire")
             .with_slot("intensity", SlotKind::F32)
             .with_slot("tint", SlotKind::Color)
             .with_slot("lit", SlotKind::Bool);
@@ -248,7 +300,7 @@ mod tests {
 
     #[test]
     fn slot_lookup_by_name() {
-        let t = RenderTemplate::new("tree")
+        let t: RenderTemplate = RenderTemplate::new("tree")
             .with_slot("trunk_height", SlotKind::F32)
             .with_slot("leaf_tint", SlotKind::Color);
 
@@ -260,7 +312,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "already has a slot named")]
     fn duplicate_slot_name_panics() {
-        let _ = RenderTemplate::new("bad")
+        let _: RenderTemplate = RenderTemplate::new("bad")
             .with_slot("intensity", SlotKind::F32)
             .with_slot("intensity", SlotKind::Color);
     }
@@ -275,5 +327,77 @@ mod tests {
         assert_eq!(SlotValue::Bool(true).kind(), SlotKind::Bool);
         assert_eq!(SlotValue::I32(-1).kind(), SlotKind::I32);
         assert_eq!(SlotValue::U32(7).kind(), SlotKind::U32);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum TestMesh {
+        Cube,
+        Plane,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum TestMat {
+        Wood,
+        Stone,
+    }
+
+    #[test]
+    fn template_has_no_mesh_parts_by_default() {
+        let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("bare");
+        assert!(t.mesh_parts().is_empty());
+    }
+
+    #[test]
+    fn with_mesh_part_preserves_declaration_order() {
+        let t = RenderTemplate::new("campfire")
+            .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY)
+            .with_mesh_part(
+                TestMesh::Plane,
+                TestMat::Stone,
+                Mat4::from_translation(Vec3::new(0.0, -0.5, 0.0)),
+            );
+
+        let parts = t.mesh_parts();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].mesh, TestMesh::Cube);
+        assert_eq!(parts[0].material, TestMat::Wood);
+        assert_eq!(parts[1].mesh, TestMesh::Plane);
+        assert_eq!(parts[1].material, TestMat::Stone);
+        // Column 3 of an Mat4 holds the translation.
+        assert_eq!(parts[1].local_transform.col(3).truncate().y, -0.5);
+    }
+
+    #[test]
+    fn template_carries_slots_and_parts_together() {
+        let t = RenderTemplate::new("torch")
+            .with_slot("intensity", SlotKind::F32)
+            .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY);
+
+        assert_eq!(t.slots().len(), 1);
+        assert_eq!(t.mesh_parts().len(), 1);
+    }
+
+    #[test]
+    fn registry_stores_template_with_parts() {
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        enum RId {
+            Campfire,
+        }
+
+        let mut reg: RenderRegistry<RId, TestMesh, TestMat> = RenderRegistry::new();
+        reg.register(
+            RId::Campfire,
+            RenderTemplate::new("campfire")
+                .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY)
+                .with_mesh_part(
+                    TestMesh::Plane,
+                    TestMat::Stone,
+                    Mat4::from_translation(Vec3::new(0.0, -0.5, 0.0)),
+                ),
+        );
+
+        let template = reg.get(RId::Campfire).expect("registered");
+        assert_eq!(template.label, "campfire");
+        assert_eq!(template.mesh_parts().len(), 2);
     }
 }

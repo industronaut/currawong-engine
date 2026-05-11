@@ -33,7 +33,9 @@ pub use instance::{InstanceBuckets, mat4_instance_attributes};
 pub use material::{
     MaterialInstanceRegistry, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial,
 };
-pub use render_object::{RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotValue};
+pub use render_object::{
+    MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotValue,
+};
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};
 pub use view::{EngineCtx, View};
