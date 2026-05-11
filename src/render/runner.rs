@@ -11,6 +11,8 @@ use winit::window::{Window, WindowId};
 
 use crate::sim::{SimClock, Simulation};
 
+#[cfg(feature = "egui")]
+use super::debug_ui::DebugUi;
 use super::renderer::Renderer;
 use super::view::{EngineCtx, View};
 
@@ -46,6 +48,8 @@ struct RunState<V: View> {
     sim: V::Sim,
     clock: SimClock,
     last_redraw: Instant,
+    #[cfg(feature = "egui")]
+    debug_ui: DebugUi,
 }
 
 impl<V: View> ApplicationHandler for Handler<V> {
@@ -60,6 +64,8 @@ impl<V: View> ApplicationHandler for Handler<V> {
                 .expect("failed to create window"),
         );
         let renderer = pollster::block_on(Renderer::new(window, V::depth_format()));
+        #[cfg(feature = "egui")]
+        let debug_ui = DebugUi::new(&renderer);
         let view = V::init(&renderer);
         let sim = self.sim.take().expect("simulation already taken");
         let clock = self.clock.take().expect("clock already taken");
@@ -69,6 +75,8 @@ impl<V: View> ApplicationHandler for Handler<V> {
             sim,
             clock,
             last_redraw: Instant::now(),
+            #[cfg(feature = "egui")]
+            debug_ui,
         });
     }
 
@@ -81,7 +89,14 @@ impl<V: View> ApplicationHandler for Handler<V> {
         let Some(state) = self.state.as_mut() else {
             return;
         };
-        {
+        #[cfg(feature = "egui")]
+        let egui_consumed = state
+            .debug_ui
+            .on_window_event(&state.renderer.window, &event)
+            .consumed;
+        #[cfg(not(feature = "egui"))]
+        let egui_consumed = false;
+        if !egui_consumed {
             let mut ctx = EngineCtx {
                 event_loop,
                 clock: &mut state.clock,
@@ -105,7 +120,7 @@ impl<V: View> ApplicationHandler for Handler<V> {
                     state.sim.tick(tick_period);
                 }
                 let alpha = state.clock.alpha();
-                render_frame::<V>(state, alpha);
+                render_frame::<V>(state, event_loop, alpha);
                 state.renderer.window.request_redraw();
             }
             _ => {}
@@ -113,7 +128,8 @@ impl<V: View> ApplicationHandler for Handler<V> {
     }
 }
 
-fn render_frame<V: View>(state: &mut RunState<V>, alpha: f32) {
+fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, alpha: f32) {
+    let _ = event_loop;
     let frame = match state.renderer.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
         wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -170,9 +186,28 @@ fn render_frame<V: View>(state: &mut RunState<V>, alpha: f32) {
             .render(&state.sim, alpha, &state.renderer, &mut pass);
     }
 
-    state
-        .renderer
-        .queue
-        .submit(std::iter::once(encoder.finish()));
+    #[cfg(feature = "egui")]
+    let egui_staging = {
+        let RunState {
+            ref mut view,
+            ref mut sim,
+            ref mut clock,
+            ref renderer,
+            ref mut debug_ui,
+            ..
+        } = *state;
+        debug_ui.run_and_render(renderer, &mut encoder, &view_tex, |egui_ctx| {
+            let mut ctx = EngineCtx { event_loop, clock };
+            view.ui(sim, &mut ctx, egui_ctx);
+        })
+    };
+    #[cfg(not(feature = "egui"))]
+    let egui_staging: Vec<wgpu::CommandBuffer> = Vec::new();
+
+    state.renderer.queue.submit(
+        egui_staging
+            .into_iter()
+            .chain(std::iter::once(encoder.finish())),
+    );
     frame.present();
 }

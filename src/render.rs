@@ -24,6 +24,8 @@
 //! see a flat `currawong::*` surface.
 
 mod camera;
+#[cfg(feature = "egui")]
+mod debug_ui;
 mod emitter;
 mod instance;
 mod material;
