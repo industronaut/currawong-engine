@@ -20,6 +20,8 @@
 //! - [`components`] — sparse, type-erased per-object data.
 //! - [`terrain`] — tile-grid terrain with optional liquids per tile.
 //! - [`clock`] — fixed-tick driver with speed scaling.
+//! - [`environment`] — sim-side environment state (time of day) + the trivial
+//!   sun-direction model.
 //!
 //! Submodules are private; their public types are re-exported here so callers
 //! see a flat `sim::*` surface.
@@ -28,12 +30,14 @@ use std::time::Duration;
 
 mod clock;
 mod components;
+mod environment;
 mod slot_map;
 mod terrain;
 mod zone;
 
 pub use clock::SimClock;
 pub use components::Components;
+pub use environment::{SimEnvironment, sun_direction_for};
 pub use slot_map::{SlotKey, SlotMap};
 pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};
 pub use zone::{WorldObject, WorldObjectId, WorldObjectRef, Zone, ZoneId, Zones};

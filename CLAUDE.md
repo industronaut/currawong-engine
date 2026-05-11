@@ -20,6 +20,9 @@ cargo run --example clear                # window with cleared background
 cargo run --example triangle             # static colored triangle
 cargo run --example input                # input demo + sim speed controls
 cargo run --example camera               # sim/view extract + camera demo
+cargo run --example terrain              # tile-grid terrain meshing + liquids
+cargo run --example textured_pbr         # PBR cubes lit by a sim-driven sun
+cargo run --example textured_pbr --features egui   # same, with debug overlay
 cargo run --example headless             # sim ticking without any window
 cargo run --example headless --no-default-features   # proves headless excludes wgpu/winit at compile time
 ```
@@ -40,7 +43,7 @@ This wires up `.githooks/pre-commit`, which runs `cargo fmt --check` and blocks 
 
 The central commitment is **sim/view separation**, modelled on UE-style proxy extraction rather than Unity/Godot scene-graph integration. The codebase splits into two modules with a build-system-enforced boundary:
 
-- `src/sim.rs` + `src/sim/` (submodules `slot_map`, `zone`, `components`, `clock`) — sim layer. `sim.rs` is a thin parent that owns the `Simulation` trait and re-exports the submodules' public types so callers see a flat surface. Always compiled. Depends only on `glam` and `std`. Never imports `wgpu` or `winit`.
+- `src/sim.rs` + `src/sim/` (submodules `slot_map`, `zone`, `components`, `clock`, `terrain`, `environment`) — sim layer. `sim.rs` is a thin parent that owns the `Simulation` trait and re-exports the submodules' public types so callers see a flat surface. Always compiled. Depends only on `glam` and `std`. Never imports `wgpu` or `winit`.
 - `src/render.rs` — view layer. Compiled only with the `render` feature (default on). Owns all GPU + windowing.
 - `src/lib.rs` — re-exporter. Conditionally exposes the render layer behind `#[cfg(feature = "render")]`.
 
@@ -64,8 +67,11 @@ The user implements the `View` trait with an associated `Sim: Simulation`:
 - `init(&Renderer) -> Self` — build pipelines, allocate buffers.
 - `render(&self, &Sim, alpha, &Renderer, &mut RenderPass)` — read sim, record draw calls. `&Sim` is read-only by signature, structurally preventing sim mutation from the render path.
 - `input(&mut self, &mut Sim, &mut EngineCtx, &WindowEvent)` — sim-mutating user actions go through here.
+- `ui(&mut self, &mut Sim, &mut EngineCtx, &egui::Context)` — behind the `egui` feature; build the per-frame debug overlay. May mutate sim and engine context just like `input`.
+- `active_zone(&self, &Sim) -> Option<ZoneId>` — which zone the camera is in. Default `None` is right for UI/2D views; world-space views typically return `self.camera.zone`. The engine uses this to drive `extract_environment` and (later) per-zone culling and streaming.
+- `extract_environment(&self, &Sim, ZoneId) -> ViewEnvironment` — per-frame sim → GPU-friendly environment extraction. Engine calls it before `render`, writes the result into `Renderer::scene_bind_group`, and pipelines that declare `Renderer::scene_layout` read it automatically. Default returns `ViewEnvironment::neutral`. This is the same shape as visual extraction: sim owns facts (time of day), view owns appearance (sun direction + colour), engine drives the seam.
 - `depth_format() -> Option<TextureFormat>` — opt in to engine-managed depth. When `Some`, the renderer allocates a depth texture, recreates it on resize, and pre-attaches it to the frame's render pass. Pipelines must declare the same format in their `DepthStencilState`. Default `None` is right for 2D / UI views drawing in clip space.
-- `Camera` is a helper struct; the View opts in by holding one (UI/2D views don't need cameras).
+- `Camera` is a helper struct; the View opts in by holding one (UI/2D views don't need cameras). `Camera::zone: Option<ZoneId>` is the conventional place to stash the active zone so `active_zone` is a one-liner. The engine-standard `CameraUniformData` carries `view_proj` + `right`/`up` basis (for billboards) + `position` (so lit materials can compute view direction per fragment); the `CameraBinding` bgl is `VERTEX_FRAGMENT`-visible.
 
 `run::<MyView>(sim)` wires it all up: creates the event loop, builds a `Renderer`, calls `init`, and dispatches events. `run_with_clock` takes a custom `SimClock`.
 
@@ -73,7 +79,9 @@ The user implements the `View` trait with an associated `Sim: Simulation`:
 
 Fixed-tick (default 60 Hz) with an accumulator. The simulation always sees a constant `tick_period` regardless of speed; varying `SimClock::speed` only changes how many ticks fire per wall-clock second, which keeps sim logic deterministic at any playback rate. Pause is `set_speed(0.0)`. `MAX_TICKS_PER_FRAME = 16` prevents spiral-of-death. `SimClock::alpha()` returns `[0, 1]` interpolation factor for smooth motion (currently plumbed through but no example uses it).
 
-### Render objects (planned)
+### Render objects
+
+Partially landed: `RenderTemplate`, `RenderRegistry`, `SlotKind`/`SlotValue`, `MeshPart`, `EmitterPart`, and visual-bounds AABBs exist; nested templates, structural-override rules, visual scripting, and per-`(SimId, RenderId)` slot routing are still on the design page below.
 
 Drawable content is organised view-side into **render objects** — templates analogous to Unity prefabs or Godot sub-scenes, each owning a hierarchy of meshes, emitters, materials, and view-side resources. Templates are identified by `RenderId` and registered when the camera enters a zone. Sim objects carry a `RenderId` naming which template renders them; many sim objects share one template (every oak tree → `tree_oak`). Per-instance variation lives in transforms and **slots**. This is closer to UE's `PrimitiveSceneProxy` model than to per-frame extraction — sim hands the view an identity + state, the view holds the structure.
 
@@ -93,9 +101,20 @@ Drawable content is organised view-side into **render objects** — templates an
 - *Material instance* — a bind group + uniform buffer bound to a template, cached or per-frame.
 - *Per-instance attributes* — model matrix, tint, anything varying per drawn copy, packed into the instance buffer (the existing `mat4_instance_attributes` helper is the right shape).
 
-Base `Material` is opaque — a typed bind-group producer. PBR (albedo/metallic/roughness) is `PbrMaterial: Material`, not baked into the base abstraction. Materials are not subclassed by what they draw (no `SpriteMaterial`/`MeshMaterial`); the contract with geometry is the instance-attribute layout.
+Two materials exist today: `UnlitColoredMaterial` (position-only vertex, no lighting) and `PbrMaterial` (metallic-roughness, single directional light, albedo texture + scalar metallic/roughness; Cook-Torrance specular + Lambertian diffuse). There is **no `Material` trait yet** — the two share a structural pattern (template / instance / per-instance attribs) but not an interface. Add one when a third material kind makes the duplication painful, not before. Materials are not subclassed by what they draw (no `SpriteMaterial`/`MeshMaterial`); the contract with geometry is the instance-attribute layout.
 
-**Environment** — directional lights, sky dome, weather, fog — lives outside the sim entirely. It's view-owned global state attached to the camera/scene, not driven by zone object lists or `RenderId`. Registered alongside a zone but not produced by extraction.
+**Vertex layouts are a closed set.** Same architectural move as `SlotKind`: a small enumerable list of canonical per-vertex structs (currently `PosNormalUv`; `TerrainVertex` is owned by the terrain mesher), declared as `Pod` structs with `attributes(start_location)` helpers. Materials statically demand one layout — no runtime attribute negotiation, no string keys. Adding a layout is a deliberate code change.
+
+**Textures and samplers** live on the view side too:
+- `Texture::from_rgba8` uploads RGBA8 bytes with a CPU-generated mip chain (box-filter downsampling — naive sRGB averaging; revisit when it bites). sRGB vs linear is a constructor flag.
+- `SamplerKind` is a closed enum (`LinearRepeat`, `LinearClamp`, `NearestClamp`), holding a live `wgpu::Sampler` per variant in `SamplerRegistry`. Materials reference samplers by kind, not by raw handle.
+- Loading from disk (image files, glTF) doesn't exist yet — `from_rgba8` is the only path; the example uses a procedural checkerboard.
+
+**Environment** — directional lights, sky dome, weather, fog — lives outside the sim's object/zone world but is **sim-derived facts → view-derived appearance**:
+- `SimEnvironment` (sim) owns the *facts*: `time_of_day`, `day`, `seconds_per_day`. Held by the user's `Simulation` impl, advanced in `tick`. Opt-in helper struct, same status as `Camera`. Provides `sun_direction_for(time_of_day) -> Vec3` as a trivial Z-up sun model.
+- `ViewEnvironment` (view) owns the *appearance*: `sun_direction`, `sun_color`, `ambient`, `sky_color`. Engine-defined concrete struct because it backs a fixed bind-group layout. Future fog/weather lands here.
+- `View::extract_environment(&sim, zone)` runs once per frame per active zone, producing a `ViewEnvironment`. The engine writes it into `Renderer::scene_bind_group` (a `SceneEnvironmentBinding` the `Renderer` owns); any pipeline that declared `Renderer::scene_layout` reads it automatically. This is engine-driven, not user-driven like `CameraBinding`, because every input the extract needs lives in the sim — the View just declares the mapping.
+- Weather, sky domes, IBL probes, and multiple lights are all later additions to `ViewEnvironment`'s shape and the scene uniform.
 
 **Pass-awareness is deferred.** Single forward pass for now; shadow/depth-prepass would introduce material × pass → pipeline (Unreal's Material Domain). Don't build the permutation matrix until a second pass actually exists.
 
@@ -136,5 +155,5 @@ When adding render code, copy from `examples/camera.rs` (instance buffer + unifo
 
 - Edition 2024.
 - Examples are runnable demos that exercise specific subsystems; the sim/view boundary is preserved even in examples (sim types in the `Sim` field of the user's `Game` struct, view-side state in the `View` impl).
-- Tests live in `#[cfg(test)] mod tests` blocks within the file under test, placed in the slice that owns the public API being asserted (currently `src/sim/zone.rs` and `src/sim/components.rs`). Render-side code has no tests yet — it's covered by running examples manually.
+- Tests live in `#[cfg(test)] mod tests` blocks within the file under test, placed in the slice that owns the public API being asserted. Sim-side modules are well-covered (`zone`, `components`, `terrain`, `environment`); render-side tests cover what doesn't need a live GPU (`Pod` layout sizes, vertex strides, mip math, CPU downsampling) and the rest is exercised by running examples manually.
 - Re-export third-party crates from `currawong` (`glam`, `wgpu`, `winit` under `render`) so consumers don't need to pin versions themselves.

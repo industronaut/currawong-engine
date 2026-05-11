@@ -2,12 +2,21 @@
 
 use glam::{Mat4, Vec3, Vec4};
 
+use crate::sim::ZoneId;
+
 /// Perspective camera helper for views that render in 3D world space.
 ///
 /// Held by the user's [`View`](crate::View) (a View doesn't have to use one —
 /// UI/2D views can render directly in clip space). The user updates
 /// `position`, `target`, and `aspect` over time; pipelines upload
 /// [`Camera::view_proj`] to a uniform buffer each frame.
+///
+/// `zone` names the zone the camera is currently looking at. It's
+/// `Option<ZoneId>` because UI/2D views don't have a notion of "active
+/// zone"; world-space views forward this through
+/// [`View::active_zone`](crate::View::active_zone) so the engine knows
+/// which zone to ask for environment extraction, visibility culling, and
+/// (later) which terrain chunks to draw.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
     pub position: Vec3,
@@ -17,6 +26,7 @@ pub struct Camera {
     pub aspect: f32,
     pub near: f32,
     pub far: f32,
+    pub zone: Option<ZoneId>,
 }
 
 impl Default for Camera {
@@ -29,6 +39,7 @@ impl Default for Camera {
             aspect: 16.0 / 9.0,
             near: 0.1,
             far: 100.0,
+            zone: None,
         }
     }
 }
@@ -62,12 +73,14 @@ impl Camera {
     }
 }
 
-/// Engine-standard camera uniform layout — view-projection matrix plus the
-/// camera's world-space right/up basis vectors. The basis fields are present
-/// so the same buffer can serve both world-space mesh pipelines and
-/// camera-facing billboard pipelines without re-binding. Shaders that don't
-/// need the basis can declare a smaller WGSL struct (e.g. just `view_proj`)
-/// and ignore the trailing bytes.
+/// Engine-standard camera uniform layout — view-projection matrix, the
+/// camera's world-space right/up basis vectors, and the camera's world
+/// position. The basis fields are present so the same buffer can serve both
+/// world-space mesh pipelines and camera-facing billboard pipelines without
+/// re-binding; the position is here so lit materials can compute a correct
+/// view direction per fragment. Shaders that don't need a given field can
+/// declare a smaller WGSL struct (e.g. just `view_proj`) and ignore the
+/// trailing bytes — order is stable.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniformData {
@@ -76,6 +89,8 @@ pub struct CameraUniformData {
     pub right: Vec4,
     /// `xyz` = world-space up, `w` = padding.
     pub up: Vec4,
+    /// `xyz` = camera world position, `w` = padding.
+    pub position: Vec4,
 }
 
 impl CameraUniformData {
@@ -85,6 +100,7 @@ impl CameraUniformData {
             view_proj: camera.view_proj(),
             right: right.extend(0.0),
             up: up.extend(0.0),
+            position: camera.position.extend(0.0),
         }
     }
 }
@@ -119,7 +135,10 @@ impl CameraBinding {
             label: Some("currawong camera bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // VERTEX_FRAGMENT, not just VERTEX: lit materials read the
+                // camera position in the fragment stage to compute the view
+                // direction per fragment.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,

@@ -154,6 +154,15 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
                 label: Some("currawong frame encoder"),
             });
 
+    // Extract the scene environment for the active zone (if any) and upload
+    // it to the engine-managed scene bind group. Pipelines that declare
+    // `Renderer::scene_layout` read the result automatically once they bind
+    // `Renderer::scene_bind_group`.
+    if let Some(zone) = state.view.active_zone(&state.sim) {
+        let env = state.view.extract_environment(&state.sim, zone);
+        state.renderer.write_scene(&env);
+    }
+
     {
         let depth_attachment =
             state

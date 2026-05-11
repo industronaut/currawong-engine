@@ -3,8 +3,9 @@
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 
-use crate::sim::{SimClock, Simulation};
+use crate::sim::{SimClock, Simulation, ZoneId};
 
+use super::environment::ViewEnvironment;
 use super::renderer::Renderer;
 
 /// Mutable engine state passed to view callbacks. Use `event_loop` to
@@ -77,5 +78,36 @@ pub trait View: 'static {
     /// 2D / UI views that draw in clip space.
     fn depth_format() -> Option<wgpu::TextureFormat> {
         None
+    }
+
+    /// Which zone the camera is currently looking at, if any. The engine
+    /// uses this to drive [`extract_environment`](Self::extract_environment)
+    /// each frame; later it'll also gate visibility culling and terrain
+    /// streaming. Default `None` is right for UI/2D views that have no
+    /// notion of an active zone.
+    ///
+    /// `sim` is provided so the implementation can derive the active zone
+    /// from world state if it isn't a constant — e.g. "the zone holding
+    /// my player object." Conventionally the View holds a
+    /// [`Camera`](crate::Camera) and forwards `self.camera.zone`.
+    fn active_zone(&self, sim: &Self::Sim) -> Option<ZoneId> {
+        let _ = sim;
+        None
+    }
+
+    /// Build the per-frame [`ViewEnvironment`] for the currently-active zone.
+    /// Called by the engine each frame *before* `render`, when
+    /// [`active_zone`](Self::active_zone) returns `Some`. The result is
+    /// packed into the engine-managed scene bind group
+    /// ([`Renderer::scene_bind_group`](crate::Renderer::scene_bind_group))
+    /// so any pipeline that declares
+    /// [`Renderer::scene_layout`](crate::Renderer::scene_layout) reads it
+    /// automatically.
+    ///
+    /// Default returns [`ViewEnvironment::neutral`] — full ambient, no sun.
+    /// Override to drive lighting from `SimEnvironment` (or anything else).
+    fn extract_environment(&self, sim: &Self::Sim, zone: ZoneId) -> ViewEnvironment {
+        let _ = (sim, zone);
+        ViewEnvironment::neutral()
     }
 }
