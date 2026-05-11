@@ -80,13 +80,38 @@ impl SlotValue {
     }
 }
 
-/// Schema entry for one slot on a [`RenderTemplate`]: a name plus its kind.
-/// Slots are stored in declaration order so consumers can derive stable
-/// uniform / instance-buffer layouts from them.
+/// How a slot's value is delivered to a draw call. Declared per slot at
+/// template-build time so the engine can pick the right packing strategy
+/// without runtime inference.
+///
+/// `Instance` is the only routing currently implemented by
+/// [`RenderObjectPass`](super::RenderObjectPass). `Uniform` is reserved for
+/// values that should live in a per-instance uniform buffer slice indexed
+/// by `instance_index` in the shader; declaring a `Uniform` slot today is
+/// a no-op against draws (the engine helper panics if asked to draw a
+/// template that declares one) and is included so the schema doesn't need
+/// to break when uniform-routed slots land.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum SlotRouting {
+    /// Packed into the per-instance attribute buffer once per draw. Right
+    /// for values that vary per instance and change frequently
+    /// (transform-adjacent floats, per-instance colours).
+    #[default]
+    Instance,
+    /// **Not yet implemented.** Packed into a per-instance uniform array
+    /// indexed by `instance_index`. Reserved for larger payloads that
+    /// don't fit cleanly into a vertex-attribute slot.
+    Uniform,
+}
+
+/// Schema entry for one slot on a [`RenderTemplate`]: a name plus its kind
+/// plus its [`SlotRouting`]. Slots are stored in declaration order so
+/// consumers can derive stable uniform / instance-buffer layouts from them.
 #[derive(Clone, Debug)]
 pub struct SlotDescriptor {
     pub name: String,
     pub kind: SlotKind,
+    pub routing: SlotRouting,
 }
 
 /// Named [`SlotValue`]s for one render instance. The sim provides these
@@ -235,10 +260,26 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
         }
     }
 
-    /// Declare a slot. Slot names must be unique within a template; passing
-    /// a duplicate panics — programming error, not runtime condition. Returns
-    /// `self` for chaining.
-    pub fn with_slot(mut self, name: impl Into<String>, kind: SlotKind) -> Self {
+    /// Declare an instance-routed slot. Slot names must be unique within a
+    /// template; passing a duplicate panics — programming error, not
+    /// runtime condition. Returns `self` for chaining.
+    ///
+    /// Equivalent to [`Self::with_routed_slot`] with
+    /// [`SlotRouting::Instance`]; covers the common case where a slot
+    /// drives per-instance attribs.
+    pub fn with_slot(self, name: impl Into<String>, kind: SlotKind) -> Self {
+        self.with_routed_slot(name, kind, SlotRouting::Instance)
+    }
+
+    /// Declare a slot with an explicit [`SlotRouting`]. Slot names must be
+    /// unique within a template; passing a duplicate panics — programming
+    /// error, not runtime condition. Returns `self` for chaining.
+    pub fn with_routed_slot(
+        mut self,
+        name: impl Into<String>,
+        kind: SlotKind,
+        routing: SlotRouting,
+    ) -> Self {
         let name = name.into();
         assert!(
             !self.slots.iter().any(|s| s.name == name),
@@ -246,7 +287,11 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
             self.label,
             name
         );
-        self.slots.push(SlotDescriptor { name, kind });
+        self.slots.push(SlotDescriptor {
+            name,
+            kind,
+            routing,
+        });
         self
     }
 
@@ -446,6 +491,35 @@ mod tests {
         let _: RenderTemplate = RenderTemplate::new("bad")
             .with_slot("intensity", SlotKind::F32)
             .with_slot("intensity", SlotKind::Color);
+    }
+
+    #[test]
+    fn with_slot_defaults_to_instance_routing() {
+        let t: RenderTemplate = RenderTemplate::new("oak")
+            .with_slot("height", SlotKind::F32)
+            .with_slot("tint", SlotKind::Color);
+
+        let routings: Vec<SlotRouting> = t.slots().iter().map(|s| s.routing).collect();
+        assert_eq!(
+            routings,
+            vec![SlotRouting::Instance, SlotRouting::Instance],
+            "with_slot must default routing to Instance",
+        );
+    }
+
+    #[test]
+    fn with_routed_slot_records_routing() {
+        let t: RenderTemplate = RenderTemplate::new("torch")
+            .with_routed_slot("brightness", SlotKind::F32, SlotRouting::Uniform)
+            .with_routed_slot("tint", SlotKind::Color, SlotRouting::Instance);
+
+        let routings: Vec<SlotRouting> = t.slots().iter().map(|s| s.routing).collect();
+        assert_eq!(routings, vec![SlotRouting::Uniform, SlotRouting::Instance]);
+    }
+
+    #[test]
+    fn slot_routing_default_is_instance() {
+        assert_eq!(SlotRouting::default(), SlotRouting::Instance);
     }
 
     #[test]
