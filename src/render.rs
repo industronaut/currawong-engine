@@ -14,7 +14,8 @@
 //! - [`runner`] — event loop integration ([`run`], [`run_with_clock`]).
 //! - [`instance`] — per-key instance bucketing for batched instanced rendering.
 //! - [`emitter`] — declarative emitter reconciliation + particle integration.
-//! - [`render_object`] — render-object templates + registry (planned system; skeleton).
+//! - [`render_object`] — render-object templates + registry (slot schema + parts).
+//! - [`render_object_pass`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
 //! - [`pbr`] — metallic-roughness PBR material; reads scene env + camera.
 //! - [`terrain`] — view-side meshing of tile-grid terrain into chunk meshes.
@@ -38,6 +39,7 @@ mod material;
 mod pbr;
 mod render_instances;
 mod render_object;
+mod render_object_pass;
 mod renderer;
 mod runner;
 mod terrain;
@@ -58,9 +60,10 @@ pub use material::{
 pub use pbr::{PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use render_instances::{RenderInstance, RenderInstances};
 pub use render_object::{
-    EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotValue,
-    SlotValues,
+    EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotRouting,
+    SlotValue, SlotValues,
 };
+pub use render_object_pass::{RenderObjectPass, validate_slot_values};
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};
 pub use terrain::{ChunkMeshes, FlatTopsMesher, MeshData, TerrainMesher, TerrainVertex};

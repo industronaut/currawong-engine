@@ -81,13 +81,17 @@ Fixed-tick (default 60 Hz) with an accumulator. The simulation always sees a con
 
 ### Render objects
 
-Partially landed: `RenderTemplate`, `RenderRegistry`, `SlotKind`/`SlotValue`, `MeshPart`, `EmitterPart`, and visual-bounds AABBs exist; nested templates, structural-override rules, visual scripting, and per-`(SimId, RenderId)` slot routing are still on the design page below.
+Mostly landed: `RenderTemplate`, `RenderRegistry`, `SlotKind`/`SlotValue`/`SlotRouting`, `MeshPart`, `EmitterPart`, visual-bounds AABBs, hysteresis-culled `RenderInstances`, and the engine-driven `RenderObjectPass` helper exist. Uniform-routed slot packing, nested templates, structural-override rules, and visual scripting are still on the design page below.
 
 Drawable content is organised view-side into **render objects** — templates analogous to Unity prefabs or Godot sub-scenes, each owning a hierarchy of meshes, emitters, materials, and view-side resources. Templates are identified by `RenderId` and registered when the camera enters a zone. Sim objects carry a `RenderId` naming which template renders them; many sim objects share one template (every oak tree → `tree_oak`). Per-instance variation lives in transforms and **slots**. This is closer to UE's `PrimitiveSceneProxy` model than to per-frame extraction — sim hands the view an identity + state, the view holds the structure.
 
 `(SimId, RenderId)` is the composite key for a live visual instance. Instances are created on first visibility and destroyed on cull or zone leave.
 
-**Slots** are typed, named parameters declared by a template (think Godot's `@export`, Unreal's `UPROPERTY`). The schema is a closed `SlotKind` enum (`F32`, `Vec3`, `Color`, `Bool`, `AssetRef<T>`, …) — explicitly not a `Variant` / `Box<dyn Any>` bag. Sim provides slot values per `(SimId, RenderId)`; the view routes them into uniforms or per-instance attribute buffers depending on cost.
+**Slots** are typed, named parameters declared by a template (think Godot's `@export`, Unreal's `UPROPERTY`). The schema is a closed `SlotKind` enum (`F32`, `Vec3`, `Color`, `Bool`, `AssetRef<T>`, …) — explicitly not a `Variant` / `Box<dyn Any>` bag. Each slot also declares a `SlotRouting` (`Instance` or `Uniform`) at template-build time so the engine picks the right packing strategy without runtime inference. Sim attaches per-object `SlotValues` as a sim component on the parent `WorldObject`; the view reads them at render time. `with_slot(name, kind)` defaults to `SlotRouting::Instance`; `with_routed_slot(name, kind, routing)` is the explicit form.
+
+**`Uniform` routing is declared-only for now.** The schema accepts it (so future code doesn't break the API), but `RenderObjectPass` panics if asked to draw a template that declares a `Uniform` slot. Implement the packing path when the first consumer needs it; the current default of indexing a uniform array by `instance_index` in the shader is the v1 plan when that happens.
+
+**Engine pass.** `RenderObjectPass` owns the per-frame walk: `declare_and_cull` walks zones, declares one live instance per sim object carrying a `RenderId` component, and culls against a frustum; `for_each_alive_part` / `for_each_alive` then iterate alive instances, validate each parent's `SlotValues` against the template schema, and invoke user closures for mesh parts (and emitter parts when needed). View code supplies a per-part callback that does the actual draw-attrib push — the engine owns the traversal, not the bucketing. Adding a slot or a part to a template requires touching only the template declaration + extract closure, never the per-frame plumbing.
 
 **Nested templates** are allowed, with rules:
 - Nested children are live references to other templates, not embedded snapshots — template edits propagate.

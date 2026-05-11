@@ -22,10 +22,10 @@ use std::time::Instant;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Aabb, Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, Frustum,
-    InstanceBuckets, MaterialInstanceRegistry, ParticleLifecycle, RenderInstances, RenderRegistry,
-    RenderTemplate, Renderer, Simulation, SlotKind, SlotValue, SlotValues, UnlitColoredAttribs,
-    UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject, WorldObjectRef, Zone, Zones,
-    wgpu, winit,
+    InstanceBuckets, MaterialInstanceRegistry, ParticleLifecycle, RenderInstances,
+    RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKind, SlotValue,
+    SlotValues, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject,
+    Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -523,63 +523,33 @@ impl View for Demo {
 
         let frustum = Frustum::from_view_proj(self.camera.view_proj());
 
-        // --- Phase 1: declare a live render instance per sim object that
-        // carries a RenderId, computing its world AABB from the template's
-        // visual bounds. The reconciler lazy-creates new instances,
-        // refreshes existing ones, and (in the cull step below) drops any
-        // that have been outside the frustum past the hysteresis window.
-        self.live_instances.begin_frame();
-        for (zone_id, zone) in sim.zones.iter() {
-            for (id, obj) in zone.iter() {
-                let Some(&rid) = zone.components().get::<RenderId>(id) else {
-                    continue;
-                };
-                let Some(template) = self.templates.get(rid) else {
-                    continue;
-                };
-                let object_xform = Mat4::from_rotation_translation(obj.rotation, obj.position);
-                let world_aabb = template
-                    .visual_bounds()
-                    .map(|local| local.transformed(object_xform));
-                let world_ref = WorldObjectRef { zone: zone_id, id };
-                self.live_instances
-                    .declare(world_ref, rid, object_xform, world_aabb);
-            }
-        }
-        self.live_instances.cull(&frustum);
+        // Phase 1: engine-driven walk + declare + cull. Replaces the prior
+        // hand-rolled loop over zones × objects × RenderId components.
+        RenderObjectPass::declare_and_cull(
+            &sim.zones,
+            &self.templates,
+            &mut self.live_instances,
+            &frustum,
+        );
 
-        // --- Phase 2: iterate alive instances and fan out into mesh-part
-        // bucket pushes plus emitter-part reconciler declarations. Emitter
-        // declarations only fire for alive instances, so a culled
-        // campfire's flame and smoke fade out via Linger semantics.
-        //
-        // For each alive instance we look up its per-object SlotValues
-        // back through sim components. The "tint" slot drives the
+        // Phase 2: engine-driven fan-out. The helper iterates alive
+        // instances, validates each parent's SlotValues against the
+        // template schema, and calls our closures with already-composed
+        // world transforms for each part. The "tint" slot drives the
         // per-instance attrib tint for *Wood* parts only — the stone base
         // stays neutral, so the campfire's coloured-log identity reads
         // clearly without staining the rock.
         self.buckets.begin_frame();
         self.emitters.begin_frame();
-        for (parent, rid, instance) in self.live_instances.iter() {
-            let Some(template) = self.templates.get(rid) else {
-                continue;
-            };
-            let zone = sim
-                .zones
-                .get(parent.zone)
-                .expect("zone alive while instance lives");
-            let tint = zone
-                .components()
-                .get::<SlotValues>(parent.id)
-                .and_then(|sv| sv.get("tint"))
-                .and_then(|v| match v {
-                    SlotValue::Color(c) => Some(c),
-                    _ => None,
-                })
-                .unwrap_or(Vec4::ONE);
-
-            for part in template.mesh_parts() {
-                let world = instance.world_xform * part.local_transform;
+        RenderObjectPass::for_each_alive(
+            &sim.zones,
+            &self.templates,
+            &self.live_instances,
+            |_parent, _rid, part, world, slots| {
+                let tint = match slots.get("tint") {
+                    Some(SlotValue::Color(c)) => c,
+                    _ => Vec4::ONE,
+                };
                 let part_tint = match part.material {
                     MatKey::Wood => tint,
                     MatKey::Stone => Vec4::ONE,
@@ -591,13 +561,12 @@ impl View for Demo {
                     },
                     UnlitColoredAttribs::new(world, part_tint),
                 );
-            }
-            for part in template.emitter_parts() {
-                let world = instance.world_xform * part.local_transform;
+            },
+            |parent, _rid, part, world, _slots| {
                 self.emitters
                     .declare(parent, part.slot, part.template, world);
-            }
-        }
+            },
+        );
 
         // Tick particles, then turn each into a billboard instance with the
         // template's size/colour curves applied.
