@@ -56,9 +56,9 @@ impl Game {
                 let dy = ty - 4;
                 let d2 = dx * dx + dy * dy;
                 let h = if d2 < 3 {
-                    3
+                    tx
                 } else if d2 < 8 {
-                    2
+                    3
                 } else if d2 < 16 {
                     1
                 } else {
