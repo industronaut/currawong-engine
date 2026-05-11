@@ -28,6 +28,8 @@ use std::hash::Hash;
 
 use glam::{Mat4, Vec2, Vec3, Vec4};
 
+use super::visibility::Aabb;
+
 /// Type of a parameter slot on a [`RenderTemplate`]. Each variant pairs with
 /// a [`SlotValue`] of the same name. The set is deliberately closed: adding
 /// a kind requires a code change, not a string tag, which keeps slots strongly
@@ -159,6 +161,7 @@ pub struct RenderTemplate<M = (), MK = (), E = (), S = ()> {
     slots: Vec<SlotDescriptor>,
     mesh_parts: Vec<MeshPart<M, MK>>,
     emitter_parts: Vec<EmitterPart<E, S>>,
+    visual_bounds: Option<Aabb>,
 }
 
 impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
@@ -168,6 +171,7 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
             slots: Vec::new(),
             mesh_parts: Vec::new(),
             emitter_parts: Vec::new(),
+            visual_bounds: None,
         }
     }
 
@@ -223,6 +227,24 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     /// All emitter parts in declaration order.
     pub fn emitter_parts(&self) -> &[EmitterPart<E, S>] {
         &self.emitter_parts
+    }
+
+    /// Set the template's *visual* AABB — the region of space the template
+    /// occupies when rendered, including emitter reach and other effects.
+    /// Used by [`RenderInstances::cull`](super::RenderInstances::cull); a
+    /// template without visual bounds is never culled.
+    ///
+    /// CLAUDE.md invariant: visual bounds differ from sim bounds. A 0.5 m
+    /// campfire with a 6 m smoke column has a visual AABB that includes
+    /// the column.
+    pub fn with_visual_bounds(mut self, aabb: Aabb) -> Self {
+        self.visual_bounds = Some(aabb);
+        self
+    }
+
+    /// Visual AABB declared by [`Self::with_visual_bounds`], if any.
+    pub fn visual_bounds(&self) -> Option<Aabb> {
+        self.visual_bounds
     }
 }
 
@@ -503,5 +525,18 @@ mod tests {
         assert_eq!(t.slots().len(), 1);
         assert_eq!(t.mesh_parts().len(), 1);
         assert_eq!(t.emitter_parts().len(), 1);
+    }
+
+    #[test]
+    fn visual_bounds_default_to_none() {
+        let t: RenderTemplate = RenderTemplate::new("bare");
+        assert!(t.visual_bounds().is_none());
+    }
+
+    #[test]
+    fn with_visual_bounds_records_the_aabb() {
+        let bounds = Aabb::new(Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 2.5, 1.0));
+        let t: RenderTemplate = RenderTemplate::new("campfire").with_visual_bounds(bounds);
+        assert_eq!(t.visual_bounds(), Some(bounds));
     }
 }

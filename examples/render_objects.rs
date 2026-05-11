@@ -1,33 +1,30 @@
-//! Sim → `RenderId` → `RenderTemplate` → (mesh parts + emitter parts) → draws.
+//! Sim → `RenderId` → `RenderTemplate` → (mesh + emitter parts) → draws,
+//! with frustum-cull hysteresis via [`RenderInstances`].
 //!
-//! Two render templates are registered at init:
-//! - `Campfire` — mesh parts (log + stone base) **and** emitter parts
-//!   (flame at top of log, smoke higher up).
-//! - `Stake` — single mesh part.
+//! Two render templates are registered at init, each with a declared
+//! visual AABB:
+//! - `Campfire` — log + stone base (mesh) plus flame + smoke (emitters).
+//!   Visual AABB extends ~2.5 m upward to enclose the smoke column.
+//! - `Stake` — single tall mesh, tight visual AABB.
 //!
-//! Sim has five objects, each tagged with a `RenderId` component. Every frame:
-//! 1. Walk the sim. For each object look up its template by `RenderId`.
-//! 2. For each `MeshPart`, compose `world = object_xform *
-//!    part.local_transform` and push an [`UnlitColoredAttribs`] into the
-//!    bucket keyed by `(mesh, material)`.
-//! 3. For each `EmitterPart`, declare it on the [`EmitterReconciler`] at
-//!    `world = object_xform * part.local_transform`.
-//! 4. Integrate the reconciler, build a per-emitter-template particle
-//!    bucket, draw meshes then particles.
-//!
-//! Shows: a single template fans out into multiple draw kinds; emitter
-//! parts on a template route into [`EmitterReconciler`] without the sim
-//! ever touching an emitter concept.
+//! The scene is intentionally wider than the camera frustum: a row of
+//! campfires along Z and a row of stakes along X. As the camera orbits
+//! the origin, different objects enter and leave view; the
+//! `RenderInstances` reconciler keeps each instance alive for 30 frames
+//! after it leaves the frustum (the hysteresis window) so grazing-angle
+//! edges don't pop. Emitters are declared inside the alive-instance loop,
+//! so a culled campfire's flame and smoke fade out naturally via the
+//! reconciler's `Linger` lifecycle.
 
 use std::collections::HashMap;
 use std::time::Instant;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, InstanceBuckets,
-    MaterialInstanceRegistry, ParticleLifecycle, RenderRegistry, RenderTemplate, Renderer,
-    Simulation, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject,
-    WorldObjectRef, Zone, Zones, wgpu, winit,
+    Aabb, Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, Frustum,
+    InstanceBuckets, MaterialInstanceRegistry, ParticleLifecycle, RenderInstances, RenderRegistry,
+    RenderTemplate, Renderer, Simulation, UnlitColoredAttribs, UnlitColoredInstance,
+    UnlitColoredMaterial, View, WorldObject, WorldObjectRef, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -98,18 +95,20 @@ impl Game {
         let zid = zones.insert(Zone::new());
         let zone = zones.get_mut(zid).expect("just inserted");
 
-        // Three campfires along X.
-        for x in [-3.0, 0.0, 3.0] {
+        // Campfires strung along Z, wider than the camera frustum at
+        // radius 7.5 — guarantees the orbit shows some of them entering
+        // and leaving view.
+        for z in [-9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0] {
             let id = zone.insert(WorldObject {
-                position: Vec3::new(x, 0.0, 0.0),
+                position: Vec3::new(0.0, 0.0, z),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(id, RenderId::Campfire);
         }
-        // Two stakes along Z, offset back so they're behind the campfires.
-        for z in [-2.5, 2.5] {
+        // Stakes strung along X, perpendicular to the campfires.
+        for x in [-8.0, -4.0, 4.0, 8.0] {
             let id = zone.insert(WorldObject {
-                position: Vec3::new(0.0, 0.0, z),
+                position: Vec3::new(x, 0.0, 0.0),
                 rotation: Quat::IDENTITY,
             });
             zone.components_mut().insert(id, RenderId::Stake);
@@ -234,6 +233,10 @@ struct Demo {
     material: UnlitColoredMaterial,
     instances: MaterialInstanceRegistry<UnlitColoredInstance, MatKey>,
     templates: Templates,
+    /// Live render-object instances with cull hysteresis. Replaces a raw
+    /// per-frame sim walk: declare per object, cull against the frustum,
+    /// iterate alive instances for the actual draw fan-out.
+    live_instances: RenderInstances<RenderId>,
     cube_vertices: wgpu::Buffer,
     cube_indices: wgpu::Buffer,
     buckets: InstanceBuckets<BucketKey, UnlitColoredAttribs>,
@@ -310,19 +313,32 @@ impl View for Demo {
                     EmitterId::Smoke,
                     EmitterSlot::Smoke,
                     Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)),
-                ),
+                )
+                // Visual AABB encloses log + base + the smoke column's
+                // approximate vertical reach (~2.5 m at 0.45 m/s × 2.5 s
+                // lifetime, plus headroom for the cone spread).
+                .with_visual_bounds(Aabb::new(
+                    Vec3::new(-0.95, -0.10, -0.55),
+                    Vec3::new(0.95, 3.20, 0.55),
+                )),
         );
         templates.register(
             RenderId::Stake,
-            RenderTemplate::new("stake").with_mesh_part(
-                MeshHandle::Cube,
-                MatKey::Wood,
-                Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.25, 1.6, 0.25),
-                    Quat::IDENTITY,
-                    Vec3::new(0.0, 0.8, 0.0),
-                ),
-            ),
+            RenderTemplate::new("stake")
+                .with_mesh_part(
+                    MeshHandle::Cube,
+                    MatKey::Wood,
+                    Mat4::from_scale_rotation_translation(
+                        Vec3::new(0.25, 1.6, 0.25),
+                        Quat::IDENTITY,
+                        Vec3::new(0.0, 0.8, 0.0),
+                    ),
+                )
+                // Tight AABB: just the column, no emitter reach.
+                .with_visual_bounds(Aabb::new(
+                    Vec3::new(-0.15, 0.0, -0.15),
+                    Vec3::new(0.15, 1.65, 0.15),
+                )),
         );
 
         let cube_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -423,6 +439,9 @@ impl View for Demo {
             },
         );
 
+        // 30-frame hysteresis matches CLAUDE.md's starting recommendation.
+        let live_instances = RenderInstances::<RenderId>::new(30);
+
         let now = Instant::now();
         Self {
             camera,
@@ -430,6 +449,7 @@ impl View for Demo {
             material,
             instances,
             templates,
+            live_instances,
             cube_vertices,
             cube_indices,
             buckets,
@@ -469,12 +489,14 @@ impl View for Demo {
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
 
-        // Extract: walk sim, look up template, fan out into mesh + emitter
-        // parts. Mesh parts go into instance buckets; emitter parts are
-        // declared on the reconciler (which lazily creates or refreshes the
-        // live emitter at this frame's world transform).
-        self.buckets.begin_frame();
-        self.emitters.begin_frame();
+        let frustum = Frustum::from_view_proj(self.camera.view_proj());
+
+        // --- Phase 1: declare a live render instance per sim object that
+        // carries a RenderId, computing its world AABB from the template's
+        // visual bounds. The reconciler lazy-creates new instances,
+        // refreshes existing ones, and (in the cull step below) drops any
+        // that have been outside the frustum past the hysteresis window.
+        self.live_instances.begin_frame();
         for (zone_id, zone) in sim.zones.iter() {
             for (id, obj) in zone.iter() {
                 let Some(&rid) = zone.components().get::<RenderId>(id) else {
@@ -484,22 +506,40 @@ impl View for Demo {
                     continue;
                 };
                 let object_xform = Mat4::from_rotation_translation(obj.rotation, obj.position);
+                let world_aabb = template
+                    .visual_bounds()
+                    .map(|local| local.transformed(object_xform));
                 let world_ref = WorldObjectRef { zone: zone_id, id };
-                for part in template.mesh_parts() {
-                    let world = object_xform * part.local_transform;
-                    self.buckets.push(
-                        BucketKey {
-                            mesh: part.mesh,
-                            material: part.material,
-                        },
-                        UnlitColoredAttribs::new(world, Vec4::ONE),
-                    );
-                }
-                for part in template.emitter_parts() {
-                    let world = object_xform * part.local_transform;
-                    self.emitters
-                        .declare(world_ref, part.slot, part.template, world);
-                }
+                self.live_instances
+                    .declare(world_ref, rid, object_xform, world_aabb);
+            }
+        }
+        self.live_instances.cull(&frustum);
+
+        // --- Phase 2: iterate alive instances and fan out into mesh-part
+        // bucket pushes plus emitter-part reconciler declarations. Emitter
+        // declarations only fire for alive instances, so a culled
+        // campfire's flame and smoke fade out via Linger semantics.
+        self.buckets.begin_frame();
+        self.emitters.begin_frame();
+        for (parent, rid, instance) in self.live_instances.iter() {
+            let Some(template) = self.templates.get(rid) else {
+                continue;
+            };
+            for part in template.mesh_parts() {
+                let world = instance.world_xform * part.local_transform;
+                self.buckets.push(
+                    BucketKey {
+                        mesh: part.mesh,
+                        material: part.material,
+                    },
+                    UnlitColoredAttribs::new(world, Vec4::ONE),
+                );
+            }
+            for part in template.emitter_parts() {
+                let world = instance.world_xform * part.local_transform;
+                self.emitters
+                    .declare(parent, part.slot, part.template, world);
             }
         }
 
