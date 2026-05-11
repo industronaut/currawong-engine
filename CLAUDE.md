@@ -73,6 +73,32 @@ The user implements the `View` trait with an associated `Sim: Simulation`:
 
 Fixed-tick (default 60 Hz) with an accumulator. The simulation always sees a constant `tick_period` regardless of speed; varying `SimClock::speed` only changes how many ticks fire per wall-clock second, which keeps sim logic deterministic at any playback rate. Pause is `set_speed(0.0)`. `MAX_TICKS_PER_FRAME = 16` prevents spiral-of-death. `SimClock::alpha()` returns `[0, 1]` interpolation factor for smooth motion (currently plumbed through but no example uses it).
 
+### Render objects (planned)
+
+Drawable content is organised view-side into **render objects** — templates analogous to Unity prefabs or Godot sub-scenes, each owning a hierarchy of meshes, emitters, materials, and view-side resources. Templates are identified by `RenderId` and registered when the camera enters a zone. Sim objects carry a `RenderId` naming which template renders them; many sim objects share one template (every oak tree → `tree_oak`). Per-instance variation lives in transforms and **slots**. This is closer to UE's `PrimitiveSceneProxy` model than to per-frame extraction — sim hands the view an identity + state, the view holds the structure.
+
+`(SimId, RenderId)` is the composite key for a live visual instance. Instances are created on first visibility and destroyed on cull or zone leave.
+
+**Slots** are typed, named parameters declared by a template (think Godot's `@export`, Unreal's `UPROPERTY`). The schema is a closed `SlotKind` enum (`F32`, `Vec3`, `Color`, `Bool`, `AssetRef<T>`, …) — explicitly not a `Variant` / `Box<dyn Any>` bag. Sim provides slot values per `(SimId, RenderId)`; the view routes them into uniforms or per-instance attribute buffers depending on cost.
+
+**Nested templates** are allowed, with rules:
+- Nested children are live references to other templates, not embedded snapshots — template edits propagate.
+- Instance overrides are slot values only. **Structural overrides are forbidden** (no "this instance has one extra child"); make a new template instead. This is the source of most of Unity's prefab pain — avoid it by construction.
+- Child slots are not auto-exposed up the tree — parents re-export deliberately, never automatically.
+
+**Visual scripting** lives in Rust as `RenderBehavior`-style traits declared by templates. No scripting language, node graphs, or hot-reload — deliberately deferred until the engine ships. Visual scripts may only mutate view state.
+
+**Material model** is three-tier:
+- *Material template* — pipeline + bind-group layout + slot schema, registered once.
+- *Material instance* — a bind group + uniform buffer bound to a template, cached or per-frame.
+- *Per-instance attributes* — model matrix, tint, anything varying per drawn copy, packed into the instance buffer (the existing `mat4_instance_attributes` helper is the right shape).
+
+Base `Material` is opaque — a typed bind-group producer. PBR (albedo/metallic/roughness) is `PbrMaterial: Material`, not baked into the base abstraction. Materials are not subclassed by what they draw (no `SpriteMaterial`/`MeshMaterial`); the contract with geometry is the instance-attribute layout.
+
+**Environment** — directional lights, sky dome, weather, fog — lives outside the sim entirely. It's view-owned global state attached to the camera/scene, not driven by zone object lists or `RenderId`. Registered alongside a zone but not produced by extraction.
+
+**Pass-awareness is deferred.** Single forward pass for now; shadow/depth-prepass would introduce material × pass → pipeline (Unreal's Material Domain). Don't build the permutation matrix until a second pass actually exists.
+
 ## Architectural invariants
 
 These are load-bearing — don't propose changes that violate them without checking first.
@@ -84,6 +110,9 @@ These are load-bearing — don't propose changes that violate them without check
 - **Don't fuse sim and view.** No "Sprite component on WorldObject", no scene-graph parent/child on the sim side. Rendering data lives in the View, not the WorldObject.
 - **Component lifecycle is bound to object lifecycle.** `Zone::remove` is the only path that keeps the `Components` registry in sync with the object slot-map. `Zone::split_mut` exposes the inner `SlotMap` for split-borrow iteration, but removing through it bypasses `Components::remove_all` and leaks components — don't.
 - **Component iteration is non-deterministic for now.** `Components` uses `HashMap` internally, which has a randomly-seeded hasher in std. Iteration order varies across runs. Acceptable while prototyping; will need to swap for a sparse-set or fixed-seed hasher before sim replay / lockstep networking is on the table.
+- **View state is recoverable from sim state.** Render objects are ephemeral. Zone leave tears down all view state for that zone; revisiting reconstructs it from sim state. Visual scripts may carry per-instance state but it must be derivable (or acceptably reset-on-re-view) from sim state — no view-side history. Cost: long-lived transients (smoke columns, fire flicker) cold-start when revisited. Acceptable for now; pre-warming visual state from sim history is the escape hatch if it becomes visible.
+- **Visual bounds differ from sim bounds.** Render-object templates declare their own AABB encompassing emitter reach and other large effects. Visibility culling uses that, not the sim object's footprint AABB. A 0.5 m campfire with a 6 m smoke column has a visual AABB that includes the column.
+- **Culling has hysteresis.** Within-zone visibility culling keeps an instance alive for ~30 frames after it leaves the visual-AABB-vs-frustum test, to avoid pop-out at grazing camera angles. Zone-level cull (camera in zone) is the coarse gate; visual-AABB-with-hysteresis is the fine gate.
 
 ## wgpu 29 / winit 0.30 quirks
 
