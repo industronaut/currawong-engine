@@ -72,4 +72,8 @@ name = "textured_pbr"
 required-features = ["render"]
 
 [[example]]
+name = "multi_zone"
+required-features = ["render"]
+
+[[example]]
 name = "headless"
