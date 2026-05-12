@@ -162,11 +162,17 @@ impl RenderObjectPass {
 /// also tolerated; the per-part callback is responsible for falling back.
 ///
 /// Panics on schema violations; these are programming errors, not runtime
-/// conditions.
+/// conditions. The body is gated on `debug_assertions` — in release builds
+/// this is a no-op so the per-frame, per-alive-instance call from
+/// [`RenderObjectPass`] costs nothing once the developer's templates are
+/// known good.
 pub fn validate_slot_values<M, MK, E, S>(
     template: &RenderTemplate<M, MK, E, S>,
     values: &SlotValues,
 ) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     for slot in template.slots() {
         assert!(
             slot.routing != SlotRouting::Uniform,
@@ -359,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "slot 'tint' on template 'tree' expects Color")]
     fn validate_panics_on_kind_mismatch() {
         let template = tree_template();
@@ -376,6 +383,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "SlotRouting::Uniform")]
     fn validate_panics_on_uniform_routing() {
         let template: RenderTemplate = RenderTemplate::new("torch").with_routed_slot(
@@ -384,5 +392,21 @@ mod tests {
             SlotRouting::Uniform,
         );
         validate_slot_values(&template, &SlotValues::new());
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn validate_is_no_op_in_release() {
+        // Same inputs that panic in debug — must be silently accepted in release.
+        let template = tree_template();
+        let mismatched = SlotValues::new().with("tint", SlotValue::F32(0.0));
+        validate_slot_values(&template, &mismatched);
+
+        let uniform_template: RenderTemplate = RenderTemplate::new("torch").with_routed_slot(
+            "brightness",
+            SlotKind::F32,
+            SlotRouting::Uniform,
+        );
+        validate_slot_values(&uniform_template, &SlotValues::new());
     }
 }
