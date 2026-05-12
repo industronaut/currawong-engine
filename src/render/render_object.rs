@@ -84,13 +84,12 @@ impl SlotValue {
 /// template-build time so the engine can pick the right packing strategy
 /// without runtime inference.
 ///
-/// `Instance` is the only routing currently implemented by
-/// [`RenderObjectPass`](super::RenderObjectPass). `Uniform` is reserved for
-/// values that should live in a per-instance uniform buffer slice indexed
-/// by `instance_index` in the shader; declaring a `Uniform` slot today is
-/// a no-op against draws (the engine helper panics if asked to draw a
-/// template that declares one) and is included so the schema doesn't need
-/// to break when uniform-routed slots land.
+/// `Instance` is the only routing currently implemented. `Uniform` is a
+/// doc-only reservation: [`RenderTemplate::with_routed_slot`] panics if
+/// asked for it, so the variant cannot reach a draw call. It exists so
+/// that adding the packing path later — gather across instances, allocate
+/// the uniform array buffer, write the values, bind to the pipeline,
+/// index by `instance_index` in shaders — doesn't break this enum's API.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum SlotRouting {
     /// Packed into the per-instance attribute buffer once per draw. Right
@@ -98,9 +97,10 @@ pub enum SlotRouting {
     /// (transform-adjacent floats, per-instance colours).
     #[default]
     Instance,
-    /// **Not yet implemented.** Packed into a per-instance uniform array
-    /// indexed by `instance_index`. Reserved for larger payloads that
-    /// don't fit cleanly into a vertex-attribute slot.
+    /// **Not yet implemented — reserved for the future.** Will pack values
+    /// into a per-instance uniform array indexed by `instance_index`, for
+    /// larger payloads that don't fit cleanly into a vertex-attribute slot.
+    /// [`RenderTemplate::with_routed_slot`] rejects this variant today.
     Uniform,
 }
 
@@ -274,6 +274,11 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     /// Declare a slot with an explicit [`SlotRouting`]. Slot names must be
     /// unique within a template; passing a duplicate panics — programming
     /// error, not runtime condition. Returns `self` for chaining.
+    ///
+    /// [`SlotRouting::Uniform`] is not yet implemented and is rejected here
+    /// at template-build time, so the failure surfaces at the API boundary
+    /// rather than as a draw-time trap. Use [`SlotRouting::Instance`] until
+    /// the uniform packing path lands.
     pub fn with_routed_slot(
         mut self,
         name: impl Into<String>,
@@ -281,6 +286,14 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
         routing: SlotRouting,
     ) -> Self {
         let name = name.into();
+        assert!(
+            routing != SlotRouting::Uniform,
+            "RenderTemplate '{}' slot '{}' requested SlotRouting::Uniform, \
+             which is not yet implemented — declare it as SlotRouting::Instance \
+             until uniform-routed packing lands.",
+            self.label,
+            name,
+        );
         assert!(
             !self.slots.iter().any(|s| s.name == name),
             "RenderTemplate '{}' already has a slot named '{}'",
@@ -510,11 +523,21 @@ mod tests {
     #[test]
     fn with_routed_slot_records_routing() {
         let t: RenderTemplate = RenderTemplate::new("torch")
-            .with_routed_slot("brightness", SlotKind::F32, SlotRouting::Uniform)
+            .with_routed_slot("brightness", SlotKind::F32, SlotRouting::Instance)
             .with_routed_slot("tint", SlotKind::Color, SlotRouting::Instance);
 
         let routings: Vec<SlotRouting> = t.slots().iter().map(|s| s.routing).collect();
-        assert_eq!(routings, vec![SlotRouting::Uniform, SlotRouting::Instance]);
+        assert_eq!(routings, vec![SlotRouting::Instance, SlotRouting::Instance]);
+    }
+
+    #[test]
+    #[should_panic(expected = "SlotRouting::Uniform")]
+    fn with_routed_slot_uniform_panics() {
+        let _: RenderTemplate = RenderTemplate::new("torch").with_routed_slot(
+            "brightness",
+            SlotKind::F32,
+            SlotRouting::Uniform,
+        );
     }
 
     #[test]

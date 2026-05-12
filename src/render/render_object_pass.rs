@@ -21,9 +21,7 @@ use glam::Mat4;
 use crate::sim::{WorldObjectRef, Zones};
 
 use super::live_render_objects::LiveRenderObjects;
-use super::render_object::{
-    EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotRouting, SlotValues,
-};
+use super::render_object::{EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotValues};
 use super::visibility::Frustum;
 
 /// Engine helper that drives the per-frame render-object walk. Stateless;
@@ -140,12 +138,14 @@ impl RenderObjectPass {
 }
 
 /// Validate that every value in `values` whose name appears in the
-/// template's schema has a matching [`SlotKind`], and that the template
-/// declares no [`SlotRouting::Uniform`] slots (not yet implemented).
+/// template's schema has a matching [`SlotKind`].
 ///
 /// Extra values whose names aren't in the schema are silently ignored —
 /// templates are the authority on what they consume. Missing values are
 /// also tolerated; the per-part callback is responsible for falling back.
+///
+/// [`SlotRouting::Uniform`] is rejected at template-build time by
+/// [`RenderTemplate::with_routed_slot`], so it cannot reach here.
 ///
 /// Panics on schema violations; these are programming errors, not runtime
 /// conditions. The body is gated on `debug_assertions` — in release builds
@@ -158,16 +158,6 @@ pub fn validate_slot_values<M, MK, E, S>(
 ) {
     if !cfg!(debug_assertions) {
         return;
-    }
-    for slot in template.slots() {
-        assert!(
-            slot.routing != SlotRouting::Uniform,
-            "RenderTemplate '{}' declares slot '{}' with SlotRouting::Uniform, \
-             which is not yet implemented in RenderObjectPass — declare it as \
-             SlotRouting::Instance until uniform-routed packing lands.",
-            template.label,
-            slot.name,
-        );
     }
     for (name, value) in values.iter() {
         if let Some(slot) = template.slot(name) {
@@ -369,30 +359,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "SlotRouting::Uniform")]
-    fn validate_panics_on_uniform_routing() {
-        let template: RenderTemplate = RenderTemplate::new("torch").with_routed_slot(
-            "brightness",
-            SlotKind::F32,
-            SlotRouting::Uniform,
-        );
-        validate_slot_values(&template, &SlotValues::new());
-    }
-
-    #[test]
     #[cfg(not(debug_assertions))]
     fn validate_is_no_op_in_release() {
         // Same inputs that panic in debug — must be silently accepted in release.
         let template = tree_template();
         let mismatched = SlotValues::new().with("tint", SlotValue::F32(0.0));
         validate_slot_values(&template, &mismatched);
-
-        let uniform_template: RenderTemplate = RenderTemplate::new("torch").with_routed_slot(
-            "brightness",
-            SlotKind::F32,
-            SlotRouting::Uniform,
-        );
-        validate_slot_values(&uniform_template, &SlotValues::new());
     }
 }
