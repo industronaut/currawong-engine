@@ -1,5 +1,5 @@
 //! Sim → `RenderId` → `RenderTemplate` → (mesh + emitter parts) → draws,
-//! with frustum-cull hysteresis via [`RenderInstances`].
+//! with frustum-cull hysteresis via [`LiveRenderObjects`].
 //!
 //! Two render templates are registered at init, each with a declared
 //! visual AABB:
@@ -10,9 +10,9 @@
 //! The scene is intentionally wider than the camera frustum: a row of
 //! campfires along Y and a row of stakes along X. As the camera orbits
 //! the origin, different objects enter and leave view; the
-//! `RenderInstances` reconciler keeps each instance alive for 30 frames
+//! `LiveRenderObjects` reconciler keeps each proxy alive for 30 frames
 //! after it leaves the frustum (the hysteresis window) so grazing-angle
-//! edges don't pop. Emitters are declared inside the alive-instance loop,
+//! edges don't pop. Emitters are declared inside the alive-proxy loop,
 //! so a culled campfire's flame and smoke fade out naturally via the
 //! reconciler's `Linger` lifecycle.
 
@@ -22,7 +22,7 @@ use std::time::Instant;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Aabb, Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, Frustum,
-    InstanceBuckets, MaterialInstanceRegistry, ParticleLifecycle, RenderInstances,
+    InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, ParticleLifecycle,
     RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKind, SlotValue,
     SlotValues, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject,
     Zone, Zones, wgpu, winit,
@@ -260,10 +260,10 @@ struct Demo {
     material: UnlitColoredMaterial,
     instances: MaterialInstanceRegistry<UnlitColoredInstance, MatKey>,
     templates: Templates,
-    /// Live render-object instances with cull hysteresis. Replaces a raw
+    /// Live render-object proxies with cull hysteresis. Replaces a raw
     /// per-frame sim walk: declare per object, cull against the frustum,
-    /// iterate alive instances for the actual draw fan-out.
-    live_instances: RenderInstances<RenderId>,
+    /// iterate alive proxies for the actual draw fan-out.
+    live_objects: LiveRenderObjects<RenderId>,
     cube_vertices: wgpu::Buffer,
     cube_indices: wgpu::Buffer,
     buckets: InstanceBuckets<BucketKey, UnlitColoredAttribs>,
@@ -472,7 +472,7 @@ impl View for Demo {
         );
 
         // 30-frame hysteresis matches CLAUDE.md's starting recommendation.
-        let live_instances = RenderInstances::<RenderId>::new(30);
+        let live_objects = LiveRenderObjects::<RenderId>::new(30);
 
         let now = Instant::now();
         Self {
@@ -481,7 +481,7 @@ impl View for Demo {
             material,
             instances,
             templates,
-            live_instances,
+            live_objects,
             cube_vertices,
             cube_indices,
             buckets,
@@ -528,12 +528,12 @@ impl View for Demo {
         RenderObjectPass::declare_and_cull(
             &sim.zones,
             &self.templates,
-            &mut self.live_instances,
+            &mut self.live_objects,
             &frustum,
         );
 
         // Phase 2: engine-driven fan-out. The helper iterates alive
-        // instances, validates each parent's SlotValues against the
+        // proxies, validates each parent's SlotValues against the
         // template schema, and calls our closures with already-composed
         // world transforms for each part. The "tint" slot drives the
         // per-instance attrib tint for *Wood* parts only — the stone base
@@ -544,7 +544,7 @@ impl View for Demo {
         RenderObjectPass::for_each_alive(
             &sim.zones,
             &self.templates,
-            &self.live_instances,
+            &self.live_objects,
             |_parent, _rid, part, world, slots| {
                 let tint = match slots.get("tint") {
                     Some(SlotValue::Color(c)) => c,
@@ -564,7 +564,7 @@ impl View for Demo {
             },
             |parent, _rid, part, world, _slots| {
                 self.emitters
-                    .declare(parent, part.slot, part.template, world);
+                    .declare(parent, part.attachment, part.template, world);
             },
         );
 

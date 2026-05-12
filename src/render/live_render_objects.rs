@@ -1,26 +1,26 @@
-//! Live render-object instances with frustum-cull hysteresis.
+//! Live render-object proxies with frustum-cull hysteresis.
 //!
 //! Pairs with [`RenderTemplate`](super::RenderTemplate) the same way
 //! [`EmitterReconciler`](super::EmitterReconciler) pairs with
 //! [`EmitterTemplate`](super::EmitterTemplate): the View walks the sim
-//! each frame and *declares* one instance per `(WorldObjectRef, R)` key,
-//! supplying the instance's world transform and visual AABB. After the
-//! sim walk, [`RenderInstances::cull`] tests each instance's AABB against
-//! the camera frustum, updates a per-instance hysteresis counter, and
-//! drops instances that have been outside the frustum longer than the
-//! configured window.
+//! each frame and *declares* one [`LiveRenderObject`] per
+//! `(WorldObjectRef, R)` key, supplying its world transform and visual
+//! AABB. After the sim walk, [`LiveRenderObjects::cull`] tests each
+//! object's AABB against the camera frustum, updates a per-object
+//! hysteresis counter, and drops objects that have been outside the
+//! frustum longer than the configured window.
 //!
 //! Lifecycle matches CLAUDE.md's invariants:
-//! - Instances created on first visibility (a new instance whose AABB is
+//! - Objects created on first visibility (a new object whose AABB is
 //!   outside the frustum is dropped on its first `cull`).
 //! - Destroyed on cull-past-hysteresis or when the sim object disappears
 //!   (no `declare` call this frame).
-//! - View state lives only as long as the instance — no history beyond
+//! - View state lives only as long as the proxy — no history beyond
 //!   the hysteresis counter, which is a pure function of recent
 //!   visibility.
 //!
 //! Templates with no `visual_bounds` are treated as always visible: their
-//! instances are never frustum-culled and are dropped only when the sim
+//! proxies are never frustum-culled and are dropped only when the sim
 //! object disappears.
 
 use std::collections::HashMap;
@@ -32,50 +32,53 @@ use crate::sim::WorldObjectRef;
 
 use super::visibility::{Aabb, Frustum};
 
-/// Per-instance state carried by [`RenderInstances`]: world transform,
+/// Per-object state carried by [`LiveRenderObjects`]: world transform,
 /// optional world-space visual AABB, and the hysteresis counter.
+///
+/// This is the view-side proxy for one sim object × render template
+/// pair — analogous to UE's `PrimitiveSceneProxy`.
 #[derive(Clone, Debug)]
-pub struct RenderInstance {
-    /// Composed world transform of the sim object owning this instance.
+pub struct LiveRenderObject {
+    /// Composed world transform of the sim object owning this proxy.
     /// World-space transform of a drawn part is
     /// `world_xform * part.local_transform`.
     pub world_xform: Mat4,
     /// World-space AABB used for frustum culling. `None` means the
-    /// instance is never frustum-culled (treated as always visible).
+    /// proxy is never frustum-culled (treated as always visible).
     pub world_aabb: Option<Aabb>,
     frames_since_visible: u32,
     declared_this_frame: bool,
 }
 
-impl RenderInstance {
-    /// Frames since this instance was last inside the frustum. `0` means
+impl LiveRenderObject {
+    /// Frames since this proxy was last inside the frustum. `0` means
     /// visible *this frame*; positive values mean within the hysteresis
     /// window. Useful for fade-out shaders or pop-out diagnostics.
     pub fn frames_since_visible(&self) -> u32 {
         self.frames_since_visible
     }
 
-    /// True if the instance was inside the frustum on the most recent
-    /// [`RenderInstances::cull`] call.
+    /// True if the proxy was inside the frustum on the most recent
+    /// [`LiveRenderObjects::cull`] call.
     pub fn is_visible(&self) -> bool {
         self.frames_since_visible == 0
     }
 }
 
-/// Live instances of render-object templates, keyed by
+/// Live proxies of render-object templates, keyed by
 /// `(WorldObjectRef, R)`. Generic over the render-id type `R`.
-pub struct RenderInstances<R: Copy + Eq + Hash> {
-    instances: HashMap<(WorldObjectRef, R), RenderInstance>,
+pub struct LiveRenderObjects<R: Copy + Eq + Hash> {
+    objects: HashMap<(WorldObjectRef, R), LiveRenderObject>,
     hysteresis_frames: u32,
 }
 
-impl<R: Copy + Eq + Hash> RenderInstances<R> {
+impl<R: Copy + Eq + Hash> LiveRenderObjects<R> {
     /// Create an empty reconciler. `hysteresis_frames` is the number of
-    /// frames an instance is kept alive after it leaves the frustum;
+    /// frames a proxy is kept alive after it leaves the frustum;
     /// CLAUDE.md commits to ~30 as a starting point.
     pub fn new(hysteresis_frames: u32) -> Self {
         Self {
-            instances: HashMap::new(),
+            objects: HashMap::new(),
             hysteresis_frames,
         }
     }
@@ -85,25 +88,25 @@ impl<R: Copy + Eq + Hash> RenderInstances<R> {
     }
 
     pub fn len(&self) -> usize {
-        self.instances.len()
+        self.objects.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.instances.is_empty()
+        self.objects.is_empty()
     }
 
-    /// Mark every existing instance as not-yet-seen this frame. Call at
+    /// Mark every existing proxy as not-yet-seen this frame. Call at
     /// the start of each frame before [`declare`](Self::declare)ing.
     pub fn begin_frame(&mut self) {
-        for inst in self.instances.values_mut() {
-            inst.declared_this_frame = false;
+        for obj in self.objects.values_mut() {
+            obj.declared_this_frame = false;
         }
     }
 
-    /// Declare an instance for this frame. Lazy-creates on first call for
+    /// Declare a proxy for this frame. Lazy-creates on first call for
     /// the `(parent, render_id)` key; otherwise refreshes its
     /// `world_xform` and `world_aabb` and marks it declared. New
-    /// instances are initialised just outside the hysteresis window, so
+    /// proxies are initialised just outside the hysteresis window, so
     /// they're dropped on the next [`cull`](Self::cull) unless visible —
     /// matching CLAUDE.md's "created on first visibility" semantics.
     pub fn declare(
@@ -114,54 +117,54 @@ impl<R: Copy + Eq + Hash> RenderInstances<R> {
         world_aabb: Option<Aabb>,
     ) {
         let init_frames = self.hysteresis_frames.saturating_add(1);
-        let inst = self
-            .instances
+        let obj = self
+            .objects
             .entry((parent, render_id))
-            .or_insert(RenderInstance {
+            .or_insert(LiveRenderObject {
                 world_xform,
                 world_aabb,
-                // Just past the window so a never-visible new instance is
+                // Just past the window so a never-visible new proxy is
                 // dropped on the first cull, instead of lingering 30 frames.
                 frames_since_visible: init_frames,
                 declared_this_frame: true,
             });
-        inst.world_xform = world_xform;
-        inst.world_aabb = world_aabb;
-        inst.declared_this_frame = true;
+        obj.world_xform = world_xform;
+        obj.world_aabb = world_aabb;
+        obj.declared_this_frame = true;
     }
 
-    /// Test each declared instance against `frustum`, update its
-    /// hysteresis counter, and drop instances that either are no longer
+    /// Test each declared proxy against `frustum`, update its
+    /// hysteresis counter, and drop proxies that either are no longer
     /// declared (sim object gone) or have been outside the frustum for
     /// more than [`hysteresis_frames`](Self::hysteresis_frames) frames.
     ///
-    /// Instances with no `world_aabb` are treated as always visible.
+    /// Proxies with no `world_aabb` are treated as always visible.
     pub fn cull(&mut self, frustum: &Frustum) {
         let hysteresis = self.hysteresis_frames;
-        self.instances.retain(|_, inst| {
-            if !inst.declared_this_frame {
+        self.objects.retain(|_, obj| {
+            if !obj.declared_this_frame {
                 return false;
             }
-            let visible = match &inst.world_aabb {
+            let visible = match &obj.world_aabb {
                 Some(aabb) => frustum.contains_aabb(aabb),
                 None => true,
             };
             if visible {
-                inst.frames_since_visible = 0;
+                obj.frames_since_visible = 0;
             } else {
-                inst.frames_since_visible = inst.frames_since_visible.saturating_add(1);
+                obj.frames_since_visible = obj.frames_since_visible.saturating_add(1);
             }
-            inst.frames_since_visible <= hysteresis
+            obj.frames_since_visible <= hysteresis
         });
     }
 
-    /// Iterate alive instances as `(parent, render_id, &instance)`.
+    /// Iterate alive proxies as `(parent, render_id, &object)`.
     /// Alive means: declared this frame AND currently inside the frustum
     /// or within the hysteresis window.
-    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectRef, R, &RenderInstance)> + '_ {
-        self.instances
+    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectRef, R, &LiveRenderObject)> + '_ {
+        self.objects
             .iter()
-            .map(|((parent, rid), inst)| (*parent, *rid, inst))
+            .map(|((parent, rid), obj)| (*parent, *rid, obj))
     }
 }
 
@@ -200,32 +203,32 @@ mod tests {
     }
 
     #[test]
-    fn declare_and_cull_inside_frustum_creates_instance() {
+    fn declare_and_cull_inside_frustum_creates_object() {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: RenderInstances<Rid> = RenderInstances::new(30);
+        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
         live.cull(&always_inside());
 
         assert_eq!(live.len(), 1);
-        let (_, _, inst) = live.iter().next().unwrap();
-        assert!(inst.is_visible());
+        let (_, _, obj) = live.iter().next().unwrap();
+        assert!(obj.is_visible());
     }
 
     #[test]
-    fn new_instance_outside_frustum_is_dropped_immediately() {
+    fn new_object_outside_frustum_is_dropped_immediately() {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: RenderInstances<Rid> = RenderInstances::new(30);
+        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
         live.cull(&always_outside());
 
         // CLAUDE.md: "Instances are created on first visibility." A new
-        // instance that was never visible is dropped, not lingering.
+        // proxy that was never visible is dropped, not lingering.
         assert_eq!(live.len(), 0);
     }
 
@@ -234,7 +237,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: RenderInstances<Rid> = RenderInstances::new(5);
+        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(5);
         // Establish visibility.
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
@@ -246,10 +249,10 @@ mod tests {
             live.begin_frame();
             live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
             live.cull(&always_outside());
-            assert_eq!(live.len(), 1, "instance dropped at frame {f} of hysteresis");
-            let (_, _, inst) = live.iter().next().unwrap();
-            assert_eq!(inst.frames_since_visible(), f);
-            assert!(!inst.is_visible());
+            assert_eq!(live.len(), 1, "proxy dropped at frame {f} of hysteresis");
+            let (_, _, obj) = live.iter().next().unwrap();
+            assert_eq!(obj.frames_since_visible(), f);
+            assert!(!obj.is_visible());
         }
         // One more frame past the window → drop.
         live.begin_frame();
@@ -263,7 +266,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: RenderInstances<Rid> = RenderInstances::new(5);
+        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(5);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
         live.cull(&always_inside());
@@ -274,23 +277,23 @@ mod tests {
             live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
             live.cull(&always_outside());
         }
-        let (_, _, inst) = live.iter().next().unwrap();
-        assert_eq!(inst.frames_since_visible(), 3);
+        let (_, _, obj) = live.iter().next().unwrap();
+        assert_eq!(obj.frames_since_visible(), 3);
 
         // Now visible again — counter should reset.
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
         live.cull(&always_inside());
-        let (_, _, inst) = live.iter().next().unwrap();
-        assert!(inst.is_visible());
+        let (_, _, obj) = live.iter().next().unwrap();
+        assert!(obj.is_visible());
     }
 
     #[test]
-    fn undeclared_instance_is_dropped() {
+    fn undeclared_object_is_dropped() {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: RenderInstances<Rid> = RenderInstances::new(30);
+        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
         live.cull(&always_inside());
@@ -307,14 +310,14 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: RenderInstances<Rid> = RenderInstances::new(2);
+        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(2);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, None);
         live.cull(&always_outside()); // would normally drop on first cull
 
         assert_eq!(live.len(), 1);
-        let (_, _, inst) = live.iter().next().unwrap();
-        assert!(inst.is_visible());
+        let (_, _, obj) = live.iter().next().unwrap();
+        assert!(obj.is_visible());
     }
 
     #[test]
@@ -322,7 +325,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: RenderInstances<Rid> = RenderInstances::new(30);
+        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)));
         live.declare(

@@ -1,7 +1,7 @@
 //! Visibility primitives: axis-aligned bounding boxes and view-frustum
 //! tests. Used by render-object templates ([`visual_bounds`](super::RenderTemplate::visual_bounds))
-//! and by the live-instance reconciler
-//! ([`RenderInstances::cull`](super::RenderInstances::cull)).
+//! and by the live-proxy reconciler
+//! ([`LiveRenderObjects::cull`](super::LiveRenderObjects::cull)).
 
 use glam::{Mat4, Vec3, Vec4};
 
