@@ -144,58 +144,116 @@ impl<V: View> ApplicationHandler for Handler<V> {
     }
 }
 
+/// Per-frame mutable resources passed between phases of [`render_frame`].
+///
+/// `Frame` exists for the lifetime of a single redraw: [`begin_frame`]
+/// constructs it from a freshly-acquired surface texture and a new command
+/// encoder, the main and overlay phases record draws into it, and
+/// [`end_frame`] consumes it via `submit` + `present`. Splitting the per-frame
+/// state out of `RunState` keeps the phase functions composable — each takes
+/// `&mut Frame` plus only the long-lived state it actually needs.
+struct Frame {
+    surface_texture: wgpu::SurfaceTexture,
+    view_tex: wgpu::TextureView,
+    encoder: wgpu::CommandEncoder,
+    /// Command buffers produced by overlay phases that must be submitted
+    /// *before* the frame's main encoder (egui's texture-upload staging).
+    pre_submit: Vec<wgpu::CommandBuffer>,
+}
+
 fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, alpha: f32) {
+    let Some(mut frame) = begin_frame(&mut state.renderer) else {
+        return;
+    };
+    extract_scene::<V>(&state.view, &state.sim, &state.renderer);
+    main_pass::<V>(
+        &mut state.view,
+        &state.sim,
+        alpha,
+        &state.renderer,
+        &mut frame,
+    );
+    #[cfg(feature = "yakui")]
+    yakui_overlay::<V>(state, event_loop, &mut frame);
+    #[cfg(feature = "egui")]
+    egui_overlay::<V>(state, event_loop, &mut frame);
+    #[cfg(not(any(feature = "egui", feature = "yakui")))]
     let _ = event_loop;
-    let frame = match state.renderer.surface.get_current_texture() {
+    end_frame(&state.renderer, frame);
+}
+
+/// Phase 1: acquire the swapchain image and create the frame encoder.
+///
+/// Returns `None` on recoverable surface errors — the caller should skip the
+/// frame and try again next redraw. Outdated / Lost trigger a resize so the
+/// next acquire sees a fresh configuration.
+fn begin_frame(renderer: &mut Renderer) -> Option<Frame> {
+    let surface_texture = match renderer.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
         wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-            let size = state.renderer.window.inner_size();
-            state.renderer.resize(size.width, size.height);
-            return;
+            let size = renderer.window.inner_size();
+            renderer.resize(size.width, size.height);
+            return None;
         }
         wgpu::CurrentSurfaceTexture::Timeout
         | wgpu::CurrentSurfaceTexture::Occluded
-        | wgpu::CurrentSurfaceTexture::Validation => return,
+        | wgpu::CurrentSurfaceTexture::Validation => return None,
     };
 
-    let view_tex = frame
+    let view_tex = surface_texture
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
 
-    let mut encoder =
-        state
-            .renderer
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("currawong frame encoder"),
-            });
+    let encoder = renderer
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("currawong frame encoder"),
+        });
 
-    // Extract the scene environment for the active zone (if any) and upload
-    // it to the engine-managed scene bind group. Pipelines that declare
-    // `Renderer::scene_layout` read the result automatically once they bind
-    // `Renderer::scene_bind_group`.
-    if let Some(zone) = state.view.active_zone(&state.sim) {
-        let env = state.view.extract_environment(&state.sim, zone);
-        state.renderer.write_scene(&env);
+    Some(Frame {
+        surface_texture,
+        view_tex,
+        encoder,
+        pre_submit: Vec::new(),
+    })
+}
+
+/// Phase 2: extract per-frame scene state from sim → engine-managed uniforms.
+///
+/// Currently just the directional-light environment for the active zone.
+/// Shadow/IBL probe extraction would land here when added.
+fn extract_scene<V: View>(view: &V, sim: &V::Sim, renderer: &Renderer) {
+    if let Some(zone) = view.active_zone(sim) {
+        let env = view.extract_environment(sim, zone);
+        renderer.write_scene(&env);
     }
+}
 
-    {
-        let depth_attachment =
-            state
-                .renderer
-                .depth_view()
-                .map(|view| wgpu::RenderPassDepthStencilAttachment {
-                    view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+/// Phase 3: main world pass — clear, optional depth attach, `View::render`.
+fn main_pass<V: View>(
+    view: &mut V,
+    sim: &V::Sim,
+    alpha: f32,
+    renderer: &Renderer,
+    frame: &mut Frame,
+) {
+    let depth_attachment =
+        renderer
+            .depth_view()
+            .map(|depth_view| wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            });
+    let mut pass = frame
+        .encoder
+        .begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("currawong frame pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view_tex,
+                view: &frame.view_tex,
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
@@ -206,50 +264,61 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
             depth_stencil_attachment: depth_attachment,
             ..Default::default()
         });
-        state
-            .view
-            .render(&state.sim, alpha, &state.renderer, &mut pass);
-    }
+    view.render(sim, alpha, renderer, &mut pass);
+}
 
-    // Paint order: world → yakui (game UI) → egui (debug overlay on top).
-    #[cfg(feature = "yakui")]
-    {
-        let RunState {
-            ref mut view,
-            ref mut sim,
-            ref mut clock,
-            ref renderer,
-            ref mut game_ui,
-            ..
-        } = *state;
-        game_ui.run_and_render(renderer, &mut encoder, &view_tex, || {
-            let mut ctx = EngineCtx { event_loop, clock };
-            view.game_ui(sim, &mut ctx);
+/// Phase 4a: yakui (game UI) overlay. Paints between the world and any
+/// debug overlay.
+#[cfg(feature = "yakui")]
+fn yakui_overlay<V: View>(
+    state: &mut RunState<V>,
+    event_loop: &ActiveEventLoop,
+    frame: &mut Frame,
+) {
+    state
+        .game_ui
+        .run_and_render(&state.renderer, &mut frame.encoder, &frame.view_tex, || {
+            let mut ctx = EngineCtx {
+                event_loop,
+                clock: &mut state.clock,
+            };
+            state.view.game_ui(&mut state.sim, &mut ctx);
         });
-    }
+}
 
-    #[cfg(feature = "egui")]
-    let egui_staging = {
-        let RunState {
-            ref mut view,
-            ref mut sim,
-            ref mut clock,
-            ref renderer,
-            ref mut debug_ui,
-            ..
-        } = *state;
-        debug_ui.run_and_render(renderer, &mut encoder, &view_tex, |egui_ctx| {
-            let mut ctx = EngineCtx { event_loop, clock };
-            view.ui(sim, &mut ctx, egui_ctx);
-        })
-    };
-    #[cfg(not(feature = "egui"))]
-    let egui_staging: Vec<wgpu::CommandBuffer> = Vec::new();
+/// Phase 4b: egui (debug overlay). Sits visually on top of everything.
+///
+/// Returns staging command buffers (texture uploads) via [`Frame::pre_submit`]
+/// — they must be submitted before the frame's main encoder.
+#[cfg(feature = "egui")]
+fn egui_overlay<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, frame: &mut Frame) {
+    let staging = state.debug_ui.run_and_render(
+        &state.renderer,
+        &mut frame.encoder,
+        &frame.view_tex,
+        |egui_ctx| {
+            let mut ctx = EngineCtx {
+                event_loop,
+                clock: &mut state.clock,
+            };
+            state.view.ui(&mut state.sim, &mut ctx, egui_ctx);
+        },
+    );
+    frame.pre_submit.extend(staging);
+}
 
-    state.renderer.queue.submit(
-        egui_staging
+/// Phase 5: submit recorded work and present the swapchain image.
+fn end_frame(renderer: &Renderer, frame: Frame) {
+    let Frame {
+        surface_texture,
+        encoder,
+        pre_submit,
+        ..
+    } = frame;
+    renderer.queue.submit(
+        pre_submit
             .into_iter()
             .chain(std::iter::once(encoder.finish())),
     );
-    frame.present();
+    surface_texture.present();
 }
