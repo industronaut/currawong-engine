@@ -13,6 +13,7 @@ use crate::sim::{SimClock, Simulation};
 
 #[cfg(feature = "egui")]
 use super::debug_ui::DebugUi;
+use super::environment::ViewEnvironment;
 #[cfg(feature = "yakui")]
 use super::game_ui::GameUi;
 use super::renderer::Renderer;
@@ -222,11 +223,17 @@ fn begin_frame(renderer: &mut Renderer) -> Option<Frame> {
 ///
 /// Currently just the directional-light environment for the active zone.
 /// Shadow/IBL probe extraction would land here when added.
+///
+/// When `active_zone` returns `None` (typical for UI/2D views) the neutral
+/// environment is written instead of leaving the previous frame's values in
+/// the buffer — otherwise any pipeline declaring `scene_layout` would sample
+/// stale (or zero-initialised on the first frame) lighting.
 fn extract_scene<V: View>(view: &V, sim: &V::Sim, renderer: &Renderer) {
-    if let Some(zone) = view.active_zone(sim) {
-        let env = view.extract_environment(sim, zone);
-        renderer.write_scene(&env);
-    }
+    let env = match view.active_zone(sim) {
+        Some(zone) => view.extract_environment(sim, zone),
+        None => ViewEnvironment::neutral(),
+    };
+    renderer.write_scene(&env);
 }
 
 /// Phase 3: main world pass — clear, optional depth attach, `View::render`.

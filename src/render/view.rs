@@ -162,6 +162,11 @@ pub trait View: 'static {
     /// [`Renderer::scene_layout`](crate::Renderer::scene_layout) reads it
     /// automatically.
     ///
+    /// When [`active_zone`](Self::active_zone) returns `None` the engine
+    /// writes [`ViewEnvironment::neutral`] to the scene bind group instead
+    /// of calling this — so UI/2D views see a sensible default rather than
+    /// stale values from a prior frame.
+    ///
     /// Default returns [`ViewEnvironment::neutral`] — full ambient, no sun.
     /// Override to drive lighting from `SimEnvironment` (or anything else).
     fn extract_environment(&self, sim: &Self::Sim, zone: ZoneId) -> ViewEnvironment {
