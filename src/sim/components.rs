@@ -26,29 +26,39 @@ use super::zone::WorldObjectId;
 /// `HashMap<WorldObjectId, T>` for a sparse-set (deterministic by insertion
 /// order) or a fixed-seed hasher when that becomes a constraint.
 pub struct Components {
-    maps: HashMap<TypeId, Box<dyn ComponentStorage>>,
+    maps: HashMap<TypeId, Entry>,
 }
 
-trait ComponentStorage: Any {
-    fn remove(&mut self, id: WorldObjectId);
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
+/// One type-erased per-component map, plus the function pointer needed to
+/// drop a `WorldObjectId` from it without knowing `T` (used by
+/// [`Components::remove_all`]). The trait-object indirection that previously
+/// hosted these has collapsed into the function pointer.
+struct Entry {
+    map: Box<dyn Any>,
+    remove: fn(&mut dyn Any, WorldObjectId),
 }
 
-struct TypedStore<T> {
-    map: HashMap<WorldObjectId, T>,
+impl Entry {
+    fn new<T: 'static>() -> Self {
+        Self {
+            map: Box::new(HashMap::<WorldObjectId, T>::new()),
+            remove: |map, id| {
+                map.downcast_mut::<HashMap<WorldObjectId, T>>()
+                    .expect("TypeId keys its concrete map")
+                    .remove(&id);
+            },
+        }
+    }
 }
 
-impl<T: 'static> ComponentStorage for TypedStore<T> {
-    fn remove(&mut self, id: WorldObjectId) {
-        self.map.remove(&id);
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+fn map_of<T: 'static>(maps: &HashMap<TypeId, Entry>) -> Option<&HashMap<WorldObjectId, T>> {
+    maps.get(&TypeId::of::<T>())?.map.downcast_ref()
+}
+
+fn map_of_mut<T: 'static>(
+    maps: &mut HashMap<TypeId, Entry>,
+) -> Option<&mut HashMap<WorldObjectId, T>> {
+    maps.get_mut(&TypeId::of::<T>())?.map.downcast_mut()
 }
 
 impl Components {
@@ -60,66 +70,47 @@ impl Components {
 
     /// Attach a `T` to `id`, returning the previous value if one was already set.
     pub fn insert<T: 'static>(&mut self, id: WorldObjectId, value: T) -> Option<T> {
-        let store = self.maps.entry(TypeId::of::<T>()).or_insert_with(|| {
-            Box::new(TypedStore::<T> {
-                map: HashMap::new(),
-            })
-        });
-        store
-            .as_any_mut()
-            .downcast_mut::<TypedStore<T>>()
-            .expect("TypeId keys its concrete TypedStore")
+        self.maps
+            .entry(TypeId::of::<T>())
+            .or_insert_with(Entry::new::<T>)
             .map
+            .downcast_mut::<HashMap<WorldObjectId, T>>()
+            .expect("TypeId keys its concrete map")
             .insert(id, value)
     }
 
     pub fn get<T: 'static>(&self, id: WorldObjectId) -> Option<&T> {
-        let store = self.maps.get(&TypeId::of::<T>())?;
-        store.as_any().downcast_ref::<TypedStore<T>>()?.map.get(&id)
+        map_of::<T>(&self.maps)?.get(&id)
     }
 
     pub fn get_mut<T: 'static>(&mut self, id: WorldObjectId) -> Option<&mut T> {
-        let store = self.maps.get_mut(&TypeId::of::<T>())?;
-        store
-            .as_any_mut()
-            .downcast_mut::<TypedStore<T>>()?
-            .map
-            .get_mut(&id)
+        map_of_mut::<T>(&mut self.maps)?.get_mut(&id)
     }
 
     /// Remove the `T` attached to `id`, returning it if present.
     pub fn remove<T: 'static>(&mut self, id: WorldObjectId) -> Option<T> {
-        let store = self.maps.get_mut(&TypeId::of::<T>())?;
-        store
-            .as_any_mut()
-            .downcast_mut::<TypedStore<T>>()?
-            .map
-            .remove(&id)
+        map_of_mut::<T>(&mut self.maps)?.remove(&id)
     }
 
     /// Drop every component attached to `id`. Called by
     /// [`Zone::remove`](crate::Zone::remove) so component lifecycle tracks
     /// object lifecycle.
     pub fn remove_all(&mut self, id: WorldObjectId) {
-        for store in self.maps.values_mut() {
-            store.remove(id);
+        for entry in self.maps.values_mut() {
+            (entry.remove)(&mut *entry.map, id);
         }
     }
 
     pub fn iter<T: 'static>(&self) -> impl Iterator<Item = (WorldObjectId, &T)> + '_ {
-        self.maps
-            .get(&TypeId::of::<T>())
-            .and_then(|store| store.as_any().downcast_ref::<TypedStore<T>>())
+        map_of::<T>(&self.maps)
             .into_iter()
-            .flat_map(|store| store.map.iter().map(|(id, v)| (*id, v)))
+            .flat_map(|m| m.iter().map(|(id, v)| (*id, v)))
     }
 
     pub fn iter_mut<T: 'static>(&mut self) -> impl Iterator<Item = (WorldObjectId, &mut T)> + '_ {
-        self.maps
-            .get_mut(&TypeId::of::<T>())
-            .and_then(|store| store.as_any_mut().downcast_mut::<TypedStore<T>>())
+        map_of_mut::<T>(&mut self.maps)
             .into_iter()
-            .flat_map(|store| store.map.iter_mut().map(|(id, v)| (*id, v)))
+            .flat_map(|m| m.iter_mut().map(|(id, v)| (*id, v)))
     }
 }
 
