@@ -25,11 +25,11 @@ use std::time::{Duration, Instant};
 use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, InstanceBuckets,
-    MaterialInstanceRegistry, MeshPart, RenderInstances, RenderObjectPass, RenderRegistry,
-    RenderTemplate, Renderer, Simulation, SlotKind, TerrainMaterial, TerrainMaterialInstance,
-    TerrainRenderer, TileCoord, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial,
-    View, WorldObject, Zone, ZoneId, Zones, wgpu, winit,
+    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, InstanceBuckets, LiveRenderObjects,
+    MaterialInstanceRegistry, MeshPart, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer,
+    Simulation, SlotKind, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
+    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject, Zone,
+    ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -166,7 +166,7 @@ struct Demo {
     material: UnlitColoredMaterial,
     instances: MaterialInstanceRegistry<UnlitColoredInstance, MatKey>,
     templates: Templates,
-    live_instances: RenderInstances<RenderId>,
+    live_objects: LiveRenderObjects<RenderId>,
     meshes: HashMap<MeshHandle, GpuMesh>,
     buckets: InstanceBuckets<MeshHandle, UnlitColoredAttribs>,
     terrain_material: TerrainMaterial,
@@ -244,7 +244,7 @@ impl View for Demo {
             material,
             instances,
             templates,
-            live_instances: RenderInstances::new(30),
+            live_objects: LiveRenderObjects::new(30),
             meshes,
             buckets,
             terrain_material,
@@ -295,7 +295,7 @@ impl View for Demo {
         RenderObjectPass::declare_and_cull(
             &sim.zones,
             &self.templates,
-            &mut self.live_instances,
+            &mut self.live_objects,
             &frustum,
         );
 
@@ -303,7 +303,7 @@ impl View for Demo {
         // (age → height → world matrix; age + seed → tint) lives inside
         // `extract_part`; adding a new slot is local to that function.
         self.buckets.begin_frame();
-        for (parent, rid, instance) in self.live_instances.iter() {
+        for (parent, rid, object) in self.live_objects.iter() {
             let tree = sim
                 .zones
                 .get(parent.zone)
@@ -313,7 +313,7 @@ impl View for Demo {
             let template = self.templates.get(rid).expect("declared template");
             for part in template.mesh_parts() {
                 self.buckets
-                    .push(part.mesh, extract_part(&tree, part, instance.world_xform));
+                    .push(part.mesh, extract_part(&tree, part, object.world_xform));
             }
         }
         self.buckets.upload(&renderer.queue);

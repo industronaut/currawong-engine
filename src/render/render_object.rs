@@ -203,7 +203,7 @@ impl<M, MK> MeshPart<M, MK> {
 }
 
 /// An emitter attachment declared by a [`RenderTemplate`]: which emitter
-/// template `E` to spawn, which `S` slot the attachment fills (so one
+/// template `E` to spawn, which `S` attachment id keys it (so one
 /// template can carry several emitters keyed independently — e.g. flame +
 /// smoke + sparks), and a transform relative to the template root.
 ///
@@ -211,10 +211,13 @@ impl<M, MK> MeshPart<M, MK> {
 /// [`EmitterReconciler<E, S>`](super::EmitterReconciler), which owns the
 /// emitter lifecycle and particle integration. The render-object system
 /// only declares attachments; the reconciler handles state.
+///
+/// `attachment` is distinct from a [`SlotKind`] template slot — it's an
+/// emitter-keying id chosen by the user, not a typed template parameter.
 #[derive(Clone, Debug)]
 pub struct EmitterPart<E, S> {
     pub template: E,
-    pub slot: S,
+    pub attachment: S,
     /// Transform from the part's local frame to the template's root frame.
     /// World transform of a declared emitter is
     /// `world_xform_of_object * local_transform`.
@@ -222,10 +225,10 @@ pub struct EmitterPart<E, S> {
 }
 
 impl<E, S> EmitterPart<E, S> {
-    pub fn new(template: E, slot: S, local_transform: Mat4) -> Self {
+    pub fn new(template: E, attachment: S, local_transform: Mat4) -> Self {
         Self {
             template,
-            slot,
+            attachment,
             local_transform,
         }
     }
@@ -308,9 +311,9 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     /// during extraction and declares each on an
     /// [`EmitterReconciler<E, S>`](super::EmitterReconciler), composing the
     /// part's local transform with the sim object's world transform.
-    pub fn with_emitter_part(mut self, template: E, slot: S, local_transform: Mat4) -> Self {
+    pub fn with_emitter_part(mut self, template: E, attachment: S, local_transform: Mat4) -> Self {
         self.emitter_parts
-            .push(EmitterPart::new(template, slot, local_transform));
+            .push(EmitterPart::new(template, attachment, local_transform));
         self
     }
 
@@ -336,7 +339,7 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
 
     /// Set the template's *visual* AABB — the region of space the template
     /// occupies when rendered, including emitter reach and other effects.
-    /// Used by [`RenderInstances::cull`](super::RenderInstances::cull); a
+    /// Used by [`LiveRenderObjects::cull`](super::LiveRenderObjects::cull); a
     /// template without visual bounds is never culled.
     ///
     /// CLAUDE.md invariant: visual bounds differ from sim bounds. A 0.5 m
@@ -642,9 +645,9 @@ mod tests {
         let parts = t.emitter_parts();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].template, TestEmitter::Flame);
-        assert_eq!(parts[0].slot, TestEmitterSlot::Main);
+        assert_eq!(parts[0].attachment, TestEmitterSlot::Main);
         assert_eq!(parts[1].template, TestEmitter::Smoke);
-        assert_eq!(parts[1].slot, TestEmitterSlot::Secondary);
+        assert_eq!(parts[1].attachment, TestEmitterSlot::Secondary);
         assert_eq!(parts[1].local_transform.col(3).truncate().y, 0.85);
     }
 

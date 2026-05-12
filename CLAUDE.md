@@ -82,7 +82,7 @@ Fixed-tick (default 60 Hz) with an accumulator. The simulation always sees a con
 
 ### Render objects
 
-Mostly landed: `RenderTemplate`, `RenderRegistry`, `SlotKind`/`SlotValue`/`SlotRouting`, `MeshPart`, `EmitterPart`, visual-bounds AABBs, hysteresis-culled `RenderInstances`, and the engine-driven `RenderObjectPass` helper exist. Uniform-routed slot packing, nested templates, structural-override rules, and visual scripting are still on the design page below.
+Mostly landed: `RenderTemplate`, `RenderRegistry`, `SlotKind`/`SlotValue`/`SlotRouting`, `MeshPart`, `EmitterPart`, visual-bounds AABBs, hysteresis-culled `LiveRenderObjects`, and the engine-driven `RenderObjectPass` helper exist. Uniform-routed slot packing, nested templates, structural-override rules, and visual scripting are still on the design page below.
 
 Drawable content is organised view-side into **render objects** — templates analogous to Unity prefabs or Godot sub-scenes, each owning a hierarchy of meshes, emitters, materials, and view-side resources. Templates are identified by `RenderId` and registered when the camera enters a zone. Sim objects carry a `RenderId` naming which template renders them; many sim objects share one template (every oak tree → `tree_oak`). Per-instance variation lives in transforms and **slots**. This is closer to UE's `PrimitiveSceneProxy` model than to per-frame extraction — sim hands the view an identity + state, the view holds the structure.
 

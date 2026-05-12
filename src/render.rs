@@ -37,9 +37,9 @@ mod environment;
 #[cfg(feature = "yakui")]
 mod game_ui;
 mod instance;
+mod live_render_objects;
 mod material;
 mod pbr;
-mod render_instances;
 mod render_object;
 mod render_object_pass;
 mod renderer;
@@ -56,11 +56,11 @@ pub use camera::{Camera, CameraBinding, CameraUniformData};
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
 pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
 pub use instance::{InstanceBuckets, mat4_instance_attributes};
+pub use live_render_objects::{LiveRenderObject, LiveRenderObjects};
 pub use material::{
     MaterialInstanceRegistry, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial,
 };
 pub use pbr::{PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
-pub use render_instances::{RenderInstance, RenderInstances};
 pub use render_object::{
     EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotRouting,
     SlotValue, SlotValues,

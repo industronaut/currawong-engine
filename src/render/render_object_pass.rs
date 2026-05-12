@@ -2,7 +2,7 @@
 //!
 //! Owns the per-frame walk that the [`render_objects`](../../examples/render_objects.rs)
 //! example used to do by hand: sim → [`RenderId`] → [`RenderTemplate`] →
-//! declared instance → frustum cull with hysteresis → fan-out per part.
+//! declared proxy → frustum cull with hysteresis → fan-out per part.
 //! View code supplies a per-part callback (and optionally a per-emitter
 //! callback) that does the actual draw-attrib push; the engine owns the
 //! traversal and validates slot values against the template schema.
@@ -20,7 +20,7 @@ use glam::Mat4;
 
 use crate::sim::{WorldObjectRef, Zones};
 
-use super::render_instances::RenderInstances;
+use super::live_render_objects::LiveRenderObjects;
 use super::render_object::{
     EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotRouting, SlotValues,
 };
@@ -31,23 +31,23 @@ use super::visibility::Frustum;
 pub struct RenderObjectPass;
 
 impl RenderObjectPass {
-    /// Phase 1: walk `zones` and declare a live instance on
-    /// `live_instances` for each [`WorldObject`](crate::sim::zone::WorldObject)
+    /// Phase 1: walk `zones` and declare a live proxy on
+    /// `live_objects` for each [`WorldObject`](crate::sim::zone::WorldObject)
     /// whose components include an `R` render id, then cull against
-    /// `frustum`. Calls [`RenderInstances::begin_frame`] for you.
+    /// `frustum`. Calls [`LiveRenderObjects::begin_frame`] for you.
     ///
-    /// Templates with no `visual_bounds` produce instances with no AABB,
-    /// which [`RenderInstances::cull`] treats as always-visible — matching
+    /// Templates with no `visual_bounds` produce proxies with no AABB,
+    /// which [`LiveRenderObjects::cull`] treats as always-visible — matching
     /// CLAUDE.md's "templates without bounds are never culled" rule.
     pub fn declare_and_cull<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_instances: &mut RenderInstances<R>,
+        live_objects: &mut LiveRenderObjects<R>,
         frustum: &Frustum,
     ) where
         R: Copy + Eq + Hash + 'static,
     {
-        live_instances.begin_frame();
+        live_objects.begin_frame();
         for (zone_id, zone) in zones.iter() {
             for (id, obj) in zone.iter() {
                 let Some(&rid) = zone.components().get::<R>(id) else {
@@ -60,7 +60,7 @@ impl RenderObjectPass {
                 let world_aabb = template
                     .visual_bounds()
                     .map(|local| local.transformed(object_xform));
-                live_instances.declare(
+                live_objects.declare(
                     WorldObjectRef { zone: zone_id, id },
                     rid,
                     object_xform,
@@ -68,16 +68,16 @@ impl RenderObjectPass {
                 );
             }
         }
-        live_instances.cull(frustum);
+        live_objects.cull(frustum);
     }
 
-    /// Phase 2 (mesh-only): iterate alive instances, validate each parent's
+    /// Phase 2 (mesh-only): iterate alive proxies, validate each parent's
     /// `SlotValues` against the template schema, then invoke `on_part` for
     /// every [`MeshPart`] with its world transform composed against the
-    /// instance's world transform.
+    /// proxy's world transform.
     ///
     /// The slot-values lookup is a single `Components::get::<SlotValues>(id)`
-    /// per alive instance; objects without that component are treated as
+    /// per alive proxy; objects without that component are treated as
     /// having an empty `SlotValues` (templates may then fall back to
     /// defaults in `on_part`).
     ///
@@ -86,24 +86,18 @@ impl RenderObjectPass {
     pub fn for_each_alive_part<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_instances: &RenderInstances<R>,
+        live_objects: &LiveRenderObjects<R>,
         on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues),
     ) where
         R: Copy + Eq + Hash + 'static,
     {
-        Self::for_each_alive(
-            zones,
-            templates,
-            live_instances,
-            on_part,
-            |_, _, _, _, _| {},
-        );
+        Self::for_each_alive(zones, templates, live_objects, on_part, |_, _, _, _, _| {});
     }
 
-    /// Phase 2 (mesh + emitter): iterate alive instances, validate each
+    /// Phase 2 (mesh + emitter): iterate alive proxies, validate each
     /// parent's `SlotValues` against the template schema, then invoke
     /// `on_part` for every [`MeshPart`] and `on_emitter` for every
-    /// [`EmitterPart`]. Slot validation happens once per alive instance;
+    /// [`EmitterPart`]. Slot validation happens once per alive proxy;
     /// both callbacks see the same `&SlotValues`.
     ///
     /// Use this when a template carries [`EmitterPart`]s — the demo at
@@ -113,20 +107,20 @@ impl RenderObjectPass {
     pub fn for_each_alive<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_instances: &RenderInstances<R>,
+        live_objects: &LiveRenderObjects<R>,
         mut on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues),
         mut on_emitter: impl FnMut(WorldObjectRef, R, &EmitterPart<E, S>, Mat4, &SlotValues),
     ) where
         R: Copy + Eq + Hash + 'static,
     {
         let empty = SlotValues::new();
-        for (parent, rid, instance) in live_instances.iter() {
+        for (parent, rid, object) in live_objects.iter() {
             let Some(template) = templates.get(rid) else {
                 continue;
             };
             let zone = zones
                 .get(parent.zone)
-                .expect("zone alive while instance lives");
+                .expect("zone alive while proxy lives");
             let slots = zone
                 .components()
                 .get::<SlotValues>(parent.id)
@@ -134,11 +128,11 @@ impl RenderObjectPass {
             validate_slot_values(template, slots);
 
             for part in template.mesh_parts() {
-                let world = instance.world_xform * part.local_transform;
+                let world = object.world_xform * part.local_transform;
                 on_part(parent, rid, part, world, slots);
             }
             for part in template.emitter_parts() {
-                let world = instance.world_xform * part.local_transform;
+                let world = object.world_xform * part.local_transform;
                 on_emitter(parent, rid, part, world, slots);
             }
         }
@@ -204,7 +198,7 @@ mod tests {
     }
 
     fn always_inside() -> Frustum {
-        // Same trick as render_instances tests: every plane accepts.
+        // Same trick as live_render_objects tests: every plane accepts.
         Frustum {
             planes: [Vec4::new(0.0, 0.0, 0.0, 1.0); 6],
         }
@@ -245,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn declare_and_cull_creates_instance_per_render_id() {
+    fn declare_and_cull_creates_proxy_per_render_id() {
         let (mut zones, zid) = seed_zone();
         insert_tree(&mut zones, zid, Vec3::ZERO, None);
         insert_tree(&mut zones, zid, Vec3::new(2.0, 0.0, 0.0), None);
@@ -253,7 +247,7 @@ mod tests {
         let mut templates: RenderRegistry<Rid> = RenderRegistry::new();
         templates.register(Rid::Tree, tree_template());
 
-        let mut live = RenderInstances::<Rid>::new(30);
+        let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
 
         assert_eq!(live.len(), 2);
@@ -269,7 +263,7 @@ mod tests {
         let mut templates: RenderRegistry<Rid> = RenderRegistry::new();
         templates.register(Rid::Tree, tree_template());
 
-        let mut live = RenderInstances::<Rid>::new(30);
+        let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
 
         assert!(live.is_empty());
@@ -283,10 +277,10 @@ mod tests {
         let mut templates: RenderRegistry<Rid> = RenderRegistry::new();
         templates.register(Rid::Tree, tree_template());
 
-        let mut live = RenderInstances::<Rid>::new(30);
+        let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_outside());
 
-        // New instance, never visible → dropped immediately.
+        // New proxy, never visible → dropped immediately.
         assert!(live.is_empty());
     }
 
@@ -307,7 +301,7 @@ mod tests {
                 .with_mesh_part(1, 1, Mat4::from_translation(Vec3::Z)),
         );
 
-        let mut live = RenderInstances::<Rid>::new(30);
+        let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
 
         let mut visits = 0usize;
@@ -318,7 +312,7 @@ mod tests {
             &live,
             |_parent, _rid, part, _world, slot_values| {
                 visits += 1;
-                // Height should be visible across all parts of one alive instance.
+                // Height should be visible across all parts of one alive proxy.
                 if let Some(SlotValue::F32(h)) = slot_values.get("height") {
                     height = h;
                 }
@@ -345,7 +339,7 @@ mod tests {
                 .with_mesh_part(0, 0, Mat4::IDENTITY),
         );
 
-        let mut live = RenderInstances::<Rid>::new(30);
+        let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
 
         let mut visits = 0usize;
