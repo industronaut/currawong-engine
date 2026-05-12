@@ -212,7 +212,20 @@ struct TexturedPbr {
 impl View for TexturedPbr {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — textured PBR cubes under a moving sun",
+        // Daylight blue. Sky/ambient inside the shader still varies with
+        // time of day; the clear is currently static.
+        clear_colour: wgpu::Color {
+            r: 0.45,
+            g: 0.65,
+            b: 0.95,
+            a: 1.0,
+        },
+        depth_format: Some(DEPTH_FORMAT),
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         use wgpu::util::DeviceExt;
 
         let device = &renderer.device;
@@ -272,35 +285,21 @@ impl View for TexturedPbr {
             buckets.register(device, mat);
         }
 
-        (
-            Self {
-                camera,
-                camera_binding,
-                material,
-                instances,
-                cube_vertices,
-                cube_indices,
-                cube_index_count: indices.len() as u32,
-                buckets,
-                started: Instant::now(),
-                #[cfg(feature = "egui")]
-                frame_samples: VecDeque::with_capacity(120),
-                #[cfg(feature = "egui")]
-                last_frame: Instant::now(),
-            },
-            ViewConfig {
-                title: "currawong — textured PBR cubes under a moving sun",
-                // Daylight blue. Sky/ambient inside the shader still varies
-                // with time of day; the clear is currently static.
-                clear_colour: wgpu::Color {
-                    r: 0.45,
-                    g: 0.65,
-                    b: 0.95,
-                    a: 1.0,
-                },
-                depth_format: Some(DEPTH_FORMAT),
-            },
-        )
+        Self {
+            camera,
+            camera_binding,
+            material,
+            instances,
+            cube_vertices,
+            cube_indices,
+            cube_index_count: indices.len() as u32,
+            buckets,
+            started: Instant::now(),
+            #[cfg(feature = "egui")]
+            frame_samples: VecDeque::with_capacity(120),
+            #[cfg(feature = "egui")]
+            last_frame: Instant::now(),
+        }
     }
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {

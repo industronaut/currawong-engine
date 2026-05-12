@@ -16,7 +16,7 @@ use super::debug_ui::DebugUi;
 #[cfg(feature = "yakui")]
 use super::game_ui::GameUi;
 use super::renderer::Renderer;
-use super::view::{EngineCtx, View, ViewConfig};
+use super::view::{EngineCtx, View};
 
 /// Run an application with the given simulation. Uses [`SimClock::new`] —
 /// 60 Hz fixed tick at speed 1.0.
@@ -47,7 +47,6 @@ struct Handler<V: View> {
 struct RunState<V: View> {
     renderer: Renderer,
     view: V,
-    config: ViewConfig,
     sim: V::Sim,
     clock: SimClock,
     last_redraw: Instant,
@@ -62,25 +61,23 @@ impl<V: View> ApplicationHandler for Handler<V> {
         if self.state.is_some() {
             return;
         }
+        let attrs = Window::default_attributes().with_title(V::CONFIG.title);
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes())
+                .create_window(attrs)
                 .expect("failed to create window"),
         );
-        let mut renderer = pollster::block_on(Renderer::new(window));
+        let renderer = pollster::block_on(Renderer::new(window, V::CONFIG.depth_format));
         #[cfg(feature = "egui")]
         let debug_ui = DebugUi::new(&renderer);
         #[cfg(feature = "yakui")]
         let game_ui = GameUi::new(&renderer);
-        let (view, config) = V::init(&renderer);
-        renderer.window.set_title(config.title);
-        renderer.configure_depth(config.depth_format);
+        let view = V::init(&renderer);
         let sim = self.sim.take().expect("simulation already taken");
         let clock = self.clock.take().expect("clock already taken");
         self.state = Some(RunState {
             renderer,
             view,
-            config,
             sim,
             clock,
             last_redraw: Instant::now(),
@@ -139,7 +136,7 @@ impl<V: View> ApplicationHandler for Handler<V> {
                     state.sim.tick(tick_period);
                 }
                 let alpha = state.clock.alpha();
-                render_frame(state, event_loop, alpha);
+                render_frame::<V>(state, event_loop, alpha);
                 state.renderer.window.request_redraw();
             }
             _ => {}
@@ -169,12 +166,11 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         return;
     };
     extract_scene::<V>(&state.view, &state.sim, &state.renderer);
-    main_pass(
+    main_pass::<V>(
         &mut state.view,
         &state.sim,
         alpha,
         &state.renderer,
-        &state.config,
         &mut frame,
     );
     #[cfg(feature = "yakui")]
@@ -239,7 +235,6 @@ fn main_pass<V: View>(
     sim: &V::Sim,
     alpha: f32,
     renderer: &Renderer,
-    config: &ViewConfig,
     frame: &mut Frame,
 ) {
     let depth_attachment =
@@ -262,7 +257,7 @@ fn main_pass<V: View>(
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(config.clear_colour),
+                    load: wgpu::LoadOp::Clear(V::CONFIG.clear_colour),
                     store: wgpu::StoreOp::Store,
                 },
             })],

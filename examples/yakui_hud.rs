@@ -20,17 +20,16 @@ struct Hud {
 impl View for Hud {
     type Sim = ();
 
-    fn init(_: &Renderer) -> (Self, ViewConfig) {
-        (
-            Self {
-                last_frame: Instant::now(),
-                frame_samples: VecDeque::with_capacity(120),
-            },
-            ViewConfig {
-                title: "currawong — yakui_hud",
-                ..Default::default()
-            },
-        )
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — yakui_hud",
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(_: &Renderer) -> Self {
+        Self {
+            last_frame: Instant::now(),
+            frame_samples: VecDeque::with_capacity(120),
+        }
     }
 
     fn input(&mut self, _: &mut (), ctx: &mut EngineCtx, event: &WindowEvent) {

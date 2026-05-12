@@ -105,7 +105,13 @@ struct TerrainView {
 impl View for TerrainView {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — terrain demo",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         let camera = Camera::default();
         let camera_binding = CameraBinding::new(&renderer.device);
         let material = TerrainMaterial::new(renderer, camera_binding.layout());
@@ -121,22 +127,15 @@ impl View for TerrainView {
             material.create_instance(renderer, Vec4::new(0.25, 0.5, 0.85, 0.55)),
         );
 
-        (
-            Self {
-                camera,
-                camera_binding,
-                material,
-                solid_instance,
-                liquid_instances,
-                terrain: TerrainRenderer::new(),
-                started: Instant::now(),
-            },
-            ViewConfig {
-                title: "currawong — terrain demo",
-                depth_format: Some(DEPTH_FORMAT),
-                ..Default::default()
-            },
-        )
+        Self {
+            camera,
+            camera_binding,
+            material,
+            solid_instance,
+            liquid_instances,
+            terrain: TerrainRenderer::new(),
+            started: Instant::now(),
+        }
     }
 
     fn render(

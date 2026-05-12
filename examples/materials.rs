@@ -130,7 +130,13 @@ struct Materials {
 impl View for Materials {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — materials demo",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         use wgpu::util::DeviceExt;
 
         let device = &renderer.device;
@@ -166,23 +172,16 @@ impl View for Materials {
         buckets.register(device, MaterialInstanceId::Red);
         buckets.register(device, MaterialInstanceId::Gold);
 
-        (
-            Self {
-                camera,
-                camera_binding,
-                material,
-                instances,
-                cube_vertices,
-                cube_indices,
-                buckets,
-                started: Instant::now(),
-            },
-            ViewConfig {
-                title: "currawong — materials demo",
-                depth_format: Some(DEPTH_FORMAT),
-                ..Default::default()
-            },
-        )
+        Self {
+            camera,
+            camera_binding,
+            material,
+            instances,
+            cube_vertices,
+            cube_indices,
+            buckets,
+            started: Instant::now(),
+        }
     }
 
     fn render(

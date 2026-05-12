@@ -18,14 +18,13 @@ struct Input;
 impl View for Input {
     type Sim = ();
 
-    fn init(_: &Renderer) -> (Self, ViewConfig) {
-        (
-            Input,
-            ViewConfig {
-                title: "currawong — input",
-                ..Default::default()
-            },
-        )
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — input",
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(_: &Renderer) -> Self {
+        Input
     }
 
     fn input(&mut self, _: &mut (), ctx: &mut EngineCtx, event: &WindowEvent) {

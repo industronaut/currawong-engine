@@ -340,7 +340,13 @@ const CUBE_INDICES: &[u16] = &[
 impl View for MultiZoneView {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — multi-zone (active: ground)",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         use wgpu::util::DeviceExt;
         let device = &renderer.device;
 
@@ -377,30 +383,23 @@ impl View for MultiZoneView {
             mapped_at_creation: false,
         });
 
-        (
-            Self {
-                camera,
-                camera_binding,
-                terrain_material,
-                ground_tint,
-                upper_tint,
-                liquid_instances,
-                terrain_cache: TerrainRenderer::new(),
-                cached_zone: None,
-                player_material,
-                player_instance,
-                cube_vertices,
-                cube_indices,
-                player_attribs,
-                cube_index_count: CUBE_INDICES.len() as u32,
-                started: Instant::now(),
-            },
-            ViewConfig {
-                title: "currawong — multi-zone (active: ground)",
-                depth_format: Some(DEPTH_FORMAT),
-                ..Default::default()
-            },
-        )
+        Self {
+            camera,
+            camera_binding,
+            terrain_material,
+            ground_tint,
+            upper_tint,
+            liquid_instances,
+            terrain_cache: TerrainRenderer::new(),
+            cached_zone: None,
+            player_material,
+            player_instance,
+            cube_vertices,
+            cube_indices,
+            player_attribs,
+            cube_index_count: CUBE_INDICES.len() as u32,
+            started: Instant::now(),
+        }
     }
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {

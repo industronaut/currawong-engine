@@ -283,7 +283,13 @@ struct Demo {
 impl View for Demo {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — render objects demo",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         use wgpu::util::DeviceExt;
 
         let device = &renderer.device;
@@ -475,32 +481,25 @@ impl View for Demo {
         let live_objects = LiveRenderObjects::<RenderId>::new(30);
 
         let now = Instant::now();
-        (
-            Self {
-                camera,
-                camera_binding,
-                material,
-                instances,
-                templates,
-                live_objects,
-                cube_vertices,
-                cube_indices,
-                buckets,
-                particle_pipeline,
-                quad_vertex_buffer,
-                quad_index_buffer,
-                particle_instances,
-                emitters,
-                visuals,
-                started: now,
-                last_frame: now,
-            },
-            ViewConfig {
-                title: "currawong — render objects demo",
-                depth_format: Some(DEPTH_FORMAT),
-                ..Default::default()
-            },
-        )
+        Self {
+            camera,
+            camera_binding,
+            material,
+            instances,
+            templates,
+            live_objects,
+            cube_vertices,
+            cube_indices,
+            buckets,
+            particle_pipeline,
+            quad_vertex_buffer,
+            quad_index_buffer,
+            particle_instances,
+            emitters,
+            visuals,
+            started: now,
+            last_frame: now,
+        }
     }
 
     fn render(

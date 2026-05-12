@@ -308,7 +308,13 @@ struct Instances {
 impl View for Instances {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — multi-mesh instances",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         let device = &renderer.device;
 
         let camera = Camera::default();
@@ -454,22 +460,15 @@ impl View for Instances {
             instances.register(device, key);
         }
 
-        (
-            Self {
-                camera,
-                pipeline,
-                camera_buffer,
-                camera_bind_group,
-                meshes,
-                instances,
-                started: Instant::now(),
-            },
-            ViewConfig {
-                title: "currawong — multi-mesh instances",
-                depth_format: Some(DEPTH_FORMAT),
-                ..Default::default()
-            },
-        )
+        Self {
+            camera,
+            pipeline,
+            camera_buffer,
+            camera_bind_group,
+            meshes,
+            instances,
+            started: Instant::now(),
+        }
     }
 
     fn render(

@@ -189,7 +189,13 @@ struct GpuMesh {
 impl View for Demo {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — trees demo",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         let device = &renderer.device;
         let camera_binding = CameraBinding::new(device);
         let material = UnlitColoredMaterial::new(renderer, camera_binding.layout());
@@ -238,32 +244,25 @@ impl View for Demo {
         let terrain_material = TerrainMaterial::new(renderer, camera_binding.layout());
         let terrain_solid = terrain_material.create_instance(renderer, Vec4::ONE);
 
-        (
-            Self {
-                camera: Camera::default(),
-                camera_binding,
-                material,
-                instances,
-                templates,
-                live_objects: LiveRenderObjects::new(30),
-                meshes,
-                buckets,
-                terrain_material,
-                terrain_solid,
-                terrain: TerrainRenderer::new(),
-                started: Instant::now(),
-                last_draws: 0,
-                #[cfg(feature = "egui")]
-                last_frame: Instant::now(),
-                #[cfg(feature = "egui")]
-                frame_samples: VecDeque::with_capacity(FRAMETIME_HISTORY),
-            },
-            ViewConfig {
-                title: "currawong — trees demo",
-                depth_format: Some(DEPTH_FORMAT),
-                ..Default::default()
-            },
-        )
+        Self {
+            camera: Camera::default(),
+            camera_binding,
+            material,
+            instances,
+            templates,
+            live_objects: LiveRenderObjects::new(30),
+            meshes,
+            buckets,
+            terrain_material,
+            terrain_solid,
+            terrain: TerrainRenderer::new(),
+            started: Instant::now(),
+            last_draws: 0,
+            #[cfg(feature = "egui")]
+            last_frame: Instant::now(),
+            #[cfg(feature = "egui")]
+            frame_samples: VecDeque::with_capacity(FRAMETIME_HISTORY),
+        }
     }
 
     fn render(

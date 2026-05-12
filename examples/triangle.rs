@@ -39,7 +39,12 @@ struct Triangle {
 impl View for Triangle {
     type Sim = ();
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — triangle",
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         let shader = renderer
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -83,13 +88,7 @@ impl View for Triangle {
                 cache: None,
             });
 
-        (
-            Self { pipeline },
-            ViewConfig {
-                title: "currawong — triangle",
-                ..Default::default()
-            },
-        )
+        Self { pipeline }
     }
 
     fn render(&mut self, _: &(), _: f32, _: &Renderer, pass: &mut wgpu::RenderPass<'_>) {

@@ -483,7 +483,13 @@ impl CampfireView {
 impl View for CampfireView {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — campfire (space toggles fire)",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(renderer: &Renderer) -> Self {
         let device = &renderer.device;
 
         let camera_binding = CameraBinding::new(device);
@@ -532,36 +538,29 @@ impl View for CampfireView {
         emitters.register_template(EmitterId::Flame, Self::flame_template());
         emitters.register_template(EmitterId::Smoke, Self::smoke_template());
 
-        (
-            Self {
-                camera: Camera {
-                    position: Vec3::new(0.0, -4.0, 1.6),
-                    target: Vec3::new(0.0, 0.0, 0.6),
-                    ..Camera::default()
-                },
-                camera_binding,
-
-                mesh_pipeline,
-                meshes,
-                mesh_instances,
-
-                particle_pipeline,
-                quad_vertex_buffer,
-                quad_index_buffer,
-                particle_instances,
-
-                emitters,
-                visuals: Self::build_visuals(),
-
-                started: Instant::now(),
-                last_frame: Instant::now(),
+        Self {
+            camera: Camera {
+                position: Vec3::new(0.0, -4.0, 1.6),
+                target: Vec3::new(0.0, 0.0, 0.6),
+                ..Camera::default()
             },
-            ViewConfig {
-                title: "currawong — campfire (space toggles fire)",
-                depth_format: Some(DEPTH_FORMAT),
-                ..Default::default()
-            },
-        )
+            camera_binding,
+
+            mesh_pipeline,
+            meshes,
+            mesh_instances,
+
+            particle_pipeline,
+            quad_vertex_buffer,
+            quad_index_buffer,
+            particle_instances,
+
+            emitters,
+            visuals: Self::build_visuals(),
+
+            started: Instant::now(),
+            last_frame: Instant::now(),
+        }
     }
 
     fn render(

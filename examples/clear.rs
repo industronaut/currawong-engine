@@ -7,14 +7,13 @@ struct Clear;
 impl View for Clear {
     type Sim = ();
 
-    fn init(_: &Renderer) -> (Self, ViewConfig) {
-        (
-            Clear,
-            ViewConfig {
-                title: "currawong — clear",
-                ..Default::default()
-            },
-        )
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — clear",
+        ..ViewConfig::DEFAULT
+    };
+
+    fn init(_: &Renderer) -> Self {
+        Clear
     }
 }
 

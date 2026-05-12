@@ -65,7 +65,8 @@ The `render` Cargo feature gates `pollster`, `wgpu`, `winit`, `bytemuck`, and `g
 
 The user implements the `View` trait with an associated `Sim: Simulation`:
 
-- `init(&Renderer) -> (Self, ViewConfig)` — build pipelines, allocate buffers, and return the static window/render-target config. `ViewConfig` carries `title`, `clear_colour`, and `depth_format`; new static knobs (MSAA samples, present mode, …) land here, new per-frame hooks land on `View`. The engine reads the config once at startup — setting the window title, choosing the clear colour, and (via `Renderer::configure_depth`) allocating the engine-managed depth attachment.
+- `const CONFIG: ViewConfig` — static window/render-target config: `title`, `clear_colour`, `depth_format`. Read by the engine *before* `init` runs, so pipelines built inside `init` can declare the same depth format the engine has allocated. New static knobs (MSAA samples, present mode, …) land here; new per-frame hooks land on `View`. Defaults to `ViewConfig::DEFAULT`; override with struct-update syntax (`..ViewConfig::DEFAULT`).
+- `init(&Renderer) -> Self` — build pipelines, allocate buffers. The renderer is fully ready when this runs — including the depth attachment if `CONFIG.depth_format.is_some()`.
 - `render(&self, &Sim, alpha, &Renderer, &mut RenderPass)` — read sim, record draw calls. `&Sim` is read-only by signature, structurally preventing sim mutation from the render path.
 - `input(&mut self, &mut Sim, &mut EngineCtx, &WindowEvent)` — sim-mutating user actions go through here.
 - `ui(&mut self, &mut Sim, &mut EngineCtx, &egui::Context)` — behind the `egui` feature; build the per-frame debug overlay. May mutate sim and engine context just like `input`.
