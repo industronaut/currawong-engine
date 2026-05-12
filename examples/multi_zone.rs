@@ -25,8 +25,9 @@ use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, SimEnvironment,
     Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
-    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewEnvironment,
-    WorldObject, WorldObjectRef, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    ViewEnvironment, WorldObject, WorldObjectRef, Zone, ZoneId, Zones, sun_direction_for, wgpu,
+    winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -339,7 +340,7 @@ const CUBE_INDICES: &[u16] = &[
 impl View for MultiZoneView {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> Self {
+    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
         use wgpu::util::DeviceExt;
         let device = &renderer.device;
 
@@ -376,23 +377,30 @@ impl View for MultiZoneView {
             mapped_at_creation: false,
         });
 
-        Self {
-            camera,
-            camera_binding,
-            terrain_material,
-            ground_tint,
-            upper_tint,
-            liquid_instances,
-            terrain_cache: TerrainRenderer::new(),
-            cached_zone: None,
-            player_material,
-            player_instance,
-            cube_vertices,
-            cube_indices,
-            player_attribs,
-            cube_index_count: CUBE_INDICES.len() as u32,
-            started: Instant::now(),
-        }
+        (
+            Self {
+                camera,
+                camera_binding,
+                terrain_material,
+                ground_tint,
+                upper_tint,
+                liquid_instances,
+                terrain_cache: TerrainRenderer::new(),
+                cached_zone: None,
+                player_material,
+                player_instance,
+                cube_vertices,
+                cube_indices,
+                player_attribs,
+                cube_index_count: CUBE_INDICES.len() as u32,
+                started: Instant::now(),
+            },
+            ViewConfig {
+                title: "currawong — multi-zone (active: ground)",
+                depth_format: Some(DEPTH_FORMAT),
+                ..Default::default()
+            },
+        )
     }
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {
@@ -540,14 +548,6 @@ impl View for MultiZoneView {
             KeyCode::Digit1 => ctx.clock.set_speed(1.0),
             _ => {}
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — multi-zone (active: ground)"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

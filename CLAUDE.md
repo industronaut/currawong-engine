@@ -65,13 +65,12 @@ The `render` Cargo feature gates `pollster`, `wgpu`, `winit`, `bytemuck`, and `g
 
 The user implements the `View` trait with an associated `Sim: Simulation`:
 
-- `init(&Renderer) -> Self` — build pipelines, allocate buffers.
+- `init(&Renderer) -> (Self, ViewConfig)` — build pipelines, allocate buffers, and return the static window/render-target config. `ViewConfig` carries `title`, `clear_colour`, and `depth_format`; new static knobs (MSAA samples, present mode, …) land here, new per-frame hooks land on `View`. The engine reads the config once at startup — setting the window title, choosing the clear colour, and (via `Renderer::configure_depth`) allocating the engine-managed depth attachment.
 - `render(&self, &Sim, alpha, &Renderer, &mut RenderPass)` — read sim, record draw calls. `&Sim` is read-only by signature, structurally preventing sim mutation from the render path.
 - `input(&mut self, &mut Sim, &mut EngineCtx, &WindowEvent)` — sim-mutating user actions go through here.
 - `ui(&mut self, &mut Sim, &mut EngineCtx, &egui::Context)` — behind the `egui` feature; build the per-frame debug overlay. May mutate sim and engine context just like `input`.
 - `active_zone(&self, &Sim) -> Option<ZoneId>` — which zone the camera is in. Default `None` is right for UI/2D views; world-space views typically return `self.camera.zone`. The engine uses this to drive `extract_environment` and (later) per-zone culling and streaming.
 - `extract_environment(&self, &Sim, ZoneId) -> ViewEnvironment` — per-frame sim → GPU-friendly environment extraction. Engine calls it before `render`, writes the result into `Renderer::scene_bind_group`, and pipelines that declare `Renderer::scene_layout` read it automatically. Default returns `ViewEnvironment::neutral`. This is the same shape as visual extraction: sim owns facts (time of day), view owns appearance (sun direction + colour), engine drives the seam.
-- `depth_format() -> Option<TextureFormat>` — opt in to engine-managed depth. When `Some`, the renderer allocates a depth texture, recreates it on resize, and pre-attaches it to the frame's render pass. Pipelines must declare the same format in their `DepthStencilState`. Default `None` is right for 2D / UI views drawing in clip space.
 - `Camera` is a helper struct; the View opts in by holding one (UI/2D views don't need cameras). `Camera::zone: Option<ZoneId>` is the conventional place to stash the active zone so `active_zone` is a one-liner. The engine-standard `CameraUniformData` carries `view_proj` + `right`/`up` basis (for billboards) + `position` (so lit materials can compute view direction per fragment); the `CameraBinding` bgl is `VERTEX_FRAGMENT`-visible.
 
 `run::<MyView>(sim)` wires it all up: creates the event loop, builds a `Renderer`, calls `init`, and dispatches events. `run_with_clock` takes a custom `SimClock`.

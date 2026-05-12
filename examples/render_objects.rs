@@ -24,8 +24,8 @@ use currawong::{
     Aabb, Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, Frustum,
     InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, ParticleLifecycle,
     RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKind, SlotValue,
-    SlotValues, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject,
-    Zone, Zones, wgpu, winit,
+    SlotValues, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    WorldObject, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -283,7 +283,7 @@ struct Demo {
 impl View for Demo {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> Self {
+    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
         use wgpu::util::DeviceExt;
 
         let device = &renderer.device;
@@ -475,25 +475,32 @@ impl View for Demo {
         let live_objects = LiveRenderObjects::<RenderId>::new(30);
 
         let now = Instant::now();
-        Self {
-            camera,
-            camera_binding,
-            material,
-            instances,
-            templates,
-            live_objects,
-            cube_vertices,
-            cube_indices,
-            buckets,
-            particle_pipeline,
-            quad_vertex_buffer,
-            quad_index_buffer,
-            particle_instances,
-            emitters,
-            visuals,
-            started: now,
-            last_frame: now,
-        }
+        (
+            Self {
+                camera,
+                camera_binding,
+                material,
+                instances,
+                templates,
+                live_objects,
+                cube_vertices,
+                cube_indices,
+                buckets,
+                particle_pipeline,
+                quad_vertex_buffer,
+                quad_index_buffer,
+                particle_instances,
+                emitters,
+                visuals,
+                started: now,
+                last_frame: now,
+            },
+            ViewConfig {
+                title: "currawong — render objects demo",
+                depth_format: Some(DEPTH_FORMAT),
+                ..Default::default()
+            },
+        )
     }
 
     fn render(
@@ -629,14 +636,6 @@ impl View for Demo {
         if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
             ctx.event_loop.exit();
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — render objects demo"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

@@ -19,8 +19,8 @@ use std::time::Instant;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry, Renderer,
-    Simulation, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject,
-    Zone, Zones, wgpu, winit,
+    Simulation, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    WorldObject, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -130,7 +130,7 @@ struct Materials {
 impl View for Materials {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> Self {
+    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
         use wgpu::util::DeviceExt;
 
         let device = &renderer.device;
@@ -166,16 +166,23 @@ impl View for Materials {
         buckets.register(device, MaterialInstanceId::Red);
         buckets.register(device, MaterialInstanceId::Gold);
 
-        Self {
-            camera,
-            camera_binding,
-            material,
-            instances,
-            cube_vertices,
-            cube_indices,
-            buckets,
-            started: Instant::now(),
-        }
+        (
+            Self {
+                camera,
+                camera_binding,
+                material,
+                instances,
+                cube_vertices,
+                cube_indices,
+                buckets,
+                started: Instant::now(),
+            },
+            ViewConfig {
+                title: "currawong — materials demo",
+                depth_format: Some(DEPTH_FORMAT),
+                ..Default::default()
+            },
+        )
     }
 
     fn render(
@@ -241,14 +248,6 @@ impl View for Materials {
         if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
             ctx.event_loop.exit();
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — materials demo"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

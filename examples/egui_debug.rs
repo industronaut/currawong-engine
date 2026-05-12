@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use currawong::{EngineCtx, Renderer, View, egui, winit};
+use currawong::{EngineCtx, Renderer, View, ViewConfig, egui, winit};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -18,11 +18,17 @@ struct Debug {
 impl View for Debug {
     type Sim = ();
 
-    fn init(_: &Renderer) -> Self {
-        Self {
-            last_frame: Instant::now(),
-            frame_samples: VecDeque::with_capacity(120),
-        }
+    fn init(_: &Renderer) -> (Self, ViewConfig) {
+        (
+            Self {
+                last_frame: Instant::now(),
+                frame_samples: VecDeque::with_capacity(120),
+            },
+            ViewConfig {
+                title: "currawong — egui_debug",
+                ..Default::default()
+            },
+        )
     }
 
     fn input(&mut self, _: &mut (), ctx: &mut EngineCtx, event: &WindowEvent) {
@@ -78,10 +84,6 @@ impl View for Debug {
                     ctx.event_loop.exit();
                 }
             });
-    }
-
-    fn title() -> &'static str {
-        "currawong — egui_debug"
     }
 }
 

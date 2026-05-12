@@ -33,7 +33,7 @@ use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
     PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PosNormalUv, Renderer,
     SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, TextureColorSpace, View,
-    ViewEnvironment, WorldObject, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    ViewConfig, ViewEnvironment, WorldObject, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -212,7 +212,7 @@ struct TexturedPbr {
 impl View for TexturedPbr {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> Self {
+    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
         use wgpu::util::DeviceExt;
 
         let device = &renderer.device;
@@ -272,21 +272,35 @@ impl View for TexturedPbr {
             buckets.register(device, mat);
         }
 
-        Self {
-            camera,
-            camera_binding,
-            material,
-            instances,
-            cube_vertices,
-            cube_indices,
-            cube_index_count: indices.len() as u32,
-            buckets,
-            started: Instant::now(),
-            #[cfg(feature = "egui")]
-            frame_samples: VecDeque::with_capacity(120),
-            #[cfg(feature = "egui")]
-            last_frame: Instant::now(),
-        }
+        (
+            Self {
+                camera,
+                camera_binding,
+                material,
+                instances,
+                cube_vertices,
+                cube_indices,
+                cube_index_count: indices.len() as u32,
+                buckets,
+                started: Instant::now(),
+                #[cfg(feature = "egui")]
+                frame_samples: VecDeque::with_capacity(120),
+                #[cfg(feature = "egui")]
+                last_frame: Instant::now(),
+            },
+            ViewConfig {
+                title: "currawong — textured PBR cubes under a moving sun",
+                // Daylight blue. Sky/ambient inside the shader still varies
+                // with time of day; the clear is currently static.
+                clear_colour: wgpu::Color {
+                    r: 0.45,
+                    g: 0.65,
+                    b: 0.95,
+                    a: 1.0,
+                },
+                depth_format: Some(DEPTH_FORMAT),
+            },
+        )
     }
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {
@@ -458,26 +472,6 @@ impl View for TexturedPbr {
                     ctx.event_loop.exit();
                 }
             });
-    }
-
-    fn title() -> &'static str {
-        "currawong — textured PBR cubes under a moving sun"
-    }
-
-    fn clear_colour() -> wgpu::Color {
-        // Daylight blue. Sky/ambient inside the shader still varies with
-        // time of day; the clear is currently static (clear_colour is an
-        // associated method, not bound to per-frame state).
-        wgpu::Color {
-            r: 0.45,
-            g: 0.65,
-            b: 0.95,
-            a: 1.0,
-        }
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

@@ -69,10 +69,19 @@ impl Renderer {
         self.scene.write(&self.queue, env);
     }
 
-    pub(super) async fn new(
-        window: Arc<Window>,
-        depth_format: Option<wgpu::TextureFormat>,
-    ) -> Self {
+    /// Allocate (or release) the engine-managed depth attachment. Called by
+    /// the runner once after [`View::init`](crate::View::init) returns the
+    /// view config. Passing `None` releases any existing depth texture;
+    /// passing `Some(format)` creates a depth texture sized to the current
+    /// swapchain. The format then participates in [`resize`](Self::resize).
+    pub(super) fn configure_depth(&mut self, depth_format: Option<wgpu::TextureFormat>) {
+        self.depth = depth_format.map(|format| DepthAttachment {
+            format,
+            view: create_depth_view(&self.device, self.config.width, self.config.height, format),
+        });
+    }
+
+    pub(super) async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
 
         let instance =
@@ -116,11 +125,6 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let depth = depth_format.map(|format| DepthAttachment {
-            format,
-            view: create_depth_view(&device, config.width, config.height, format),
-        });
-
         let scene = SceneEnvironmentBinding::new(&device);
 
         Self {
@@ -129,7 +133,7 @@ impl Renderer {
             queue,
             surface,
             config,
-            depth,
+            depth: None,
             scene,
         }
     }

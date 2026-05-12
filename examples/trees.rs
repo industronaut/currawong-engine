@@ -28,8 +28,8 @@ use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, InstanceBuckets, LiveRenderObjects,
     MaterialInstanceRegistry, MeshPart, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer,
     Simulation, SlotKind, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
-    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject, Zone,
-    ZoneId, Zones, wgpu, winit,
+    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig, WorldObject,
+    Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -189,7 +189,7 @@ struct GpuMesh {
 impl View for Demo {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> Self {
+    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
         let device = &renderer.device;
         let camera_binding = CameraBinding::new(device);
         let material = UnlitColoredMaterial::new(renderer, camera_binding.layout());
@@ -238,25 +238,32 @@ impl View for Demo {
         let terrain_material = TerrainMaterial::new(renderer, camera_binding.layout());
         let terrain_solid = terrain_material.create_instance(renderer, Vec4::ONE);
 
-        Self {
-            camera: Camera::default(),
-            camera_binding,
-            material,
-            instances,
-            templates,
-            live_objects: LiveRenderObjects::new(30),
-            meshes,
-            buckets,
-            terrain_material,
-            terrain_solid,
-            terrain: TerrainRenderer::new(),
-            started: Instant::now(),
-            last_draws: 0,
-            #[cfg(feature = "egui")]
-            last_frame: Instant::now(),
-            #[cfg(feature = "egui")]
-            frame_samples: VecDeque::with_capacity(FRAMETIME_HISTORY),
-        }
+        (
+            Self {
+                camera: Camera::default(),
+                camera_binding,
+                material,
+                instances,
+                templates,
+                live_objects: LiveRenderObjects::new(30),
+                meshes,
+                buckets,
+                terrain_material,
+                terrain_solid,
+                terrain: TerrainRenderer::new(),
+                started: Instant::now(),
+                last_draws: 0,
+                #[cfg(feature = "egui")]
+                last_frame: Instant::now(),
+                #[cfg(feature = "egui")]
+                frame_samples: VecDeque::with_capacity(FRAMETIME_HISTORY),
+            },
+            ViewConfig {
+                title: "currawong — trees demo",
+                depth_format: Some(DEPTH_FORMAT),
+                ..Default::default()
+            },
+        )
     }
 
     fn render(
@@ -415,13 +422,6 @@ impl View for Demo {
                     ctx.clock.set_speed(speed);
                 }
             });
-    }
-
-    fn title() -> &'static str {
-        "currawong — trees demo"
-    }
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

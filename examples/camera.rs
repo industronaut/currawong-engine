@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, Renderer, Simulation, View, WorldObject, Zone, ZoneId, Zones,
-    mat4_instance_attributes, wgpu, winit,
+    Camera, CameraBinding, EngineCtx, Renderer, Simulation, View, ViewConfig, WorldObject, Zone,
+    ZoneId, Zones, mat4_instance_attributes, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -150,7 +150,7 @@ struct SimDriven {
 impl View for SimDriven {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> Self {
+    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
         let device = &renderer.device;
 
         let camera = Camera::default();
@@ -211,14 +211,21 @@ impl View for SimDriven {
             cache: None,
         });
 
-        Self {
-            camera,
-            camera_binding,
-            pipeline,
-            instance_buffer,
-            instance_scratch: Vec::with_capacity(MAX_INSTANCES as usize),
-            started: Instant::now(),
-        }
+        (
+            Self {
+                camera,
+                camera_binding,
+                pipeline,
+                instance_buffer,
+                instance_scratch: Vec::with_capacity(MAX_INSTANCES as usize),
+                started: Instant::now(),
+            },
+            ViewConfig {
+                title: "currawong — camera demo",
+                depth_format: Some(DEPTH_FORMAT),
+                ..Default::default()
+            },
+        )
     }
 
     fn render(
@@ -290,14 +297,6 @@ impl View for SimDriven {
             KeyCode::Digit3 => ctx.clock.set_speed(3.0),
             _ => {}
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — camera demo"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

@@ -73,5 +73,5 @@ pub use terrain_material::{TerrainMaterial, TerrainMaterialInstance};
 pub use terrain_renderer::TerrainRenderer;
 pub use texture::{SamplerKind, SamplerRegistry, Texture, TextureColorSpace, TextureLoadError};
 pub use vertex::PosNormalUv;
-pub use view::{EngineCtx, View};
+pub use view::{EngineCtx, View, ViewConfig};
 pub use visibility::{Aabb, Frustum};

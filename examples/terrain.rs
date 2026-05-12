@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use currawong::glam::{Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, Simulation,
-    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View, Zone, ZoneId,
-    Zones, wgpu, winit,
+    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View, ViewConfig, Zone,
+    ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -105,7 +105,7 @@ struct TerrainView {
 impl View for TerrainView {
     type Sim = Game;
 
-    fn init(renderer: &Renderer) -> Self {
+    fn init(renderer: &Renderer) -> (Self, ViewConfig) {
         let camera = Camera::default();
         let camera_binding = CameraBinding::new(&renderer.device);
         let material = TerrainMaterial::new(renderer, camera_binding.layout());
@@ -121,15 +121,22 @@ impl View for TerrainView {
             material.create_instance(renderer, Vec4::new(0.25, 0.5, 0.85, 0.55)),
         );
 
-        Self {
-            camera,
-            camera_binding,
-            material,
-            solid_instance,
-            liquid_instances,
-            terrain: TerrainRenderer::new(),
-            started: Instant::now(),
-        }
+        (
+            Self {
+                camera,
+                camera_binding,
+                material,
+                solid_instance,
+                liquid_instances,
+                terrain: TerrainRenderer::new(),
+                started: Instant::now(),
+            },
+            ViewConfig {
+                title: "currawong — terrain demo",
+                depth_format: Some(DEPTH_FORMAT),
+                ..Default::default()
+            },
+        )
     }
 
     fn render(
@@ -198,14 +205,6 @@ impl View for TerrainView {
             KeyCode::Digit3 => ctx.clock.set_speed(3.0),
             _ => {}
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — terrain demo"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 
