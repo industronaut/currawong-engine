@@ -13,6 +13,8 @@ use crate::sim::{SimClock, Simulation};
 
 #[cfg(feature = "egui")]
 use super::debug_ui::DebugUi;
+#[cfg(feature = "yakui")]
+use super::game_ui::GameUi;
 use super::renderer::Renderer;
 use super::view::{EngineCtx, View};
 
@@ -50,6 +52,8 @@ struct RunState<V: View> {
     last_redraw: Instant,
     #[cfg(feature = "egui")]
     debug_ui: DebugUi,
+    #[cfg(feature = "yakui")]
+    game_ui: GameUi,
 }
 
 impl<V: View> ApplicationHandler for Handler<V> {
@@ -66,6 +70,8 @@ impl<V: View> ApplicationHandler for Handler<V> {
         let renderer = pollster::block_on(Renderer::new(window, V::depth_format()));
         #[cfg(feature = "egui")]
         let debug_ui = DebugUi::new(&renderer);
+        #[cfg(feature = "yakui")]
+        let game_ui = GameUi::new(&renderer);
         let view = V::init(&renderer);
         let sim = self.sim.take().expect("simulation already taken");
         let clock = self.clock.take().expect("clock already taken");
@@ -77,6 +83,8 @@ impl<V: View> ApplicationHandler for Handler<V> {
             last_redraw: Instant::now(),
             #[cfg(feature = "egui")]
             debug_ui,
+            #[cfg(feature = "yakui")]
+            game_ui,
         });
     }
 
@@ -96,7 +104,15 @@ impl<V: View> ApplicationHandler for Handler<V> {
             .consumed;
         #[cfg(not(feature = "egui"))]
         let egui_consumed = false;
-        if !egui_consumed {
+        // yakui sees every event regardless of egui consumption so its internal
+        // hover/layout state stays consistent across resizes etc; only the
+        // application-level dispatch to View::input is suppressed when either
+        // overlay claims the event.
+        #[cfg(feature = "yakui")]
+        let yakui_consumed = state.game_ui.on_window_event(&event);
+        #[cfg(not(feature = "yakui"))]
+        let yakui_consumed = false;
+        if !egui_consumed && !yakui_consumed {
             let mut ctx = EngineCtx {
                 event_loop,
                 clock: &mut state.clock,
@@ -193,6 +209,23 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         state
             .view
             .render(&state.sim, alpha, &state.renderer, &mut pass);
+    }
+
+    // Paint order: world → yakui (game UI) → egui (debug overlay on top).
+    #[cfg(feature = "yakui")]
+    {
+        let RunState {
+            ref mut view,
+            ref mut sim,
+            ref mut clock,
+            ref renderer,
+            ref mut game_ui,
+            ..
+        } = *state;
+        game_ui.run_and_render(renderer, &mut encoder, &view_tex, || {
+            let mut ctx = EngineCtx { event_loop, clock };
+            view.game_ui(sim, &mut ctx);
+        });
     }
 
     #[cfg(feature = "egui")]
