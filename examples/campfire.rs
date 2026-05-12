@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, InstanceBuckets,
-    ParticleLifecycle, Renderer, Simulation, View, WorldObject, WorldObjectId, WorldObjectRef,
-    Zone, Zones, mat4_instance_attributes, wgpu, winit,
+    ParticleLifecycle, Renderer, Simulation, View, ViewConfig, WorldObject, WorldObjectId,
+    WorldObjectRef, Zone, Zones, mat4_instance_attributes, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -483,6 +483,12 @@ impl CampfireView {
 impl View for CampfireView {
     type Sim = Game;
 
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — campfire (space toggles fire)",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
     fn init(renderer: &Renderer) -> Self {
         let device = &renderer.device;
 
@@ -641,14 +647,6 @@ impl View for CampfireView {
             KeyCode::Digit3 => ctx.clock.set_speed(3.0),
             _ => {}
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — campfire (space toggles fire)"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

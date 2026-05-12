@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3};
 use currawong::{
-    Camera, EngineCtx, InstanceBuckets, Renderer, Simulation, View, WorldObject, WorldObjectId,
-    Zone, ZoneId, Zones, wgpu, winit,
+    Camera, EngineCtx, InstanceBuckets, Renderer, Simulation, View, ViewConfig, WorldObject,
+    WorldObjectId, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -308,6 +308,12 @@ struct Instances {
 impl View for Instances {
     type Sim = Game;
 
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — multi-mesh instances",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
     fn init(renderer: &Renderer) -> Self {
         let device = &renderer.device;
 
@@ -532,14 +538,6 @@ impl View for Instances {
             KeyCode::Digit3 => ctx.clock.set_speed(3.0),
             _ => {}
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — multi-mesh instances"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

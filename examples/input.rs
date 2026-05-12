@@ -9,7 +9,7 @@
 //! - `=`: double speed
 //! - any other key/mouse press is logged to stdout
 
-use currawong::{EngineCtx, Renderer, View, winit};
+use currawong::{EngineCtx, Renderer, View, ViewConfig, winit};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -17,6 +17,11 @@ struct Input;
 
 impl View for Input {
     type Sim = ();
+
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — input",
+        ..ViewConfig::DEFAULT
+    };
 
     fn init(_: &Renderer) -> Self {
         Input
@@ -44,10 +49,6 @@ impl View for Input {
             }
             _ => {}
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — input"
     }
 }
 

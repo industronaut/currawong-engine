@@ -61,13 +61,13 @@ impl<V: View> ApplicationHandler for Handler<V> {
         if self.state.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title(V::title());
+        let attrs = Window::default_attributes().with_title(V::CONFIG.title);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
-        let renderer = pollster::block_on(Renderer::new(window, V::depth_format()));
+        let renderer = pollster::block_on(Renderer::new(window, V::CONFIG.depth_format));
         #[cfg(feature = "egui")]
         let debug_ui = DebugUi::new(&renderer);
         #[cfg(feature = "yakui")]
@@ -257,7 +257,7 @@ fn main_pass<V: View>(
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(V::clear_colour()),
+                    load: wgpu::LoadOp::Clear(V::CONFIG.clear_colour),
                     store: wgpu::StoreOp::Store,
                 },
             })],

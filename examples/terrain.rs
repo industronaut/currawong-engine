@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use currawong::glam::{Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, Simulation,
-    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View, Zone, ZoneId,
-    Zones, wgpu, winit,
+    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View, ViewConfig, Zone,
+    ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -104,6 +104,12 @@ struct TerrainView {
 
 impl View for TerrainView {
     type Sim = Game;
+
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — terrain demo",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
 
     fn init(renderer: &Renderer) -> Self {
         let camera = Camera::default();
@@ -198,14 +204,6 @@ impl View for TerrainView {
             KeyCode::Digit3 => ctx.clock.set_speed(3.0),
             _ => {}
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — terrain demo"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

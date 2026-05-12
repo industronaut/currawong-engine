@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use currawong::{EngineCtx, Renderer, View, winit, yakui};
+use currawong::{EngineCtx, Renderer, View, ViewConfig, winit, yakui};
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -19,6 +19,11 @@ struct Hud {
 
 impl View for Hud {
     type Sim = ();
+
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — yakui_hud",
+        ..ViewConfig::DEFAULT
+    };
 
     fn init(_: &Renderer) -> Self {
         Self {
@@ -84,10 +89,6 @@ impl View for Hud {
                 });
             });
         });
-    }
-
-    fn title() -> &'static str {
-        "currawong — yakui_hud"
     }
 }
 

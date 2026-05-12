@@ -25,8 +25,9 @@ use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, SimEnvironment,
     Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
-    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewEnvironment,
-    WorldObject, WorldObjectRef, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    ViewEnvironment, WorldObject, WorldObjectRef, Zone, ZoneId, Zones, sun_direction_for, wgpu,
+    winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -339,6 +340,12 @@ const CUBE_INDICES: &[u16] = &[
 impl View for MultiZoneView {
     type Sim = Game;
 
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — multi-zone (active: ground)",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
+
     fn init(renderer: &Renderer) -> Self {
         use wgpu::util::DeviceExt;
         let device = &renderer.device;
@@ -540,14 +547,6 @@ impl View for MultiZoneView {
             KeyCode::Digit1 => ctx.clock.set_speed(1.0),
             _ => {}
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — multi-zone (active: ground)"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

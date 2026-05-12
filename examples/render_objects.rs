@@ -24,8 +24,8 @@ use currawong::{
     Aabb, Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, Frustum,
     InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, ParticleLifecycle,
     RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKind, SlotValue,
-    SlotValues, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject,
-    Zone, Zones, wgpu, winit,
+    SlotValues, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    WorldObject, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -282,6 +282,12 @@ struct Demo {
 
 impl View for Demo {
     type Sim = Game;
+
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — render objects demo",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
 
     fn init(renderer: &Renderer) -> Self {
         use wgpu::util::DeviceExt;
@@ -629,14 +635,6 @@ impl View for Demo {
         if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
             ctx.event_loop.exit();
         }
-    }
-
-    fn title() -> &'static str {
-        "currawong — render objects demo"
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

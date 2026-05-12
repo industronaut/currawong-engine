@@ -28,8 +28,8 @@ use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, InstanceBuckets, LiveRenderObjects,
     MaterialInstanceRegistry, MeshPart, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer,
     Simulation, SlotKind, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
-    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, WorldObject, Zone,
-    ZoneId, Zones, wgpu, winit,
+    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig, WorldObject,
+    Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -188,6 +188,12 @@ struct GpuMesh {
 
 impl View for Demo {
     type Sim = Game;
+
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — trees demo",
+        depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
+    };
 
     fn init(renderer: &Renderer) -> Self {
         let device = &renderer.device;
@@ -415,13 +421,6 @@ impl View for Demo {
                     ctx.clock.set_speed(speed);
                 }
             });
-    }
-
-    fn title() -> &'static str {
-        "currawong — trees demo"
-    }
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 

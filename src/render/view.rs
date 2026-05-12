@@ -15,6 +15,58 @@ pub struct EngineCtx<'a> {
     pub clock: &'a mut SimClock,
 }
 
+/// Static window + render-target configuration for a [`View`], exposed
+/// as the [`View::CONFIG`] associated const and read once by the engine
+/// at startup — before [`View::init`] runs, so pipelines built inside
+/// `init` can declare the same depth format the engine will allocate.
+///
+/// Override fields you care about and inherit the rest from
+/// [`ViewConfig::DEFAULT`]:
+///
+/// ```ignore
+/// const CONFIG: ViewConfig = ViewConfig {
+///     title: "my game",
+///     depth_format: Some(wgpu::TextureFormat::Depth32Float),
+///     ..ViewConfig::DEFAULT
+/// };
+/// ```
+///
+/// New static knobs (MSAA samples, present mode, …) land here. New
+/// per-frame hooks land on [`View`].
+pub struct ViewConfig {
+    /// Window title.
+    pub title: &'static str,
+    /// Colour the engine clears the swapchain to at the start of each frame.
+    pub clear_colour: wgpu::Color,
+    /// Set to `Some(format)` to have the engine allocate a depth texture
+    /// and pre-attach it to the frame's render pass. Pipelines must declare
+    /// the same format in their `DepthStencilState`. `None` is right for
+    /// 2D / UI views that draw in clip space.
+    pub depth_format: Option<wgpu::TextureFormat>,
+}
+
+impl ViewConfig {
+    /// Default config used by `View::CONFIG` when the View doesn't override
+    /// it. Available in const context so views can spread it with struct
+    /// update syntax (`..ViewConfig::DEFAULT`).
+    pub const DEFAULT: Self = Self {
+        title: "currawong",
+        clear_colour: wgpu::Color {
+            r: 0.05,
+            g: 0.07,
+            b: 0.10,
+            a: 1.0,
+        },
+        depth_format: None,
+    };
+}
+
+impl Default for ViewConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// A view onto a [`Simulation`].
 ///
 /// `render` receives `&Sim` (read-only), so the rendering path is structurally
@@ -22,11 +74,22 @@ pub struct EngineCtx<'a> {
 /// user-driven actions (clicks, key presses) can drive sim changes.
 ///
 /// `init` runs once after the GPU is ready (build pipelines, load assets).
+/// Static window + render-target settings live on the [`CONFIG`](Self::CONFIG)
+/// associated const so they're available *before* `init` — which lets `init`
+/// build pipelines whose `DepthStencilState` matches the depth attachment the
+/// engine has already allocated.
 pub trait View: 'static {
     /// The kind of simulation this view reads from.
     type Sim: Simulation;
 
-    fn init(renderer: &Renderer) -> Self;
+    /// Static window + render-target settings. Read once at startup. Defaults
+    /// to [`ViewConfig::DEFAULT`]; override to set the window title, opt in
+    /// to a depth attachment, or change the clear colour.
+    const CONFIG: ViewConfig = ViewConfig::DEFAULT;
+
+    fn init(renderer: &Renderer) -> Self
+    where
+        Self: Sized;
 
     /// Render a frame.
     ///
@@ -73,27 +136,6 @@ pub trait View: 'static {
     #[cfg(feature = "yakui")]
     fn game_ui(&mut self, sim: &mut Self::Sim, ctx: &mut EngineCtx) {
         let _ = (sim, ctx);
-    }
-
-    fn title() -> &'static str {
-        "currawong"
-    }
-
-    fn clear_colour() -> wgpu::Color {
-        wgpu::Color {
-            r: 0.05,
-            g: 0.07,
-            b: 0.10,
-            a: 1.0,
-        }
-    }
-
-    /// Return `Some(format)` to have the engine allocate a depth texture and
-    /// pre-attach it to the frame's render pass. Pipelines must declare the
-    /// same format in their `DepthStencilState`. Default `None` is right for
-    /// 2D / UI views that draw in clip space.
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        None
     }
 
     /// Which zone the camera is currently looking at, if any. The engine

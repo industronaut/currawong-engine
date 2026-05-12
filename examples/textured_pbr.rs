@@ -33,7 +33,7 @@ use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
     PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PosNormalUv, Renderer,
     SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, TextureColorSpace, View,
-    ViewEnvironment, WorldObject, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    ViewConfig, ViewEnvironment, WorldObject, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -211,6 +211,19 @@ struct TexturedPbr {
 
 impl View for TexturedPbr {
     type Sim = Game;
+
+    const CONFIG: ViewConfig = ViewConfig {
+        title: "currawong — textured PBR cubes under a moving sun",
+        // Daylight blue. Sky/ambient inside the shader still varies with
+        // time of day; the clear is currently static.
+        clear_colour: wgpu::Color {
+            r: 0.45,
+            g: 0.65,
+            b: 0.95,
+            a: 1.0,
+        },
+        depth_format: Some(DEPTH_FORMAT),
+    };
 
     fn init(renderer: &Renderer) -> Self {
         use wgpu::util::DeviceExt;
@@ -458,26 +471,6 @@ impl View for TexturedPbr {
                     ctx.event_loop.exit();
                 }
             });
-    }
-
-    fn title() -> &'static str {
-        "currawong — textured PBR cubes under a moving sun"
-    }
-
-    fn clear_colour() -> wgpu::Color {
-        // Daylight blue. Sky/ambient inside the shader still varies with
-        // time of day; the clear is currently static (clear_colour is an
-        // associated method, not bound to per-frame state).
-        wgpu::Color {
-            r: 0.45,
-            g: 0.65,
-            b: 0.95,
-            a: 1.0,
-        }
-    }
-
-    fn depth_format() -> Option<wgpu::TextureFormat> {
-        Some(DEPTH_FORMAT)
     }
 }
 
