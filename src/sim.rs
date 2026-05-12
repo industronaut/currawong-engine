@@ -40,7 +40,9 @@ pub use components::Components;
 pub use environment::{SimEnvironment, sun_direction_for};
 pub use slot_map::{SlotKey, SlotMap};
 pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};
-pub use zone::{WorldObjectId, WorldObjectRef, WorldTransform, Zone, ZoneId, Zones};
+pub use zone::{
+    WorldObjectId, WorldObjectRef, WorldObjectsMut, WorldTransform, Zone, ZoneId, Zones,
+};
 
 /// A simulation of the world.
 ///
