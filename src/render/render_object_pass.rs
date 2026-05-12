@@ -80,44 +80,36 @@ impl RenderObjectPass {
     /// per alive instance; objects without that component are treated as
     /// having an empty `SlotValues` (templates may then fall back to
     /// defaults in `on_part`).
+    ///
+    /// Thin wrapper over [`Self::for_each_alive`] with a no-op emitter
+    /// callback; the traversal lives in one place.
     pub fn for_each_alive_part<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
         live_instances: &RenderInstances<R>,
-        mut on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues),
+        on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues),
     ) where
         R: Copy + Eq + Hash + 'static,
     {
-        let empty = SlotValues::new();
-        for (parent, rid, instance) in live_instances.iter() {
-            let Some(template) = templates.get(rid) else {
-                continue;
-            };
-            let zone = zones
-                .get(parent.zone)
-                .expect("zone alive while instance lives");
-            let slots = zone
-                .components()
-                .get::<SlotValues>(parent.id)
-                .unwrap_or(&empty);
-            validate_slot_values(template, slots);
-
-            for part in template.mesh_parts() {
-                let world = instance.world_xform * part.local_transform;
-                on_part(parent, rid, part, world, slots);
-            }
-        }
+        Self::for_each_alive(
+            zones,
+            templates,
+            live_instances,
+            on_part,
+            |_, _, _, _, _| {},
+        );
     }
 
-    /// Phase 2 (mesh + emitter): like [`Self::for_each_alive_part`] but
-    /// also walks each template's emitter parts and invokes `on_emitter`.
-    /// Slot validation happens once per alive instance; both callbacks see
-    /// the same `&SlotValues`.
+    /// Phase 2 (mesh + emitter): iterate alive instances, validate each
+    /// parent's `SlotValues` against the template schema, then invoke
+    /// `on_part` for every [`MeshPart`] and `on_emitter` for every
+    /// [`EmitterPart`]. Slot validation happens once per alive instance;
+    /// both callbacks see the same `&SlotValues`.
     ///
     /// Use this when a template carries [`EmitterPart`]s — the demo at
     /// [`examples/render_objects.rs`](../../examples/render_objects.rs)
-    /// does. Pure-mesh views should call
-    /// [`Self::for_each_alive_part`] to avoid the unused-closure ceremony.
+    /// does. Pure-mesh views can call [`Self::for_each_alive_part`] for the
+    /// same walk without the empty emitter closure.
     pub fn for_each_alive<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
