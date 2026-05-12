@@ -121,48 +121,45 @@ pub struct SlotDescriptor {
 /// the *schema* — names and kinds — via [`RenderTemplate::with_slot`];
 /// `SlotValues` is the *data* matching that schema.
 ///
-/// Storage is a small `Vec` of `(name, value)` pairs — slot counts are
-/// expected to be low (single digits per template), so linear scans win
-/// over hash lookups. Slot-kind validation against a template's schema is
-/// deferred until templates start *consuming* slots structurally; today's
-/// consumers (example code) match by name and `match` on the
-/// [`SlotValue`] variant directly.
+/// Storage is a `HashMap` keyed by `&'static str`. Slot names are
+/// template-declared string literals at the call site, so the keys never
+/// outlive the program and no per-value `String` allocation is needed.
+/// Lookup is O(1). Iteration order is non-deterministic, matching the
+/// `HashMap`-backed [`Components`](crate::sim::components::Components)
+/// registry.
 #[derive(Clone, Debug, Default)]
 pub struct SlotValues {
-    values: Vec<(String, SlotValue)>,
+    values: HashMap<&'static str, SlotValue>,
 }
 
 impl SlotValues {
     pub fn new() -> Self {
-        Self { values: Vec::new() }
+        Self {
+            values: HashMap::new(),
+        }
     }
 
     /// Set the value for `name`, replacing any existing entry. Returns
     /// `self` for chained builder use at sim-init time.
-    pub fn with(mut self, name: impl Into<String>, value: SlotValue) -> Self {
+    pub fn with(mut self, name: &'static str, value: SlotValue) -> Self {
         self.set(name, value);
         self
     }
 
     /// In-place set / overwrite.
-    pub fn set(&mut self, name: impl Into<String>, value: SlotValue) {
-        let name = name.into();
-        if let Some(slot) = self.values.iter_mut().find(|(n, _)| *n == name) {
-            slot.1 = value;
-        } else {
-            self.values.push((name, value));
-        }
+    pub fn set(&mut self, name: &'static str, value: SlotValue) {
+        self.values.insert(name, value);
     }
 
     /// Look up a value by name. Returns the `SlotValue` by value (it's
     /// `Copy`); the caller `match`es to extract the typed inner.
     pub fn get(&self, name: &str) -> Option<SlotValue> {
-        self.values.iter().find(|(n, _)| n == name).map(|(_, v)| *v)
+        self.values.get(name).copied()
     }
 
-    /// `(name, value)` iterator, in insertion order.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, SlotValue)> + '_ {
-        self.values.iter().map(|(n, v)| (n.as_str(), *v))
+    /// `(name, value)` iterator. Order is unspecified.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, SlotValue)> + '_ {
+        self.values.iter().map(|(&n, &v)| (n, v))
     }
 
     pub fn len(&self) -> usize {
@@ -711,13 +708,22 @@ mod tests {
     }
 
     #[test]
-    fn slot_values_iter_preserves_insertion_order() {
+    fn slot_values_iter_visits_every_entry() {
         let sv = SlotValues::new()
             .with("a", SlotValue::I32(1))
             .with("b", SlotValue::I32(2))
             .with("c", SlotValue::I32(3));
 
-        let names: Vec<&str> = sv.iter().map(|(n, _)| n).collect();
-        assert_eq!(names, vec!["a", "b", "c"]);
+        // Iteration order is unspecified — sort by name for a deterministic check.
+        let mut entries: Vec<(&'static str, SlotValue)> = sv.iter().collect();
+        entries.sort_by_key(|(n, _)| *n);
+        assert_eq!(
+            entries,
+            vec![
+                ("a", SlotValue::I32(1)),
+                ("b", SlotValue::I32(2)),
+                ("c", SlotValue::I32(3)),
+            ]
+        );
     }
 }
