@@ -9,7 +9,10 @@
 //! - [`camera`] — perspective camera helper.
 //! - [`environment`] — view-side environment (sun, ambient, sky) + the
 //!   engine-managed scene bind group.
-//! - [`renderer`] — window + GPU device/queue/surface + optional depth.
+//! - [`renderer`] — window + GPU device/queue/surface + scene resources.
+//! - [`scene_resources`] — engine-managed per-scene GPU state: depth
+//!   attachment, scene-environment binding (and future shadow maps, IBL probes,
+//!   MSAA resolve targets, …).
 //! - [`view`] — the [`View`] trait + [`EngineCtx`].
 //! - [`runner`] — event loop integration ([`run`], [`run_with_clock`]).
 //! - [`instance`] — per-key instance bucketing for batched instanced rendering.
@@ -44,6 +47,7 @@ mod render_object;
 mod render_object_pass;
 mod renderer;
 mod runner;
+mod scene_resources;
 mod terrain;
 mod terrain_material;
 mod terrain_renderer;
