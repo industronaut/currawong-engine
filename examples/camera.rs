@@ -70,7 +70,7 @@ impl Simulation for Game {
         // transform. `split_mut` hands out independent borrows of the object
         // map and the component registry so we can do both in one pass.
         let zone = self.zones.get_mut(self.main_zone).expect("main zone");
-        let (objects, components) = zone.split_mut();
+        let (mut objects, components) = zone.split_mut();
         for (id, bobber) in components.iter::<Bobber>() {
             if let Some(obj) = objects.get_mut(id) {
                 obj.position.z = (t * 2.0 + bobber.phase).sin() * 0.6;

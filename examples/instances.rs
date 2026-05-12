@@ -109,7 +109,7 @@ impl Simulation for Game {
         // Only trees sway. `split_mut` lets us iterate the TreeSway
         // component map and mutate the matching objects in one pass.
         let zone = self.zones.get_mut(self.main_zone).expect("main zone");
-        let (objects, components) = zone.split_mut();
+        let (mut objects, components) = zone.split_mut();
         for (id, sway) in components.iter::<TreeSway>() {
             if let Some(obj) = objects.get_mut(id) {
                 let angle = (t * 1.4 + sway.phase).sin() * 0.22;

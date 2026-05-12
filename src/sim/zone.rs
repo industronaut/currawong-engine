@@ -151,15 +151,60 @@ impl Zone {
         &mut self.components
     }
 
-    /// Borrow the object slot-map and the component registry independently —
+    /// Borrow the object map and the component registry independently —
     /// useful when iterating components and mutating objects (or vice versa)
     /// in the same pass, where `&mut self` would borrow the whole zone.
     ///
-    /// Removing through the returned [`SlotMap`] bypasses
-    /// [`Components::remove_all`] and will leak components; use [`Zone::remove`]
-    /// for normal removal.
-    pub fn split_mut(&mut self) -> (&mut SlotMap<WorldObjectId, WorldTransform>, &mut Components) {
-        (&mut self.objects, &mut self.components)
+    /// The objects half is a [`WorldObjectsMut`] wrapper that exposes lookup
+    /// and mutation but not removal: insertion and removal must go through
+    /// [`Zone::insert`] / [`Zone::remove`] so the [`Components`] registry
+    /// stays in sync.
+    pub fn split_mut(&mut self) -> (WorldObjectsMut<'_>, &mut Components) {
+        (
+            WorldObjectsMut {
+                inner: &mut self.objects,
+            },
+            &mut self.components,
+        )
+    }
+}
+
+/// Mutable view of a [`Zone`]'s objects handed out by [`Zone::split_mut`].
+///
+/// Exposes lookup and mutation of existing transforms but deliberately omits
+/// `insert` and `remove` — those go through [`Zone::insert`] / [`Zone::remove`]
+/// so the [`Components`] registry stays in sync with the object slot-map.
+pub struct WorldObjectsMut<'a> {
+    inner: &'a mut SlotMap<WorldObjectId, WorldTransform>,
+}
+
+impl<'a> WorldObjectsMut<'a> {
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub fn contains(&self, id: WorldObjectId) -> bool {
+        self.inner.contains(id)
+    }
+
+    pub fn get(&self, id: WorldObjectId) -> Option<&WorldTransform> {
+        self.inner.get(id)
+    }
+
+    pub fn get_mut(&mut self, id: WorldObjectId) -> Option<&mut WorldTransform> {
+        self.inner.get_mut(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectId, &WorldTransform)> + '_ {
+        self.inner.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (WorldObjectId, &mut WorldTransform)> + '_ {
+        self.inner.iter_mut()
     }
 }
 
@@ -345,12 +390,35 @@ mod tests {
         let a = z.insert(obj(0.0));
         z.components_mut().insert(a, Health(7));
 
-        let (objects, components) = z.split_mut();
+        let (mut objects, components) = z.split_mut();
         for (id, h) in components.iter::<Health>() {
             if let Some(o) = objects.get_mut(id) {
                 o.position.x = h.0 as f32;
             }
         }
         assert_eq!(z.get(a).unwrap().position.x, 7.0);
+    }
+
+    #[test]
+    fn world_objects_mut_supports_iter_mut() {
+        let mut z = Zone::new();
+        let a = z.insert(obj(1.0));
+        let b = z.insert(obj(2.0));
+        let (mut objects, _components) = z.split_mut();
+        for (_, o) in objects.iter_mut() {
+            o.position.x += 10.0;
+        }
+        assert_eq!(z.get(a).unwrap().position.x, 11.0);
+        assert_eq!(z.get(b).unwrap().position.x, 12.0);
+    }
+
+    #[test]
+    fn world_objects_mut_reports_len() {
+        let mut z = Zone::new();
+        z.insert(obj(1.0));
+        z.insert(obj(2.0));
+        let (objects, _components) = z.split_mut();
+        assert_eq!(objects.len(), 2);
+        assert!(!objects.is_empty());
     }
 }
