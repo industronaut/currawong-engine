@@ -34,6 +34,8 @@ mod camera;
 mod debug_ui;
 mod emitter;
 mod environment;
+#[cfg(feature = "yakui")]
+mod game_ui;
 mod instance;
 mod material;
 mod pbr;

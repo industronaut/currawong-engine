@@ -59,6 +59,22 @@ pub trait View: 'static {
         let _ = (sim, ctx, egui_ctx);
     }
 
+    /// Build the per-frame game UI with yakui. Called once per frame after
+    /// `render`, between `Yakui::start` and `Yakui::finish` so widget calls
+    /// (`yakui::widgets::*`, `yakui::label`, `yakui::button`, …) attach to the
+    /// engine's `Yakui` state via yakui's thread-local context.
+    ///
+    /// Mirrors `input`'s mutability: widgets can read sim state and drive
+    /// sim/engine changes via `ctx`.
+    ///
+    /// Default no-op; opt in by overriding. Behind the `yakui` feature.
+    /// Independent of [`ui`](Self::ui) — both can be implemented when both
+    /// `egui` and `yakui` features are enabled.
+    #[cfg(feature = "yakui")]
+    fn game_ui(&mut self, sim: &mut Self::Sim, ctx: &mut EngineCtx) {
+        let _ = (sim, ctx);
+    }
+
     fn title() -> &'static str {
         "currawong"
     }

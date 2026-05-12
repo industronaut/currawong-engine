@@ -28,6 +28,9 @@ pub use winit;
 #[cfg(feature = "egui")]
 pub use egui;
 
+#[cfg(feature = "yakui")]
+pub use yakui;
+
 #[cfg(feature = "render")]
 mod render;
 #[cfg(feature = "render")]
