@@ -1,25 +1,22 @@
-//! Window + GPU surface, device, queue, and (optional) depth attachment.
+//! Window + GPU surface, device, queue, and engine-managed scene resources.
 
 use std::sync::Arc;
 
 use winit::window::Window;
 
-use super::environment::SceneEnvironmentBinding;
+use super::environment::ViewEnvironment;
+use super::scene_resources::SceneResources;
 
-/// Owns the window and the wgpu device/queue/surface.
+/// Owns the window and the wgpu device/queue/surface, plus engine-managed
+/// per-scene GPU resources (depth attachment, scene-environment binding,
+/// future shadow maps, IBL probes, …) via [`SceneResources`].
 pub struct Renderer {
     pub window: Arc<Window>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub(super) surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    depth: Option<DepthAttachment>,
-    scene: SceneEnvironmentBinding,
-}
-
-struct DepthAttachment {
-    format: wgpu::TextureFormat,
-    view: wgpu::TextureView,
+    scene: SceneResources,
 }
 
 impl Renderer {
@@ -37,14 +34,14 @@ impl Renderer {
     /// Depth format the engine has allocated for this view, if any. Pipelines
     /// using depth must declare this format in their `DepthStencilState`.
     pub fn depth_format(&self) -> Option<wgpu::TextureFormat> {
-        self.depth.as_ref().map(|d| d.format)
+        self.scene.depth_format()
     }
 
     /// Depth texture view, if a depth attachment was requested. Used by the
     /// engine's frame loop to attach to the render pass — not normally
     /// needed by views.
     pub(super) fn depth_view(&self) -> Option<&wgpu::TextureView> {
-        self.depth.as_ref().map(|d| &d.view)
+        self.scene.depth_view()
     }
 
     /// Bind-group layout for the engine-managed scene environment uniform.
@@ -54,7 +51,7 @@ impl Renderer {
     /// before [`View::render`](crate::View::render) runs — your shader just
     /// needs to declare a `@group(N) @binding(0)` for it.
     pub fn scene_layout(&self) -> &wgpu::BindGroupLayout {
-        self.scene.layout()
+        self.scene.scene_layout()
     }
 
     /// Bind group for the engine-managed scene environment uniform. Bind at
@@ -62,11 +59,11 @@ impl Renderer {
     /// The engine writes fresh values into it each frame from
     /// [`View::extract_environment`](crate::View::extract_environment).
     pub fn scene_bind_group(&self) -> &wgpu::BindGroup {
-        self.scene.bind_group()
+        self.scene.scene_bind_group()
     }
 
-    pub(super) fn write_scene(&self, env: &super::environment::ViewEnvironment) {
-        self.scene.write(&self.queue, env);
+    pub(super) fn write_scene(&self, env: &ViewEnvironment) {
+        self.scene.write_scene(&self.queue, env);
     }
 
     pub(super) async fn new(
@@ -116,12 +113,7 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let depth = depth_format.map(|format| DepthAttachment {
-            format,
-            view: create_depth_view(&device, config.width, config.height, format),
-        });
-
-        let scene = SceneEnvironmentBinding::new(&device);
+        let scene = SceneResources::new(&device, config.width, config.height, depth_format);
 
         Self {
             window,
@@ -129,7 +121,6 @@ impl Renderer {
             queue,
             surface,
             config,
-            depth,
             scene,
         }
     }
@@ -138,36 +129,7 @@ impl Renderer {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
-        if let Some(depth) = self.depth.as_mut() {
-            depth.view = create_depth_view(
-                &self.device,
-                self.config.width,
-                self.config.height,
-                depth.format,
-            );
-        }
+        self.scene
+            .resize(&self.device, self.config.width, self.config.height);
     }
-}
-
-fn create_depth_view(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-) -> wgpu::TextureView {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("currawong depth"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
