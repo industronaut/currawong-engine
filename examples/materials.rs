@@ -20,7 +20,7 @@ use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry, Renderer,
     Simulation, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
-    WorldObject, Zone, Zones, wgpu, winit,
+    WorldTransform, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -63,7 +63,7 @@ impl Game {
         ];
 
         for (pos, tint) in reds {
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: pos,
                 rotation: Quat::IDENTITY,
             });
@@ -71,7 +71,7 @@ impl Game {
             zone.components_mut().insert(id, Tint(tint));
         }
         for (pos, tint) in golds {
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: pos,
                 rotation: Quat::IDENTITY,
             });

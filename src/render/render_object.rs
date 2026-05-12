@@ -115,7 +115,7 @@ pub struct SlotDescriptor {
 }
 
 /// Named [`SlotValue`]s for one render instance. The sim provides these
-/// per object (typically as a component on the `WorldObject`); the View
+/// per object (typically as a component keyed by `WorldObjectId`); the View
 /// reads them at render time to drive per-instance attribs, material
 /// instance selection, visual-script state, and so on. Templates declare
 /// the *schema* — names and kinds — via [`RenderTemplate::with_slot`];

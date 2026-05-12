@@ -13,7 +13,7 @@ The central commitment is **sim/view separation**, modelled on Unreal's proxy-ex
 
 The boundary is enforced at build time: `cargo build --no-default-features` produces a sim-only binary with no GPU or windowing dependencies in the tree. That build succeeding is the architectural invariant test.
 
-Read [CLAUDE.md](./CLAUDE.md) for the full architectural notes — sim hierarchy (`Simulation → Zones → Zone → { WorldObject, Components }`), view hierarchy, the tick model, render-object templates and slots, the material model, and the load-bearing invariants the codebase commits to.
+Read [CLAUDE.md](./CLAUDE.md) for the full architectural notes — sim hierarchy (`Simulation → Zones → Zone → { WorldTransform, Components }`), view hierarchy, the tick model, render-object templates and slots, the material model, and the load-bearing invariants the codebase commits to.
 
 ## Build
 

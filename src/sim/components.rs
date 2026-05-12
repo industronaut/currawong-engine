@@ -9,10 +9,10 @@ use super::zone::WorldObjectId;
 ///
 /// One sparse map per registered component type, looked up by [`TypeId`].
 /// Insertion is lazy — the first `insert::<T>` for a new type allocates the
-/// inner map. Components are removed automatically when their owning
-/// [`WorldObject`](crate::WorldObject) is removed via
-/// [`Zone::remove`](crate::Zone::remove); that is the only path that keeps
-/// component lifecycle in sync, so prefer it over reaching into internals.
+/// inner map. Components are removed automatically when their owning object
+/// is removed via [`Zone::remove`](crate::Zone::remove); that is the only
+/// path that keeps component lifecycle in sync, so prefer it over reaching
+/// into internals.
 ///
 /// Inspired by the `ThingComp` pattern in RimWorld and creature-fact tables in
 /// Dwarf Fortress: most sim-game state is sparse, optional, and per-entity, so
@@ -123,11 +123,11 @@ impl Default for Components {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{WorldObject, Zone};
+    use crate::{WorldTransform, Zone};
     use glam::{Quat, Vec3};
 
-    fn obj(x: f32) -> WorldObject {
-        WorldObject {
+    fn obj(x: f32) -> WorldTransform {
+        WorldTransform {
             position: Vec3::new(x, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         }

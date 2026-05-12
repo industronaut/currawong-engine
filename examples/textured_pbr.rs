@@ -33,7 +33,8 @@ use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
     PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PosNormalUv, Renderer,
     SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, TextureColorSpace, View,
-    ViewConfig, ViewEnvironment, WorldObject, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    ViewConfig, ViewEnvironment, WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu,
+    winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -73,7 +74,7 @@ impl Game {
         // Five cubes along the X axis, evenly spaced.
         for (i, &mat) in ALL_MATERIALS.iter().enumerate() {
             let x = (i as f32 - 2.0) * 1.5;
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: Vec3::new(x, 0.0, 0.5),
                 rotation: Quat::IDENTITY,
             });

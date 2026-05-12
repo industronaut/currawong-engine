@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, InstanceBuckets,
-    ParticleLifecycle, Renderer, Simulation, View, ViewConfig, WorldObject, WorldObjectId,
-    WorldObjectRef, Zone, Zones, mat4_instance_attributes, wgpu, winit,
+    ParticleLifecycle, Renderer, Simulation, View, ViewConfig, WorldObjectId, WorldObjectRef,
+    WorldTransform, Zone, Zones, mat4_instance_attributes, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -56,7 +56,7 @@ impl Game {
         let main_zone = zones.insert(Zone::new());
         let zone = zones.get_mut(main_zone).expect("just inserted");
 
-        let fire_id = zone.insert(WorldObject {
+        let fire_id = zone.insert(WorldTransform {
             position: Vec3::new(0.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         });
@@ -131,7 +131,7 @@ enum VisualPart {
 fn extract_visuals(
     zone: &Zone,
     id: WorldObjectId,
-    obj: &WorldObject,
+    obj: &WorldTransform,
     push: &mut dyn FnMut(VisualPart),
 ) {
     if let Some(fire) = zone.components().get::<Campfire>(id) {

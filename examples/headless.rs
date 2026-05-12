@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use currawong::glam::{Quat, Vec3};
-use currawong::{Simulation, WorldObject, WorldObjectRef, Zone, Zones};
+use currawong::{Simulation, WorldObjectRef, WorldTransform, Zone, Zones};
 
 struct Game {
     zones: Zones,
@@ -26,11 +26,11 @@ impl Game {
         let zone_id = zones.insert(Zone::new());
         let zone = zones.get_mut(zone_id).expect("just inserted");
 
-        let obj_a_id = zone.insert(WorldObject {
+        let obj_a_id = zone.insert(WorldTransform {
             position: Vec3::new(0.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         });
-        let obj_b_id = zone.insert(WorldObject {
+        let obj_b_id = zone.insert(WorldTransform {
             position: Vec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         });

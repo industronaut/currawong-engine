@@ -26,7 +26,7 @@ use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, SimEnvironment,
     Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
     UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
-    ViewEnvironment, WorldObject, WorldObjectRef, Zone, ZoneId, Zones, sun_direction_for, wgpu,
+    ViewEnvironment, WorldObjectRef, WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu,
     winit,
 };
 use winit::event::{ElementState, WindowEvent};
@@ -81,7 +81,7 @@ impl Game {
 
         let start_tile = TileCoord::new(0, 0);
         let zone = zones.get_mut(ground).unwrap();
-        let player_id = zone.insert(WorldObject {
+        let player_id = zone.insert(WorldTransform {
             position: tile_to_pos(start_tile, 0),
             rotation: Quat::IDENTITY,
         });
@@ -138,7 +138,7 @@ impl Game {
         src.remove(self.player.id);
 
         let zone = self.zones.get_mut(self.ground).unwrap();
-        let id = zone.insert(WorldObject {
+        let id = zone.insert(WorldTransform {
             position: tile_to_pos(TileCoord::new(0, 0), 0),
             rotation: Quat::IDENTITY,
         });

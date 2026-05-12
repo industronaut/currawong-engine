@@ -1,7 +1,7 @@
 //! Tile-grid terrain with optional liquid per tile.
 //!
 //! Terrain is a [`Zone`](super::Zone)-level slot, separate from the
-//! [`WorldObject`](super::WorldObject) slot-map: tiles are dense and uniform
+//! [`WorldTransform`](super::WorldTransform) slot-map: tiles are dense and uniform
 //! where world objects are sparse and individuated, so they want different
 //! storage shapes. Pathfinding and gameplay read tile data directly; the
 //! view-side mesher (in `render::terrain`, not yet built) consumes the same
