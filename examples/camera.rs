@@ -1,7 +1,7 @@
-//! Sim-driven rendering: three WorldObjects bobbing on Z, viewed through an
+//! Sim-driven rendering: three objects bobbing on Z, viewed through an
 //! orbiting Camera with depth-tested rendering.
 //!
-//! Demonstrates the sim/view extract path: `Game` ticks WorldObjects in its
+//! Demonstrates the sim/view extract path: `Game` ticks objects in its
 //! `Zones`; `SimDriven` reads their positions each frame, uploads them as an
 //! instance buffer, and renders one triangle per object through a Camera's
 //! view-projection matrix. Camera orbit runs off a wall-clock Instant, so it
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, Renderer, Simulation, View, ViewConfig, WorldObject, Zone,
+    Camera, CameraBinding, EngineCtx, Renderer, Simulation, View, ViewConfig, WorldTransform, Zone,
     ZoneId, Zones, mat4_instance_attributes, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
@@ -43,7 +43,7 @@ impl Game {
         // ordering swap as it goes around — without depth testing, the wrong
         // triangle would be on top from half the angles.
         for (i, (x, y)) in [(-2.0, -1.0), (0.0, 0.0), (2.0, 1.0)].iter().enumerate() {
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: Vec3::new(*x, *y, 0.0),
                 rotation: Quat::IDENTITY,
             });

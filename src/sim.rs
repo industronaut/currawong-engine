@@ -6,7 +6,7 @@
 //!
 //! ## Hierarchy
 //!
-//! [`Simulation`] → [`Zones`] → [`Zone`] → [`WorldObject`].
+//! [`Simulation`] → [`Zones`] → [`Zone`] → [`WorldTransform`].
 //!
 //! Zones are coordinate-isolated: each zone has its own local frame and the
 //! engine does not provide cross-zone positional math. Movement between zones
@@ -16,7 +16,7 @@
 //! ## Module layout
 //!
 //! - [`slot_map`] — generic generational slot-map (the storage primitive).
-//! - [`zone`] — [`WorldObject`], [`Zone`], [`Zones`], cross-zone refs.
+//! - [`zone`] — [`WorldTransform`], [`Zone`], [`Zones`], cross-zone refs.
 //! - [`components`] — sparse, type-erased per-object data.
 //! - [`terrain`] — tile-grid terrain with optional liquids per tile.
 //! - [`clock`] — fixed-tick driver with speed scaling.
@@ -40,7 +40,7 @@ pub use components::Components;
 pub use environment::{SimEnvironment, sun_direction_for};
 pub use slot_map::{SlotKey, SlotMap};
 pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};
-pub use zone::{WorldObject, WorldObjectId, WorldObjectRef, Zone, ZoneId, Zones};
+pub use zone::{WorldObjectId, WorldObjectRef, WorldTransform, Zone, ZoneId, Zones};
 
 /// A simulation of the world.
 ///

@@ -28,8 +28,8 @@ use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, InstanceBuckets, LiveRenderObjects,
     MaterialInstanceRegistry, MeshPart, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer,
     Simulation, SlotKind, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
-    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig, WorldObject,
-    Zone, ZoneId, Zones, wgpu, winit,
+    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -88,7 +88,7 @@ impl Game {
             );
             let tint_seed = rng.next_f32();
             let rotation = Quat::from_rotation_z(rng.next_f32() * TAU);
-            let id = zone.insert(WorldObject { position, rotation });
+            let id = zone.insert(WorldTransform { position, rotation });
             zone.components_mut().insert(id, RenderId::TreeOak);
             zone.components_mut().insert(
                 id,

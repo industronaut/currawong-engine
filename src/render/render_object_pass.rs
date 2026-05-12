@@ -9,10 +9,10 @@
 //!
 //! Slot-value convention: this helper expects per-object [`SlotValues`] to
 //! live as a [`Components`](crate::sim::components::Components) entry on
-//! the parent [`WorldObject`]. Templates declare the *schema* (names +
-//! kinds + routings); the sim attaches a matching `SlotValues` component
-//! per object. Views that need a different storage shape can build the
-//! loop themselves — `RenderObjectPass` is the convenient default.
+//! the parent object. Templates declare the *schema* (names + kinds +
+//! routings); the sim attaches a matching `SlotValues` component per
+//! object. Views that need a different storage shape can build the loop
+//! themselves — `RenderObjectPass` is the convenient default.
 
 use std::hash::Hash;
 
@@ -29,10 +29,9 @@ use super::visibility::Frustum;
 pub struct RenderObjectPass;
 
 impl RenderObjectPass {
-    /// Phase 1: walk `zones` and declare a live proxy on
-    /// `live_objects` for each [`WorldObject`](crate::sim::zone::WorldObject)
-    /// whose components include an `R` render id, then cull against
-    /// `frustum`. Calls [`LiveRenderObjects::begin_frame`] for you.
+    /// Phase 1: walk `zones` and declare a live proxy on `live_objects` for
+    /// each object whose components include an `R` render id, then cull
+    /// against `frustum`. Calls [`LiveRenderObjects::begin_frame`] for you.
     ///
     /// Templates with no `visual_bounds` produce proxies with no AABB,
     /// which [`LiveRenderObjects::cull`] treats as always-visible — matching
@@ -179,7 +178,7 @@ mod tests {
     use super::*;
     use crate::render::render_object::{SlotKind, SlotValue};
     use crate::render::visibility::Aabb;
-    use crate::sim::{WorldObject, Zone, ZoneId, Zones};
+    use crate::sim::{WorldTransform, Zone, ZoneId, Zones};
     use glam::{Quat, Vec3, Vec4};
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -208,7 +207,7 @@ mod tests {
 
     fn insert_tree(zones: &mut Zones, zid: ZoneId, position: Vec3, slots: Option<SlotValues>) {
         let zone = zones.get_mut(zid).expect("zone");
-        let id = zone.insert(WorldObject {
+        let id = zone.insert(WorldTransform {
             position,
             rotation: Quat::IDENTITY,
         });
@@ -248,7 +247,7 @@ mod tests {
         let (mut zones, zid) = seed_zone();
         // Object with no RenderId component.
         let zone = zones.get_mut(zid).unwrap();
-        zone.insert(WorldObject::default());
+        zone.insert(WorldTransform::default());
 
         let mut templates: RenderRegistry<Rid> = RenderRegistry::new();
         templates.register(Rid::Tree, tree_template());

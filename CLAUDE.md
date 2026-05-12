@@ -52,11 +52,12 @@ The `render` Cargo feature gates `pollster`, `wgpu`, `winit`, `bytemuck`, and `g
 
 ### Sim hierarchy
 
-`Simulation → Zones → Zone → { WorldObject, Components }`, with a generic generational slot-map under everything:
+`Simulation → Zones → Zone → { WorldTransform, Components }`, with a generic generational slot-map under everything:
 
 - `SlotMap<K: SlotKey, V>` — generic generational storage.
 - `WorldObjectId`, `ZoneId` — newtype keys; the type system rejects mismatched lookups.
-- `Zone` — struct holding `objects: SlotMap<WorldObjectId, WorldObject>` + `components: Components`. `Zone::remove` is the lifecycle choke point: it removes the object **and** cascades to `components.remove_all(id)`. `Zone::split_mut` returns independent borrows of the two when you need to iterate components and mutate objects in one pass.
+- `WorldTransform` — per-object spatial state (position + rotation only). The struct is the *transform*; the *object* is the id plus whatever components are attached. Richer payloads live in `Components`, not on the transform.
+- `Zone` — struct holding `objects: SlotMap<WorldObjectId, WorldTransform>` + `components: Components`. `Zone::remove` is the lifecycle choke point: it removes the object **and** cascades to `components.remove_all(id)`. `Zone::split_mut` returns independent borrows of the two when you need to iterate components and mutate objects in one pass.
 - `Components` — heterogeneous, type-erased registry of sparse per-object state. `HashMap<TypeId, Box<dyn ComponentStorage>>` outer, `HashMap<WorldObjectId, T>` per type, lazy-allocated on first `insert::<T>`. APIs: `insert/get/get_mut/remove/iter/iter_mut`, all generic over `T: 'static`. Closer to RimWorld's `ThingComp` bag than to archetype ECS — the right shape for sim-game state where most facts are sparse and optional.
 - `Zones = SlotMap<ZoneId, Zone>` (type alias). User's `Simulation` impl owns one.
 - `WorldObjectRef { zone, id }` with `resolve(&zones)` / `resolve_mut` — fully-qualified cross-zone handle for camera targets, AI memory, save pointers.
@@ -88,7 +89,7 @@ Drawable content is organised view-side into **render objects** — templates an
 
 `(SimId, RenderId)` is the composite key for a live visual instance. Instances are created on first visibility and destroyed on cull or zone leave.
 
-**Slots** are typed, named parameters declared by a template (think Godot's `@export`, Unreal's `UPROPERTY`). The schema is a closed `SlotKind` enum (`F32`, `Vec3`, `Color`, `Bool`, `AssetRef<T>`, …) — explicitly not a `Variant` / `Box<dyn Any>` bag. Each slot also declares a `SlotRouting` (`Instance` or `Uniform`) at template-build time so the engine picks the right packing strategy without runtime inference. Sim attaches per-object `SlotValues` as a sim component on the parent `WorldObject`; the view reads them at render time. `with_slot(name, kind)` defaults to `SlotRouting::Instance`; `with_routed_slot(name, kind, routing)` is the explicit form.
+**Slots** are typed, named parameters declared by a template (think Godot's `@export`, Unreal's `UPROPERTY`). The schema is a closed `SlotKind` enum (`F32`, `Vec3`, `Color`, `Bool`, `AssetRef<T>`, …) — explicitly not a `Variant` / `Box<dyn Any>` bag. Each slot also declares a `SlotRouting` (`Instance` or `Uniform`) at template-build time so the engine picks the right packing strategy without runtime inference. Sim attaches per-object `SlotValues` as a sim component keyed by the parent `WorldObjectId`; the view reads them at render time. `with_slot(name, kind)` defaults to `SlotRouting::Instance`; `with_routed_slot(name, kind, routing)` is the explicit form.
 
 **`Uniform` routing is a doc-only reservation for now.** The variant survives in the enum so adding the packing path later doesn't break the API, but `RenderTemplate::with_routed_slot` panics if asked for `SlotRouting::Uniform` — the failure surfaces at the template-builder site, not as a draw-time trap. Implement the packing path when the first consumer needs it; the current default of indexing a uniform array by `instance_index` in the shader is the v1 plan when that happens.
 
@@ -128,10 +129,10 @@ Two materials exist today: `UnlitColoredMaterial` (position-only vertex, no ligh
 These are load-bearing — don't propose changes that violate them without checking first.
 
 - **Sim is renderer-ignorant.** No `wgpu`/`winit` imports anywhere in the sim module tree (`src/sim.rs` + `src/sim/`). The build-level test for this is `cargo build --no-default-features`.
-- **Storage is the source of truth for "where is this object."** `WorldObject` does not carry a `ZoneId` field. Its zone is implicit in which `Zone` holds it. Same for objects within a zone — no denormalised location data.
+- **Storage is the source of truth for "where is this object."** `WorldTransform` does not carry a `ZoneId` field. Its zone is implicit in which `Zone` holds it. Same for objects within a zone — no denormalised location data.
 - **Zones are coordinate-isolated.** Each zone has its own local frame; the engine provides no cross-zone positional math. Movement between zones is a storage operation (remove + insert), not a position update. (Considered an intermediate `Surface` layer for multi-floor buildings; rejected because isolated surfaces are the same shape as zones — multi-floor buildings become multi-zone with stair triggers.)
 - **Single sim-wide tick.** No per-zone clocks. LOD-by-distance happens within the single tick by doing less work for distant zones, not by scheduling them differently.
-- **Don't fuse sim and view.** No "Sprite component on WorldObject", no scene-graph parent/child on the sim side. Rendering data lives in the View, not the WorldObject.
+- **Don't fuse sim and view.** No "Sprite component" on the sim object, no scene-graph parent/child on the sim side. Rendering data lives in the View, not on the sim object.
 - **Component lifecycle is bound to object lifecycle.** `Zone::remove` is the only path that keeps the `Components` registry in sync with the object slot-map. `Zone::split_mut` exposes the inner `SlotMap` for split-borrow iteration, but removing through it bypasses `Components::remove_all` and leaks components — don't.
 - **Component iteration is non-deterministic for now.** `Components` uses `HashMap` internally, which has a randomly-seeded hasher in std. Iteration order varies across runs. Acceptable while prototyping; will need to swap for a sparse-set or fixed-seed hasher before sim replay / lockstep networking is on the table.
 - **View state is recoverable from sim state.** Render objects are ephemeral. Zone leave tears down all view state for that zone; revisiting reconstructs it from sim state. Visual scripts may carry per-instance state but it must be derivable (or acceptably reset-on-re-view) from sim state — no view-side history. Cost: long-lived transients (smoke columns, fire flicker) cold-start when revisited. Acceptable for now; pre-warming visual state from sim history is the escape hatch if it becomes visible.

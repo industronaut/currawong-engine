@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3};
 use currawong::{
-    Camera, EngineCtx, InstanceBuckets, Renderer, Simulation, View, ViewConfig, WorldObject,
-    WorldObjectId, Zone, ZoneId, Zones, wgpu, winit,
+    Camera, EngineCtx, InstanceBuckets, Renderer, Simulation, View, ViewConfig, WorldObjectId,
+    WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -44,7 +44,7 @@ enum Kind {
 
 /// Per-tree sway phase. Sparse component — only attached to objects whose
 /// kind is `Tree`. Demonstrates that gameplay-relevant state lives in
-/// components, not on every WorldObject.
+/// components, not on every WorldTransform.
 struct TreeSway {
     phase: f32,
 }
@@ -63,7 +63,7 @@ impl Game {
 
         // Buildings on the +X side.
         for x in [1.6, 3.0, 4.4] {
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: Vec3::new(x, 0.0, 0.5),
                 rotation: Quat::IDENTITY,
             });
@@ -72,7 +72,7 @@ impl Game {
 
         // Trees on the -X side. Stagger phase so they don't sway in lock-step.
         for (i, x) in [-1.6, -3.0, -4.4].iter().enumerate() {
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: Vec3::new(*x, 0.0, 0.4),
                 rotation: Quat::IDENTITY,
             });
@@ -87,7 +87,7 @@ impl Game {
 
         // Rocks scattered along Y, sitting low.
         for y in [-2.2, -0.6, 0.6, 2.2] {
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: Vec3::new(0.0, y, -0.45),
                 rotation: Quat::IDENTITY,
             });
@@ -240,7 +240,7 @@ impl Mesh {
 fn extract_visuals(
     zone: &Zone,
     id: WorldObjectId,
-    obj: &WorldObject,
+    obj: &WorldTransform,
     push: &mut dyn FnMut(MeshId, Mat4),
 ) {
     let Some(kind) = zone.components().get::<Kind>(id) else {

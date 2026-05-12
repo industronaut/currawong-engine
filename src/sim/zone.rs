@@ -1,7 +1,7 @@
 //! World objects, zones, and cross-zone references.
 //!
 //! Zones are coordinate-isolated: each owns a local frame and a [`SlotMap`]
-//! of [`WorldObject`]s plus a [`Components`] registry for sparse per-object
+//! of [`WorldTransform`]s plus a [`Components`] registry for sparse per-object
 //! data. Movement between zones is a storage operation — the engine provides
 //! no cross-zone positional math.
 
@@ -11,19 +11,19 @@ use super::components::Components;
 use super::slot_map::{SlotKey, SlotMap};
 use super::terrain::Terrain;
 
-/// An entity in the simulation.
+/// Per-object spatial state — position and rotation.
 ///
-/// Carries position and rotation only. Richer payloads (kind, behaviour,
-/// attached data) are added by the caller in their own
-/// [`Simulation`](crate::Simulation) impl — usually as parallel storage keyed
-/// by [`WorldObjectId`], or as [`Components`] entries.
+/// This is *only* the transform of an object in a zone. Richer payloads
+/// (kind, behaviour, attached data) are added by the caller in their own
+/// [`Simulation`](crate::Simulation) impl — usually as [`Components`]
+/// entries keyed by [`WorldObjectId`], or as parallel storage.
 #[derive(Clone, Copy)]
-pub struct WorldObject {
+pub struct WorldTransform {
     pub position: Vec3,
     pub rotation: Quat,
 }
 
-impl Default for WorldObject {
+impl Default for WorldTransform {
     fn default() -> Self {
         Self {
             position: Vec3::ZERO,
@@ -32,10 +32,11 @@ impl Default for WorldObject {
     }
 }
 
-/// Stable handle to a [`WorldObject`] within its owning [`Zone`].
+/// Stable handle to an object within its owning [`Zone`].
 ///
-/// Generational, so a key whose slot has been reused returns `None` from
-/// [`Zone::get`].
+/// Identifies an object as a whole — its [`WorldTransform`] plus any
+/// [`Components`] attached to it. Generational, so a key whose slot has been
+/// reused returns `None` from [`Zone::get`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WorldObjectId {
     index: u32,
@@ -73,14 +74,14 @@ impl SlotKey for ZoneId {
     }
 }
 
-/// A region of the world. Owns the [`WorldObject`]s within it, a
+/// A region of the world. Owns the [`WorldTransform`]s within it, a
 /// [`Components`] registry for sparse, optional per-object data (health,
 /// faction, AI state, etc.), and a [`Terrain`] tile grid.
 ///
 /// Use [`Zone::remove`] rather than reaching for the inner storage: it's the
 /// only path that keeps the [`Components`] registry in sync.
 pub struct Zone {
-    objects: SlotMap<WorldObjectId, WorldObject>,
+    objects: SlotMap<WorldObjectId, WorldTransform>,
     components: Components,
     terrain: Terrain,
 }
@@ -110,23 +111,23 @@ impl Zone {
         self.objects.is_empty()
     }
 
-    pub fn insert(&mut self, obj: WorldObject) -> WorldObjectId {
+    pub fn insert(&mut self, obj: WorldTransform) -> WorldObjectId {
         self.objects.insert(obj)
     }
 
     /// Remove `id` and every component attached to it. Returns the removed
-    /// [`WorldObject`], or `None` if the id is stale.
-    pub fn remove(&mut self, id: WorldObjectId) -> Option<WorldObject> {
+    /// [`WorldTransform`], or `None` if the id is stale.
+    pub fn remove(&mut self, id: WorldObjectId) -> Option<WorldTransform> {
         let obj = self.objects.remove(id)?;
         self.components.remove_all(id);
         Some(obj)
     }
 
-    pub fn get(&self, id: WorldObjectId) -> Option<&WorldObject> {
+    pub fn get(&self, id: WorldObjectId) -> Option<&WorldTransform> {
         self.objects.get(id)
     }
 
-    pub fn get_mut(&mut self, id: WorldObjectId) -> Option<&mut WorldObject> {
+    pub fn get_mut(&mut self, id: WorldObjectId) -> Option<&mut WorldTransform> {
         self.objects.get_mut(id)
     }
 
@@ -134,11 +135,11 @@ impl Zone {
         self.objects.contains(id)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectId, &WorldObject)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectId, &WorldTransform)> + '_ {
         self.objects.iter()
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (WorldObjectId, &mut WorldObject)> + '_ {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (WorldObjectId, &mut WorldTransform)> + '_ {
         self.objects.iter_mut()
     }
 
@@ -157,7 +158,7 @@ impl Zone {
     /// Removing through the returned [`SlotMap`] bypasses
     /// [`Components::remove_all`] and will leak components; use [`Zone::remove`]
     /// for normal removal.
-    pub fn split_mut(&mut self) -> (&mut SlotMap<WorldObjectId, WorldObject>, &mut Components) {
+    pub fn split_mut(&mut self) -> (&mut SlotMap<WorldObjectId, WorldTransform>, &mut Components) {
         (&mut self.objects, &mut self.components)
     }
 }
@@ -172,7 +173,7 @@ impl Default for Zone {
 /// [`Simulation`](crate::Simulation) impl.
 pub type Zones = SlotMap<ZoneId, Zone>;
 
-/// Fully-qualified handle to a [`WorldObject`] across zones. Use this for
+/// Fully-qualified handle to an object across zones. Use this for
 /// references that outlive a single zone's scope — camera targets, AI
 /// memory, save-game pointers, network messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -182,13 +183,13 @@ pub struct WorldObjectRef {
 }
 
 impl WorldObjectRef {
-    /// Look up the object this ref points at. Returns `None` if either the
-    /// zone or the object has been removed since the ref was created.
-    pub fn resolve<'a>(&self, zones: &'a Zones) -> Option<&'a WorldObject> {
+    /// Look up the transform this ref points at. Returns `None` if either
+    /// the zone or the object has been removed since the ref was created.
+    pub fn resolve<'a>(&self, zones: &'a Zones) -> Option<&'a WorldTransform> {
         zones.get(self.zone)?.get(self.id)
     }
 
-    pub fn resolve_mut<'a>(&self, zones: &'a mut Zones) -> Option<&'a mut WorldObject> {
+    pub fn resolve_mut<'a>(&self, zones: &'a mut Zones) -> Option<&'a mut WorldTransform> {
         zones.get_mut(self.zone)?.get_mut(self.id)
     }
 }
@@ -197,14 +198,14 @@ impl WorldObjectRef {
 mod tests {
     use super::*;
 
-    fn obj(x: f32) -> WorldObject {
-        WorldObject {
+    fn obj(x: f32) -> WorldTransform {
+        WorldTransform {
             position: Vec3::new(x, 0.0, 0.0),
             rotation: Quat::IDENTITY,
         }
     }
 
-    // --- Zone (SlotMap<WorldObjectId, WorldObject>) ----------------------
+    // --- Zone (SlotMap<WorldObjectId, WorldTransform>) -------------------
 
     #[test]
     fn insert_then_get() {

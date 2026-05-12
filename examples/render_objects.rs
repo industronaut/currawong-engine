@@ -25,7 +25,7 @@ use currawong::{
     InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, ParticleLifecycle,
     RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKind, SlotValue,
     SlotValues, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
-    WorldObject, Zone, Zones, wgpu, winit,
+    WorldTransform, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -122,7 +122,7 @@ impl Game {
         // and leaving view. Each carries a SlotValues component holding a
         // "tint" slot the View routes into per-instance attribs.
         for &(y, tint) in CAMPFIRE_TINTS {
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: Vec3::new(0.0, y, 0.0),
                 rotation: Quat::IDENTITY,
             });
@@ -132,7 +132,7 @@ impl Game {
         }
         // Stakes strung along X, perpendicular to the campfires.
         for &(x, tint) in STAKE_TINTS {
-            let id = zone.insert(WorldObject {
+            let id = zone.insert(WorldTransform {
                 position: Vec3::new(x, 0.0, 0.0),
                 rotation: Quat::IDENTITY,
             });
