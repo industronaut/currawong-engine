@@ -72,7 +72,9 @@ pub use render_object::{
 pub use render_object_pass::{RenderObjectPass, validate_slot_values};
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};
-pub use terrain::{ChunkMeshes, FlatTopsMesher, MeshData, TerrainMesher, TerrainVertex};
+pub use terrain::{
+    ChunkMeshes, FlatTopsMesher, MeshData, SlopeMesher, TerrainMesher, TerrainVertex,
+};
 pub use terrain_material::{TerrainMaterial, TerrainMaterialInstance};
 pub use terrain_renderer::TerrainRenderer;
 pub use texture::{SamplerKind, SamplerRegistry, Texture, TextureColorSpace, TextureLoadError};

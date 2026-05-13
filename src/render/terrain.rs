@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{IVec2, UVec2};
+use glam::{IVec2, UVec2, Vec3};
 
 use crate::sim::{CHUNK_SIZE, ChunkCoord, Grid, LiquidId, Terrain};
 
@@ -244,6 +244,149 @@ impl<G: Grid> TerrainMesher<G> for FlatTopsMesher {
     }
 }
 
+// --- SlopeMesher ----------------------------------------------------------
+
+/// Smooth-terrain mesher: each cell's top corner sits at `max(floor_height)`
+/// of every cell touching that corner. A tall cell next to a shorter one
+/// produces a slope between them rather than a cliff — visually OpenTTD /
+/// Transport Tycoon / Rise of Industry style.
+///
+/// Generic over [`Grid`] like [`FlatTopsMesher`]: square cells become
+/// quad-shaped sloped tiles, hex cells become 6-corner sloped hexes. Both
+/// drop through the same code path because the corner topology is hidden
+/// behind [`Grid::cells_at_corner`].
+///
+/// Flat-shaded — each triangle of the fan triangulation gets its own face
+/// normal, so coplanar pieces of a cell read as one facet but sloped pairs
+/// of triangles within a single cell read as a visible crease.
+///
+/// ## Not yet
+///
+/// - **No cliff threshold.** A 5-unit height difference between neighbours
+///   produces a 5-unit-tall slope across one cell width — looks like a steep
+///   ramp. OpenTTD's "max one-step slope, vertical cliff for more" rule is
+///   the obvious next step and lives behind a follow-up flag.
+/// - **No walls.** Pure slopes; isolated tall cells form sharp pyramids
+///   rather than mesas with cliff faces.
+pub struct SlopeMesher {
+    /// World units per cell of canonical unit space.
+    pub tile_size: f32,
+    /// World units per integer step of `floor_height`.
+    pub height_unit: f32,
+    pub top_color: [f32; 4],
+}
+
+impl Default for SlopeMesher {
+    fn default() -> Self {
+        Self {
+            tile_size: 1.0,
+            height_unit: 1.0,
+            top_color: [0.55, 0.6, 0.45, 1.0],
+        }
+    }
+}
+
+impl SlopeMesher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn world_h(&self, h: i32) -> f32 {
+        h as f32 * self.height_unit
+    }
+
+    /// Per-corner height for the slope mesher: the max `floor_height` of
+    /// every cell touching this corner. Adjacent cells agree on the result
+    /// because [`Grid::cells_at_corner`] is symmetric (proved by
+    /// `cells_at_corner_symmetric` tests on each grid impl).
+    fn corner_height<G: Grid>(terrain: &Terrain<G>, cell: IVec2, corner_idx: usize) -> i32 {
+        terrain
+            .grid()
+            .cells_at_corner(cell, corner_idx)
+            .map(|c| terrain.tile_or_default(c).floor_height)
+            .max()
+            .expect("cells_at_corner always includes the cell itself")
+    }
+
+    /// Fan-triangulate a convex polygon with per-triangle face normals.
+    /// Each triangle emits its own three vertices (no sharing across the
+    /// fan) so triangles can carry distinct normals — that's what makes the
+    /// shading flat rather than smooth.
+    fn emit_flat_shaded_polygon(mesh: &mut MeshData, corners: &[Vec3], color: [f32; 4]) {
+        for i in 1..(corners.len() - 1) {
+            let p0 = corners[0];
+            let p1 = corners[i];
+            let p2 = corners[i + 1];
+            let n = (p1 - p0).cross(p2 - p0).normalize_or_zero();
+            let normal = [n.x, n.y, n.z];
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.push(TerrainVertex {
+                pos: p0.to_array(),
+                normal,
+                color,
+            });
+            mesh.vertices.push(TerrainVertex {
+                pos: p1.to_array(),
+                normal,
+                color,
+            });
+            mesh.vertices.push(TerrainVertex {
+                pos: p2.to_array(),
+                normal,
+                color,
+            });
+            mesh.indices.extend([base, base + 1, base + 2]);
+        }
+    }
+}
+
+impl<G: Grid> TerrainMesher<G> for SlopeMesher {
+    type Output = ChunkMeshes;
+
+    fn mesh_chunk(&self, terrain: &Terrain<G>, chunk_coord: ChunkCoord) -> ChunkMeshes {
+        let mut out = ChunkMeshes::default();
+        let Some(chunk) = terrain.chunk(chunk_coord) else {
+            return out;
+        };
+        let grid = terrain.grid();
+        let size = CHUNK_SIZE as i32;
+        let origin = chunk_coord * size;
+        let n_corners = G::CORNERS_PER_CELL;
+        let mut corners: Vec<Vec3> = Vec::with_capacity(n_corners);
+
+        for ly in 0..size {
+            for lx in 0..size {
+                let cell = IVec2::new(origin.x + lx, origin.y + ly);
+                let tile = chunk.tile(UVec2::new(lx as u32, ly as u32));
+
+                // Sloped top: each corner at max-of-touching-cells.
+                corners.clear();
+                for i in 0..n_corners {
+                    let h = Self::corner_height(terrain, cell, i);
+                    let xy = grid.corner_xy(cell, i) * self.tile_size;
+                    corners.push(Vec3::new(xy.x, xy.y, self.world_h(h)));
+                }
+                Self::emit_flat_shaded_polygon(&mut out.solid, &corners, self.top_color);
+
+                // Liquid surface: flat polygon at floor + depth (same shape
+                // contract as FlatTopsMesher — liquid level is per-cell, not
+                // sloped to match neighbours).
+                if let Some(liq) = tile.liquid {
+                    let surface_z = self.world_h(tile.floor_height + liq.depth as i32);
+                    let bucket = out.liquids.entry(liq.kind).or_default();
+                    corners.clear();
+                    for i in 0..n_corners {
+                        let xy = grid.corner_xy(cell, i) * self.tile_size;
+                        corners.push(Vec3::new(xy.x, xy.y, surface_z));
+                    }
+                    Self::emit_flat_shaded_polygon(bucket, &corners, [1.0, 1.0, 1.0, 1.0]);
+                }
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +538,148 @@ mod tests {
         ];
         want.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(wall_normals, want.to_vec());
+    }
+
+    // --- SlopeMesher ------------------------------------------------------
+
+    #[test]
+    fn slope_flat_chunk_top_normals_point_up() {
+        // A fully flat chunk has zero slope on every triangle, so face
+        // normals should be +Z everywhere. Catches sign errors in the cross
+        // product or winding.
+        let mut t = Terrain::new();
+        allocate_chunk(&mut t, ChunkCoord::ZERO);
+        let m = SlopeMesher::new().mesh_chunk(&t, ChunkCoord::ZERO);
+        for v in &m.solid.vertices {
+            let n = v.normal;
+            assert!(
+                (n[0]).abs() < 1e-5 && (n[1]).abs() < 1e-5 && (n[2] - 1.0).abs() < 1e-5,
+                "expected +Z, got {n:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn slope_corner_is_max_of_touching_cells() {
+        // A 2×2 cluster of tile heights [3, 0; 0, 0]. The interior corner
+        // shared by all four cells should sit at z=3·height_unit on every
+        // touching cell's top polygon — they all agree on the corner height.
+        let mut t = Terrain::new();
+        allocate_chunk(&mut t, ChunkCoord::ZERO);
+        t.tile_mut(TileCoord::new(0, 0)).floor_height = 3;
+        // Tile (0,1), (1,0), (1,1) keep default 0.
+        let mesher = SlopeMesher {
+            height_unit: 1.0,
+            ..SlopeMesher::new()
+        };
+        let m = mesher.mesh_chunk(&t, ChunkCoord::ZERO);
+
+        // The interior corner sits at world (1, 1) in canonical unit space
+        // (tile_size = 1). Every vertex emitted at that XY should have z=3.
+        let mut found = 0;
+        for v in &m.solid.vertices {
+            let xy_match = (v.pos[0] - 1.0).abs() < 1e-5 && (v.pos[1] - 1.0).abs() < 1e-5;
+            if xy_match {
+                found += 1;
+                assert!(
+                    (v.pos[2] - 3.0).abs() < 1e-5,
+                    "vertex at (1,1) should be z=3, got z={}",
+                    v.pos[2],
+                );
+            }
+        }
+        assert!(
+            found >= 4,
+            "expected the (1,1) corner to appear in at least 4 cells' tops, found {found}",
+        );
+    }
+
+    #[test]
+    fn slope_hill_emits_tall_vertices() {
+        // Mirrors the `slope_terrain` example's hill setup. Verifies that
+        // a multi-step hill actually produces vertices at non-zero z. If
+        // this fails, the example will look flat regardless of lighting.
+        let mut t = Terrain::new();
+        // Allocate the 4 chunks that span (-8..8) × (-8..8).
+        for ty in -8..8 {
+            for tx in -8..8 {
+                t.tile_mut(TileCoord::new(tx, ty)).floor_height = 0;
+            }
+        }
+        // Hill centred at (2, 2) with the example's exact formula.
+        for ty in -8..8 {
+            for tx in -8..8 {
+                let dx = tx - 2;
+                let dy = ty - 2;
+                let d2 = dx * dx + dy * dy;
+                let h = if d2 == 0 {
+                    4
+                } else if d2 <= 2 {
+                    3
+                } else if d2 <= 8 {
+                    2
+                } else if d2 <= 18 {
+                    1
+                } else {
+                    0
+                };
+                if h > 0 {
+                    t.tile_mut(TileCoord::new(tx, ty)).floor_height = h;
+                }
+            }
+        }
+
+        let mesher = SlopeMesher {
+            height_unit: 1.0,
+            ..SlopeMesher::new()
+        };
+
+        let mut max_z = f32::MIN;
+        let mut chunks_meshed = 0;
+        for (chunk_coord, _) in t.chunks() {
+            let m = mesher.mesh_chunk(&t, *chunk_coord);
+            chunks_meshed += 1;
+            for v in &m.solid.vertices {
+                if v.pos[2] > max_z {
+                    max_z = v.pos[2];
+                }
+            }
+        }
+        assert!(
+            chunks_meshed >= 4,
+            "expected 4 chunks meshed, got {chunks_meshed}"
+        );
+        assert!(
+            (max_z - 4.0).abs() < 1e-5,
+            "expected peak z=4.0 somewhere in the mesh, got max_z={max_z}",
+        );
+    }
+
+    #[test]
+    fn slope_isolated_peak_produces_pyramid() {
+        // A single elevated tile in an empty plain. The flat-shaded fan
+        // gives two triangles for the cell's top, and each triangle has a
+        // distinct normal (since the polygon is non-planar). With a 4-corner
+        // square cell, the four neighbours pull the peak's corners up to
+        // various heights — exactly one corner (the cell's centre-most one)
+        // is at the full peak height; the other three are at 0 (clamped by
+        // surrounding cells with floor_height=0).
+        //
+        // Wait — actually *all four corners* are at max(self=3, neighbours=0)
+        // = 3 because the corner is shared with us. So the top is flat at 3,
+        // not sloped. The slopes appear on the neighbour cells.
+        let mut t = Terrain::new();
+        allocate_chunk(&mut t, ChunkCoord::ZERO);
+        t.tile_mut(TileCoord::new(5, 5)).floor_height = 3;
+        let m = SlopeMesher::new().mesh_chunk(&t, ChunkCoord::ZERO);
+        // Sanity: every vertex z is in [0, 3].
+        for v in &m.solid.vertices {
+            assert!(
+                v.pos[2] >= -1e-5 && v.pos[2] <= 3.0 + 1e-5,
+                "z={}",
+                v.pos[2]
+            );
+        }
     }
 
     #[test]

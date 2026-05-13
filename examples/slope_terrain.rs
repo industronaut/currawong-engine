@@ -1,23 +1,28 @@
-//! Tile-grid terrain with flat tops, cliff walls, and a pool of water.
+//! Square-grid terrain meshed with [`SlopeMesher`] — each cell's corner
+//! sits at `max(floor_height)` of every cell touching it, so neighbouring
+//! tiles slope into each other instead of stepping.
 //!
-//! Builds a small zone with a multi-step hill in the +X +Y corner and a 3×3
-//! pool of water in the -X -Y corner. The camera orbits on a wall-clock
-//! timer (so the view stays alive even at sim speed 0) while the static
-//! terrain re-issues its draw calls each frame.
+//! Layout: a 16×16 patch of ground with a broad rolling hill in the +X +Y
+//! quadrant (heights 0–4, falling off with distance from the hill centre)
+//! and a small pond on the opposite side. With the flat-shaded fan
+//! triangulation, each pair of triangles in a sloped cell catches the sun
+//! at a slightly different angle — the surface reads as a faceted Transport
+//! Tycoon / Rise of Industry style rather than a Minecraft step pattern.
 //!
-//! Demonstrates the slice we just landed: [`Zone::terrain`] sim data →
-//! [`FlatTopsMesher`] CPU geometry → [`TerrainRenderer`] GPU upload →
-//! [`TerrainMaterial`] opaque + transparent pipelines.
+//! Uses `height_unit = 1.0` (same as `tile_size`) so each integer height
+//! step makes a 45° slope across one cell — the canonical Transport Tycoon
+//! aspect ratio. Slopes shallower than ~25° tend to wash out under the
+//! orbit camera because the lit-side variation runs into the sRGB target's
+//! [0, 1] clipping range.
 //!
-//! Controls: 0 pause, 1/2/3 set sim speed (no visible effect — sim is
-//! inert), Esc to quit.
+//! Controls: 0 pause, 1/2/3 sim speed, Esc to quit.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use currawong::glam::{Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, Simulation,
+    Camera, CameraBinding, EngineCtx, Liquid, LiquidId, Renderer, Simulation, SlopeMesher,
     TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View, ViewConfig,
     ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
 };
@@ -41,43 +46,49 @@ impl Game {
         let zone = zones.get_mut(main_zone).expect("just inserted");
         let terrain = zone.terrain_mut();
 
-        // Allocate a 16×16 area of ground centred on the origin. All tiles
-        // default to walkable + h=0; we then carve heights and water.
+        // 16×16 base patch at h=0.
         for ty in -8..8 {
             for tx in -8..8 {
                 terrain.tile_mut(TileCoord::new(tx, ty)).floor_height = 0;
             }
         }
 
-        // Stepped hill centred at (4, 4): three height bands.
+        // Broad rolling hill centred at (2, 2): heights step down from 4 at
+        // the peak through 3, 2, 1 in concentric rings. Each step is one
+        // tile wide, so the slope mesher produces a 1-unit slope per tile
+        // — the canonical "ramped terrain" shape.
         for ty in -8..8 {
             for tx in -8..8 {
-                let dx = tx - 4;
-                let dy = ty - 4;
+                let dx = tx - 2;
+                let dy = ty - 2;
                 let d2 = dx * dx + dy * dy;
-                let h = if d2 < 3 {
-                    tx
-                } else if d2 < 8 {
+                let h = if d2 == 0 {
+                    4
+                } else if d2 <= 2 {
                     3
-                } else if d2 < 16 {
+                } else if d2 <= 8 {
+                    2
+                } else if d2 <= 18 {
                     1
                 } else {
                     0
                 };
-                terrain.tile_mut(TileCoord::new(tx, ty)).floor_height = h;
+                if h > 0 {
+                    terrain.tile_mut(TileCoord::new(tx, ty)).floor_height = h;
+                }
             }
         }
 
-        // 3×3 pool of water in the -X -Y corner: floor dropped to -10 (a
-        // deep pit), filled with 10 steps of water so the surface sits flush
-        // with the surrounding ground at z=0.
-        for ty in -6..-3 {
-            for tx in -6..-3 {
+        // Small pond on the opposite side: a 2×2 pit at h=-4 filled with
+        // 4 steps of water so the surface sits flush with the surrounding
+        // ground at z=0.
+        for ty in -6..-4 {
+            for tx in -6..-4 {
                 let tile = terrain.tile_mut(TileCoord::new(tx, ty));
-                tile.floor_height = -10;
+                tile.floor_height = -4;
                 tile.liquid = Some(Liquid {
                     kind: WATER,
-                    depth: 10,
+                    depth: 4,
                 });
             }
         }
@@ -106,7 +117,7 @@ impl View for TerrainView {
     type Sim = Game;
 
     const CONFIG: ViewConfig = ViewConfig {
-        title: "currawong — terrain demo",
+        title: "currawong — slope terrain demo",
         depth_format: Some(DEPTH_FORMAT),
         ..ViewConfig::DEFAULT
     };
@@ -116,11 +127,8 @@ impl View for TerrainView {
         let camera_binding = CameraBinding::new(&renderer.device);
         let material = TerrainMaterial::new(renderer, camera_binding.layout());
 
-        // Solid tint = white so per-vertex top/wall colours show through.
         let solid_instance = material.create_instance(renderer, Vec4::new(1.0, 1.0, 1.0, 1.0));
 
-        // One material instance per liquid kind. Tint colour is the liquid's
-        // colour; alpha < 1 enables see-through.
         let mut liquid_instances = HashMap::new();
         liquid_instances.insert(
             WATER,
@@ -150,55 +158,55 @@ impl View for TerrainView {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
 
-        // Lazy first-frame mesh — init() doesn't have access to the sim, so
-        // upload happens here on the first render call. Re-meshing on edit
-        // is the caller's job (this demo's terrain is static).
         let zone = sim.zones.get(sim.main_zone).expect("main zone");
         if self.terrain.is_empty() {
-            // Short height steps so a 1-level cliff is one-tenth of a tile
-            // tall rather than a full cube — closer to the RimWorld / DF
-            // sim-game aesthetic than a Minecraft voxel look.
-            let mesher = FlatTopsMesher {
-                height_unit: 0.1,
-                ..FlatTopsMesher::new()
+            // 45° slopes per height step (`height_unit == tile_size`). The
+            // sun-facing and shadow-facing facets of the same cell end up
+            // far enough apart in `dot(n, l)` to read as distinct facets
+            // under the orbit camera.
+            let mesher = SlopeMesher {
+                height_unit: 1.0,
+                ..SlopeMesher::new()
             };
             self.terrain.rebuild_all(renderer, zone.terrain(), &mesher);
         }
 
-        // Wall-clock orbit so pausing the sim doesn't freeze the camera —
-        // makes the sim/view decoupling visible.
         let t = self.started.elapsed().as_secs_f32();
-        let radius = 18.0;
+        let radius = 20.0;
         let angle = t * 0.25;
-        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 12.0);
-        self.camera.target = Vec3::new(0.0, 0.0, 0.5);
+        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 14.0);
+        self.camera.target = Vec3::new(0.0, 0.0, 1.5);
         self.camera.far = 200.0;
         self.camera_binding.write(&renderer.queue, &self.camera);
 
-        // Opaque solids first so depth is populated before we draw liquids.
         pass.set_pipeline(self.material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
         self.terrain.draw_solid(pass, &self.solid_instance);
 
-        // Liquids over the top — alpha-blended, depth-test on but no depth
-        // write (set in the material).
         pass.set_pipeline(self.material.transparent_pipeline());
         self.terrain.draw_liquids(pass, &self.liquid_instances);
     }
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {
+        // Required for `extract_environment` to be called — the engine
+        // writes a neutral environment whenever `active_zone` is `None`,
+        // which gives full ambient and no directional sun.
         Some(sim.main_zone)
     }
 
     fn extract_environment(&self, _: &Game, _: ZoneId) -> ViewEnvironment {
-        // Fixed afternoon sun — high enough to light tops well, oblique
-        // enough to shade walls visibly. Brighter sun + low ambient so
-        // cliff faces read by shading, not flat colour.
+        // Slopes rely *entirely* on shading variation to read (no cliff
+        // walls to provide color contrast like the flat-tops demos do), so
+        // the sun is dimmer here — bright enough to drive the dot-product
+        // shading, dim enough that lit slope facets stay below the
+        // sRGB-target clipping threshold. With the flat-tops examples'
+        // `* 2.2` brightness, every sun-facing surface clamps to 1.0 and
+        // the slope variation becomes invisible.
         ViewEnvironment {
             sun_direction: Vec3::new(0.45, 0.35, 0.8).normalize(),
-            sun_color: Vec3::new(1.0, 0.95, 0.85) * 2.2,
-            ambient: Vec3::new(0.30, 0.32, 0.38),
+            sun_color: Vec3::new(1.0, 0.95, 0.85) * 1.2,
+            ambient: Vec3::new(0.18, 0.20, 0.24),
             sky_color: Vec3::new(0.45, 0.65, 0.95),
         }
     }

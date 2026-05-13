@@ -46,6 +46,15 @@ pub trait Grid {
     /// Neighbour cell across edge `edge_idx`. Edge `i` runs between corner
     /// `i` and corner `(i + 1) % CORNERS_PER_CELL`. Index in `0..EDGES_PER_CELL`.
     fn neighbour(&self, cell: IVec2, edge_idx: usize) -> IVec2;
+
+    /// Every cell that touches corner `corner_idx` of `cell`, *including*
+    /// `cell` itself. Used by the slope mesher to compute per-corner heights
+    /// as the max of touching cells' `floor_height`.
+    ///
+    /// For square: 4 cells at interior corners (self + two edge neighbours
+    /// flanking the corner + the diagonal at their intersection).
+    /// For hex: 3 cells (self + the two edge neighbours flanking the corner).
+    fn cells_at_corner(&self, cell: IVec2, corner_idx: usize) -> impl Iterator<Item = IVec2>;
 }
 
 // --- SquareGrid ----------------------------------------------------------
@@ -101,6 +110,42 @@ impl Grid for SquareGrid {
             _ => panic!("SquareGrid::neighbour: edge_idx must be in 0..4, got {edge_idx}",),
         };
         cell + delta
+    }
+
+    fn cells_at_corner(&self, cell: IVec2, corner_idx: usize) -> impl Iterator<Item = IVec2> {
+        // Corner `i` sits at the meeting of edges `(i+3) % 4` and `i`. The
+        // four cells touching it are: self, the edge-`i` neighbour, the
+        // edge-`(i+3) % 4` neighbour, and the diagonal at their corner.
+        let deltas = match corner_idx {
+            0 => [
+                IVec2::new(0, 0),
+                IVec2::new(1, 0),
+                IVec2::new(1, -1),
+                IVec2::new(0, -1),
+            ],
+            1 => [
+                IVec2::new(0, 0),
+                IVec2::new(1, 0),
+                IVec2::new(1, 1),
+                IVec2::new(0, 1),
+            ],
+            2 => [
+                IVec2::new(0, 0),
+                IVec2::new(-1, 0),
+                IVec2::new(-1, 1),
+                IVec2::new(0, 1),
+            ],
+            3 => [
+                IVec2::new(0, 0),
+                IVec2::new(-1, 0),
+                IVec2::new(-1, -1),
+                IVec2::new(0, -1),
+            ],
+            _ => {
+                panic!("SquareGrid::cells_at_corner: corner_idx must be in 0..4, got {corner_idx}")
+            }
+        };
+        deltas.into_iter().map(move |d| cell + d)
     }
 }
 
@@ -195,6 +240,24 @@ impl Grid for HexGrid {
                 panic!("HexGrid::neighbour: edge_idx must be in 0..6, got {edge_idx}")
             });
         cell + delta
+    }
+
+    fn cells_at_corner(&self, cell: IVec2, corner_idx: usize) -> impl Iterator<Item = IVec2> {
+        // Corner `i` sits at the meeting of edges `(i+5) % 6` (incoming from
+        // corner i-1) and `i` (outgoing to corner i+1). The three cells
+        // touching it are self plus the two edge neighbours flanking it.
+        assert!(
+            corner_idx < HexGrid::CORNERS_PER_CELL,
+            "HexGrid::cells_at_corner: corner_idx must be in 0..6, got {corner_idx}",
+        );
+        let next_edge = corner_idx;
+        let prev_edge = (corner_idx + 5) % 6;
+        [
+            cell,
+            cell + HEX_NEIGHBOUR_OFFSETS[next_edge],
+            cell + HEX_NEIGHBOUR_OFFSETS[prev_edge],
+        ]
+        .into_iter()
     }
 }
 
@@ -346,5 +409,80 @@ mod tests {
         let b = g.cell_center(IVec2::new(0, 1));
         assert!((b.x - a.x).abs() < 1e-6);
         assert!((b.y - a.y - SQRT3).abs() < 1e-6);
+    }
+
+    // --- cells_at_corner --------------------------------------------------
+
+    /// The invariant the slope mesher relies on: every cell in
+    /// `cells_at_corner(cell, i)` must list `cell` in *its own*
+    /// `cells_at_corner` for some matching corner. Without this, adjacent
+    /// cells would compute different "max heights" for what's physically the
+    /// same corner.
+    fn corner_sharing_symmetric<G: Grid>(grid: &G, cell: IVec2) {
+        for corner in 0..G::CORNERS_PER_CELL {
+            let own_pos = grid.corner_xy(cell, corner);
+            for other in grid.cells_at_corner(cell, corner) {
+                let found = (0..G::CORNERS_PER_CELL)
+                    .map(|i| grid.corner_xy(other, i))
+                    .any(|p| (p - own_pos).length() < 1e-5)
+                    && grid
+                        .cells_at_corner(other, 0)
+                        .chain(
+                            (1..G::CORNERS_PER_CELL).flat_map(|i| grid.cells_at_corner(other, i)),
+                        )
+                        .any(|c| c == cell);
+                assert!(
+                    found,
+                    "corner {corner} of {cell:?} touches {other:?}, but {other:?} \
+                     doesn't list {cell:?} as a corner-neighbour",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn square_cells_at_interior_corner_is_four() {
+        let g = SquareGrid;
+        for corner in 0..SquareGrid::CORNERS_PER_CELL {
+            let cells: Vec<_> = g.cells_at_corner(IVec2::ZERO, corner).collect();
+            assert_eq!(cells.len(), 4, "corner {corner}");
+            assert!(cells.contains(&IVec2::ZERO), "self always present");
+            // All four cells must agree on the corner position.
+            let target = g.corner_xy(IVec2::ZERO, corner);
+            for c in &cells {
+                let agrees = (0..SquareGrid::CORNERS_PER_CELL)
+                    .map(|i| g.corner_xy(*c, i))
+                    .any(|p| (p - target).length() < 1e-6);
+                assert!(agrees, "cell {c:?} doesn't have a corner at {target:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn square_cells_at_corner_symmetric() {
+        corner_sharing_symmetric(&SquareGrid, IVec2::new(2, -3));
+    }
+
+    #[test]
+    fn hex_cells_at_corner_is_three() {
+        let g = HexGrid;
+        for corner in 0..HexGrid::CORNERS_PER_CELL {
+            let cells: Vec<_> = g.cells_at_corner(IVec2::ZERO, corner).collect();
+            assert_eq!(cells.len(), 3, "corner {corner}");
+            assert!(cells.contains(&IVec2::ZERO), "self always present");
+            // All three cells must agree on the corner position.
+            let target = g.corner_xy(IVec2::ZERO, corner);
+            for c in &cells {
+                let agrees = (0..HexGrid::CORNERS_PER_CELL)
+                    .map(|i| g.corner_xy(*c, i))
+                    .any(|p| (p - target).length() < 1e-5);
+                assert!(agrees, "cell {c:?} doesn't have a corner at {target:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hex_cells_at_corner_symmetric() {
+        corner_sharing_symmetric(&HexGrid, IVec2::new(2, -3));
     }
 }

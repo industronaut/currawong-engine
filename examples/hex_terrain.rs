@@ -183,6 +183,10 @@ impl View for TerrainView {
         self.terrain.draw_liquids(pass, &self.liquid_instances);
     }
 
+    fn active_zone(&self, sim: &Game) -> Option<ZoneId> {
+        Some(sim.main_zone)
+    }
+
     fn extract_environment(&self, _: &Game, _: ZoneId) -> ViewEnvironment {
         // Same fixed sun as the square `terrain` demo so the two examples
         // are visually comparable — flat tops on each hex catch the light,
