@@ -100,8 +100,15 @@ impl Zone<SquareGrid> {
 }
 
 impl<G: Grid> Zone<G> {
-    /// Build a zone with an explicit terrain. Use this when the grid carries
-    /// configuration that can't be reached via `Default`.
+    /// Build an empty zone over the given grid. The common case for
+    /// non-default grids — call this with a `HexGrid` value to get a
+    /// `Zone<HexGrid>` without spelling out `Terrain::with_grid`.
+    pub fn with_grid(grid: G) -> Self {
+        Self::with_terrain(Terrain::with_grid(grid))
+    }
+
+    /// Build a zone with an explicit terrain. Use this when the caller
+    /// already has a populated `Terrain` to drop in.
     pub fn with_terrain(terrain: Terrain<G>) -> Self {
         Self {
             objects: SlotMap::new(),

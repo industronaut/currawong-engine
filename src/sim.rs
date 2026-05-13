@@ -40,7 +40,7 @@ mod zone;
 pub use clock::SimClock;
 pub use components::Components;
 pub use environment::{SimEnvironment, sun_direction_for};
-pub use grid::{Grid, SquareGrid};
+pub use grid::{Grid, HexGrid, SquareGrid};
 pub use slot_map::{SlotKey, SlotMap};
 pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};
 pub use zone::{
