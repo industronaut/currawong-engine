@@ -34,11 +34,15 @@ use crate::sim::{CHUNK_SIZE, ChunkCoord, Grid, LiquidId, Terrain};
 
 /// One vertex of a terrain mesh. Position is in zone-local world space (Z-up,
 /// matching the engine's camera convention): tile X/Y map to world X/Y,
-/// `floor_height` maps to world Z. Colour is linear RGBA in `[0, 1]`.
+/// `floor_height` maps to world Z. `normal` is the outward face direction
+/// (also world-space, since terrain is drawn without a model matrix) — `+Z`
+/// for flat tops, in-plane outward for vertical walls. Colour is linear RGBA
+/// in `[0, 1]`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct TerrainVertex {
     pub pos: [f32; 3],
+    pub normal: [f32; 3],
     pub color: [f32; 4],
 }
 
@@ -125,7 +129,7 @@ impl FlatTopsMesher {
 
     /// Triangulate the cell's top face as a fan from corner 0. For a 4-corner
     /// grid this is 2 tris (same shape as a hand-coded quad); for 6-corner
-    /// hex it's 4 tris.
+    /// hex it's 4 tris. Normal is `+Z` — tops are flat in world space.
     fn emit_top_polygon<G: Grid>(
         &self,
         mesh: &mut MeshData,
@@ -139,6 +143,7 @@ impl FlatTopsMesher {
             let xy = grid.corner_xy(cell, i) * self.tile_size;
             mesh.vertices.push(TerrainVertex {
                 pos: [xy.x, xy.y, z],
+                normal: [0.0, 0.0, 1.0],
                 color,
             });
         }
@@ -150,6 +155,11 @@ impl FlatTopsMesher {
     /// Emit one wall quad along edge `edge_idx`, descending from `h` to
     /// `h_low`. Winding is CCW when viewed from outside the cell (i.e. from
     /// the lower neighbour's side), so the wall faces the open air.
+    ///
+    /// Normal points outward in the XY plane, perpendicular to the edge.
+    /// With corners ordered CCW from above, `(edge_dir.y, -edge_dir.x)` is
+    /// the outward direction — verified to match the old axis-aligned wall
+    /// directions on `SquareGrid` and to face the right neighbour on hex.
     fn emit_wall<G: Grid>(
         &self,
         mesh: &mut MeshData,
@@ -161,24 +171,31 @@ impl FlatTopsMesher {
     ) {
         let c0 = grid.corner_xy(cell, edge_idx) * self.tile_size;
         let c1 = grid.corner_xy(cell, (edge_idx + 1) % G::CORNERS_PER_CELL) * self.tile_size;
+        let edge_dir = c1 - c0;
+        let outward = glam::Vec2::new(edge_dir.y, -edge_dir.x).normalize_or_zero();
+        let normal = [outward.x, outward.y, 0.0];
         let zt = self.world_h(h);
         let zb = self.world_h(h_low);
         let base = mesh.vertices.len() as u32;
         let color = self.wall_color;
         mesh.vertices.push(TerrainVertex {
             pos: [c0.x, c0.y, zb],
+            normal,
             color,
         });
         mesh.vertices.push(TerrainVertex {
             pos: [c1.x, c1.y, zb],
+            normal,
             color,
         });
         mesh.vertices.push(TerrainVertex {
             pos: [c1.x, c1.y, zt],
+            normal,
             color,
         });
         mesh.vertices.push(TerrainVertex {
             pos: [c0.x, c0.y, zt],
+            normal,
             color,
         });
         mesh.indices
@@ -331,6 +348,53 @@ mod tests {
         assert_eq!(m.liquids.len(), 2);
         assert_eq!(quad_count(m.liquids.get(&water).unwrap()), 2);
         assert_eq!(quad_count(m.liquids.get(&lava).unwrap()), 1);
+    }
+
+    #[test]
+    fn flat_top_vertices_have_up_normal() {
+        // Every vertex of a single flat tile's top should point straight up
+        // (+Z). On a fully flat chunk there are no walls, so every emitted
+        // vertex is a top vertex.
+        let mut t = Terrain::new();
+        allocate_chunk(&mut t, ChunkCoord::ZERO);
+        let m = FlatTopsMesher::new().mesh_chunk(&t, ChunkCoord::ZERO);
+        for v in &m.solid.vertices {
+            assert_eq!(v.normal, [0.0, 0.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn square_wall_normals_face_outward() {
+        // An elevated tile in the middle of a flat chunk emits four walls,
+        // one per cardinal direction. Each wall's normal should point away
+        // from the tile centre — +X, +Y, -X, -Y respectively (z = 0).
+        let mut t = Terrain::new();
+        allocate_chunk(&mut t, ChunkCoord::ZERO);
+        t.tile_mut(TileCoord::new(5, 5)).floor_height = 3;
+        let m = FlatTopsMesher::new().mesh_chunk(&t, ChunkCoord::ZERO);
+
+        // Collect unique wall normals (one per emitted wall quad — all four
+        // vertices of a quad share a normal).
+        let mut wall_normals: Vec<[f32; 3]> = m
+            .solid
+            .vertices
+            .iter()
+            .filter(|v| v.normal != [0.0, 0.0, 1.0])
+            .map(|v| v.normal)
+            .collect();
+        wall_normals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        wall_normals.dedup();
+
+        // Each wall contributes 4 verts → 4 distinct outward directions.
+        // The full set across all walls is {+X, +Y, -X, -Y}.
+        let mut want = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ];
+        want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(wall_normals, want.to_vec());
     }
 
     #[test]

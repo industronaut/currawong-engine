@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use currawong::glam::{IVec2, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, HexGrid, Liquid, LiquidId, Renderer,
-    Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, View, ViewConfig, Zone,
-    ZoneId, Zones, wgpu, winit,
+    Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, View, ViewConfig,
+    ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -176,10 +176,23 @@ impl View for TerrainView {
 
         pass.set_pipeline(self.material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
+        pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
         self.terrain.draw_solid(pass, &self.solid_instance);
 
         pass.set_pipeline(self.material.transparent_pipeline());
         self.terrain.draw_liquids(pass, &self.liquid_instances);
+    }
+
+    fn extract_environment(&self, _: &Game, _: ZoneId) -> ViewEnvironment {
+        // Same fixed sun as the square `terrain` demo so the two examples
+        // are visually comparable — flat tops on each hex catch the light,
+        // cliffs read by shading.
+        ViewEnvironment {
+            sun_direction: Vec3::new(0.45, 0.35, 0.8).normalize(),
+            sun_color: Vec3::new(1.0, 0.95, 0.85) * 2.2,
+            ambient: Vec3::new(0.30, 0.32, 0.38),
+            sky_color: Vec3::new(0.45, 0.65, 0.95),
+        }
     }
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {

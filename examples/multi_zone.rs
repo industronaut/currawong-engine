@@ -505,6 +505,7 @@ impl View for MultiZoneView {
         // --- Terrain pass ------------------------------------------------
         pass.set_pipeline(self.terrain_material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
+        pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
         self.terrain_cache.draw_solid(pass, terrain_tint);
         pass.set_pipeline(self.terrain_material.transparent_pipeline());
         self.terrain_cache
