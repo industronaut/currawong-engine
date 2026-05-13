@@ -174,12 +174,34 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         &state.renderer,
         &mut frame,
     );
-    #[cfg(feature = "yakui")]
-    yakui_overlay::<V>(state, event_loop, &mut frame);
-    #[cfg(feature = "egui")]
-    egui_overlay::<V>(state, event_loop, &mut frame);
+    // Build the per-frame EngineCtx once and share &mut across both overlay
+    // dispatch sites — keeps the construction in one place so new fields on
+    // EngineCtx don't have to be threaded through each callback by hand.
+    #[cfg(any(feature = "egui", feature = "yakui"))]
+    let mut ctx = EngineCtx {
+        event_loop,
+        clock: &mut state.clock,
+    };
     #[cfg(not(any(feature = "egui", feature = "yakui")))]
     let _ = event_loop;
+    #[cfg(feature = "yakui")]
+    yakui_overlay::<V>(
+        &mut state.view,
+        &mut state.sim,
+        &mut ctx,
+        &state.renderer,
+        &mut state.game_ui,
+        &mut frame,
+    );
+    #[cfg(feature = "egui")]
+    egui_overlay::<V>(
+        &mut state.view,
+        &mut state.sim,
+        &mut ctx,
+        &state.renderer,
+        &mut state.debug_ui,
+        &mut frame,
+    );
     end_frame(&state.renderer, frame);
 }
 
@@ -278,19 +300,16 @@ fn main_pass<V: View>(
 /// debug overlay.
 #[cfg(feature = "yakui")]
 fn yakui_overlay<V: View>(
-    state: &mut RunState<V>,
-    event_loop: &ActiveEventLoop,
+    view: &mut V,
+    sim: &mut V::Sim,
+    ctx: &mut EngineCtx,
+    renderer: &Renderer,
+    game_ui: &mut GameUi,
     frame: &mut Frame,
 ) {
-    state
-        .game_ui
-        .run_and_render(&state.renderer, &mut frame.encoder, &frame.view_tex, || {
-            let mut ctx = EngineCtx {
-                event_loop,
-                clock: &mut state.clock,
-            };
-            state.view.game_ui(&mut state.sim, &mut ctx);
-        });
+    game_ui.run_and_render(renderer, &mut frame.encoder, &frame.view_tex, || {
+        view.game_ui(sim, ctx);
+    });
 }
 
 /// Phase 4b: egui (debug overlay). Sits visually on top of everything.
@@ -298,19 +317,18 @@ fn yakui_overlay<V: View>(
 /// Returns staging command buffers (texture uploads) via [`Frame::pre_submit`]
 /// — they must be submitted before the frame's main encoder.
 #[cfg(feature = "egui")]
-fn egui_overlay<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, frame: &mut Frame) {
-    let staging = state.debug_ui.run_and_render(
-        &state.renderer,
-        &mut frame.encoder,
-        &frame.view_tex,
-        |egui_ctx| {
-            let mut ctx = EngineCtx {
-                event_loop,
-                clock: &mut state.clock,
-            };
-            state.view.ui(&mut state.sim, &mut ctx, egui_ctx);
-        },
-    );
+fn egui_overlay<V: View>(
+    view: &mut V,
+    sim: &mut V::Sim,
+    ctx: &mut EngineCtx,
+    renderer: &Renderer,
+    debug_ui: &mut DebugUi,
+    frame: &mut Frame,
+) {
+    let staging =
+        debug_ui.run_and_render(renderer, &mut frame.encoder, &frame.view_tex, |egui_ctx| {
+            view.ui(sim, ctx, egui_ctx);
+        });
     frame.pre_submit.extend(staging);
 }
 
