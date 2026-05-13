@@ -16,6 +16,7 @@
 //! ## Module layout
 //!
 //! - [`slot_map`] — generic generational slot-map (the storage primitive).
+//! - [`grid`] — tile-grid topology trait + [`SquareGrid`] / (future) `HexGrid`.
 //! - [`zone`] — [`WorldTransform`], [`Zone`], [`Zones`], cross-zone refs.
 //! - [`components`] — sparse, type-erased per-object data.
 //! - [`terrain`] — tile-grid terrain with optional liquids per tile.
@@ -31,6 +32,7 @@ use std::time::Duration;
 mod clock;
 mod components;
 mod environment;
+mod grid;
 mod slot_map;
 mod terrain;
 mod zone;
@@ -38,6 +40,7 @@ mod zone;
 pub use clock::SimClock;
 pub use components::Components;
 pub use environment::{SimEnvironment, sun_direction_for};
+pub use grid::{Grid, SquareGrid};
 pub use slot_map::{SlotKey, SlotMap};
 pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};
 pub use zone::{

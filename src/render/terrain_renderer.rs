@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::sim::{ChunkCoord, LiquidId, Terrain};
+use crate::sim::{ChunkCoord, Grid, LiquidId, Terrain};
 
 use super::renderer::Renderer;
 use super::terrain::{ChunkMeshes, MeshData, TerrainMesher, TerrainVertex};
@@ -102,11 +102,11 @@ impl TerrainRenderer {
     }
 
     /// Mesh `chunk` with `mesher` and replace the cached GPU buffers.
-    pub fn rebuild_chunk(
+    pub fn rebuild_chunk<G: Grid>(
         &mut self,
         renderer: &Renderer,
-        terrain: &Terrain,
-        mesher: &dyn TerrainMesher,
+        terrain: &Terrain<G>,
+        mesher: &dyn TerrainMesher<G, Output = ChunkMeshes>,
         chunk: ChunkCoord,
     ) {
         let meshes = mesher.mesh_chunk(terrain, chunk);
@@ -117,11 +117,11 @@ impl TerrainRenderer {
     /// Mesh every allocated chunk in `terrain` from scratch, discarding any
     /// previously cached buffers. Useful for first-frame setup or after a
     /// wholesale terrain reload.
-    pub fn rebuild_all(
+    pub fn rebuild_all<G: Grid>(
         &mut self,
         renderer: &Renderer,
-        terrain: &Terrain,
-        mesher: &dyn TerrainMesher,
+        terrain: &Terrain<G>,
+        mesher: &dyn TerrainMesher<G, Output = ChunkMeshes>,
     ) {
         self.chunks.clear();
         let coords: Vec<ChunkCoord> = terrain.chunks().map(|(c, _)| *c).collect();

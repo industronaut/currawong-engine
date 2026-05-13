@@ -8,6 +8,7 @@
 use glam::{Quat, Vec3};
 
 use super::components::Components;
+use super::grid::{Grid, SquareGrid};
 use super::slot_map::{SlotKey, SlotMap};
 use super::terrain::Terrain;
 
@@ -78,28 +79,42 @@ impl SlotKey for ZoneId {
 /// [`Components`] registry for sparse, optional per-object data (health,
 /// faction, AI state, etc.), and a [`Terrain`] tile grid.
 ///
+/// Generic over [`Grid`] — every zone in a [`Zones`] collection shares the
+/// same grid type. Defaults to [`SquareGrid`] so unparameterized callers
+/// (the bulk of existing examples and tests) keep compiling unchanged.
+///
 /// Use [`Zone::remove`] rather than reaching for the inner storage: it's the
 /// only path that keeps the [`Components`] registry in sync.
-pub struct Zone {
+pub struct Zone<G: Grid = SquareGrid> {
     objects: SlotMap<WorldObjectId, WorldTransform>,
     components: Components,
-    terrain: Terrain,
+    terrain: Terrain<G>,
 }
 
-impl Zone {
+impl Zone<SquareGrid> {
+    /// Build an empty zone over the default [`SquareGrid`]. For other grids,
+    /// use [`Zone::with_terrain`] with a `Terrain<G>` of your choice.
     pub fn new() -> Self {
+        Self::with_terrain(Terrain::<SquareGrid>::new())
+    }
+}
+
+impl<G: Grid> Zone<G> {
+    /// Build a zone with an explicit terrain. Use this when the grid carries
+    /// configuration that can't be reached via `Default`.
+    pub fn with_terrain(terrain: Terrain<G>) -> Self {
         Self {
             objects: SlotMap::new(),
             components: Components::new(),
-            terrain: Terrain::new(),
+            terrain,
         }
     }
 
-    pub fn terrain(&self) -> &Terrain {
+    pub fn terrain(&self) -> &Terrain<G> {
         &self.terrain
     }
 
-    pub fn terrain_mut(&mut self) -> &mut Terrain {
+    pub fn terrain_mut(&mut self) -> &mut Terrain<G> {
         &mut self.terrain
     }
 
@@ -208,7 +223,7 @@ impl<'a> WorldObjectsMut<'a> {
     }
 }
 
-impl Default for Zone {
+impl Default for Zone<SquareGrid> {
     fn default() -> Self {
         Self::new()
     }
@@ -216,7 +231,7 @@ impl Default for Zone {
 
 /// The simulation's collection of [`Zone`]s. Owned by the user's
 /// [`Simulation`](crate::Simulation) impl.
-pub type Zones = SlotMap<ZoneId, Zone>;
+pub type Zones<G = SquareGrid> = SlotMap<ZoneId, Zone<G>>;
 
 /// Fully-qualified handle to an object across zones. Use this for
 /// references that outlive a single zone's scope — camera targets, AI
@@ -230,11 +245,14 @@ pub struct WorldObjectRef {
 impl WorldObjectRef {
     /// Look up the transform this ref points at. Returns `None` if either
     /// the zone or the object has been removed since the ref was created.
-    pub fn resolve<'a>(&self, zones: &'a Zones) -> Option<&'a WorldTransform> {
+    pub fn resolve<'a, G: Grid>(&self, zones: &'a Zones<G>) -> Option<&'a WorldTransform> {
         zones.get(self.zone)?.get(self.id)
     }
 
-    pub fn resolve_mut<'a>(&self, zones: &'a mut Zones) -> Option<&'a mut WorldTransform> {
+    pub fn resolve_mut<'a, G: Grid>(
+        &self,
+        zones: &'a mut Zones<G>,
+    ) -> Option<&'a mut WorldTransform> {
         zones.get_mut(self.zone)?.get_mut(self.id)
     }
 }

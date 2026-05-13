@@ -28,9 +28,9 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use glam::UVec2;
+use glam::{IVec2, UVec2};
 
-use crate::sim::{CHUNK_SIZE, ChunkCoord, LiquidId, Terrain, TileCoord};
+use crate::sim::{CHUNK_SIZE, ChunkCoord, Grid, LiquidId, Terrain};
 
 /// One vertex of a terrain mesh. Position is in zone-local world space (Z-up,
 /// matching the engine's camera convention): tile X/Y map to world X/Y,
@@ -67,23 +67,35 @@ pub struct ChunkMeshes {
 
 /// Turns chunked tile data into renderable geometry.
 ///
+/// Generic over [`Grid`] — the same mesher impl can drive square and hex
+/// terrain when it's written against grid topology rather than hardcoded
+/// axes. The associated [`Output`](Self::Output) type lets future meshers
+/// emit other representations (e.g. mesh-library instances) under the same
+/// trait without disturbing existing procedural impls.
+///
 /// Per-zone / per-game pluggable: swap one impl for another to change the
 /// visual style without touching sim data or pathfinding.
-pub trait TerrainMesher {
-    fn mesh_chunk(&self, terrain: &Terrain, chunk_coord: ChunkCoord) -> ChunkMeshes;
+pub trait TerrainMesher<G: Grid> {
+    type Output;
+    fn mesh_chunk(&self, terrain: &Terrain<G>, chunk_coord: ChunkCoord) -> Self::Output;
 }
 
 // --- FlatTopsMesher -------------------------------------------------------
 
-/// Default mesher: each tile becomes a flat quad at its `floor_height`;
+/// Default mesher: each cell becomes a flat polygon at its `floor_height`;
 /// vertical wall quads bridge to lower neighbours. Tops use [`Self::top_color`],
 /// walls use [`Self::wall_color`] so cliffs read at a glance even without
 /// lighting.
 ///
-/// Liquid surfaces are flat quads at `floor_height + depth`; liquid "side
+/// Liquid surfaces are flat polygons at `floor_height + depth`; liquid "side
 /// faces" between tiles of different liquid surface height are deferred.
+///
+/// The mesher itself is grid-agnostic — it implements [`TerrainMesher<G>`]
+/// for any [`Grid`], driving cell-top triangulation and per-edge wall
+/// emission through the grid's corner/neighbour APIs.
 pub struct FlatTopsMesher {
-    /// World units per tile (XY extent of one tile's footprint).
+    /// World units per cell of canonical unit space (scales the grid's
+    /// corner positions into world XY).
     pub tile_size: f32,
     /// World units per one integer step of `floor_height` (Z extent).
     pub height_unit: f32,
@@ -107,155 +119,107 @@ impl FlatTopsMesher {
         Self::default()
     }
 
-    fn world_xy(&self, tx: i32, ty: i32) -> (f32, f32) {
-        (tx as f32 * self.tile_size, ty as f32 * self.tile_size)
-    }
-
     fn world_h(&self, h: i32) -> f32 {
         h as f32 * self.height_unit
     }
 
-    fn push_quad(mesh: &mut MeshData, corners: [[f32; 3]; 4], color: [f32; 4]) {
+    /// Triangulate the cell's top face as a fan from corner 0. For a 4-corner
+    /// grid this is 2 tris (same shape as a hand-coded quad); for 6-corner
+    /// hex it's 4 tris.
+    fn emit_top_polygon<G: Grid>(
+        &self,
+        mesh: &mut MeshData,
+        grid: &G,
+        cell: IVec2,
+        z: f32,
+        color: [f32; 4],
+    ) {
         let base = mesh.vertices.len() as u32;
-        for pos in corners {
-            mesh.vertices.push(TerrainVertex { pos, color });
+        for i in 0..G::CORNERS_PER_CELL {
+            let xy = grid.corner_xy(cell, i) * self.tile_size;
+            mesh.vertices.push(TerrainVertex {
+                pos: [xy.x, xy.y, z],
+                color,
+            });
         }
+        for i in 1..(G::CORNERS_PER_CELL as u32 - 1) {
+            mesh.indices.extend([base, base + i, base + i + 1]);
+        }
+    }
+
+    /// Emit one wall quad along edge `edge_idx`, descending from `h` to
+    /// `h_low`. Winding is CCW when viewed from outside the cell (i.e. from
+    /// the lower neighbour's side), so the wall faces the open air.
+    fn emit_wall<G: Grid>(
+        &self,
+        mesh: &mut MeshData,
+        grid: &G,
+        cell: IVec2,
+        edge_idx: usize,
+        h: i32,
+        h_low: i32,
+    ) {
+        let c0 = grid.corner_xy(cell, edge_idx) * self.tile_size;
+        let c1 = grid.corner_xy(cell, (edge_idx + 1) % G::CORNERS_PER_CELL) * self.tile_size;
+        let zt = self.world_h(h);
+        let zb = self.world_h(h_low);
+        let base = mesh.vertices.len() as u32;
+        let color = self.wall_color;
+        mesh.vertices.push(TerrainVertex {
+            pos: [c0.x, c0.y, zb],
+            color,
+        });
+        mesh.vertices.push(TerrainVertex {
+            pos: [c1.x, c1.y, zb],
+            color,
+        });
+        mesh.vertices.push(TerrainVertex {
+            pos: [c1.x, c1.y, zt],
+            color,
+        });
+        mesh.vertices.push(TerrainVertex {
+            pos: [c0.x, c0.y, zt],
+            color,
+        });
         mesh.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
     }
-
-    fn emit_top_quad(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32) {
-        let (x0, y0) = self.world_xy(tx, ty);
-        let x1 = x0 + self.tile_size;
-        let y1 = y0 + self.tile_size;
-        let z = self.world_h(h);
-        Self::push_quad(
-            mesh,
-            [[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]],
-            self.top_color,
-        );
-    }
-
-    /// Wall on the tile's +x face, descending from `h` to `h_low`.
-    fn emit_wall_px(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
-        let (x0, y0) = self.world_xy(tx, ty);
-        let x = x0 + self.tile_size;
-        let y1 = y0 + self.tile_size;
-        let zt = self.world_h(h);
-        let zb = self.world_h(h_low);
-        Self::push_quad(
-            mesh,
-            [[x, y0, zb], [x, y1, zb], [x, y1, zt], [x, y0, zt]],
-            self.wall_color,
-        );
-    }
-
-    fn emit_wall_nx(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
-        let (x0, y0) = self.world_xy(tx, ty);
-        let x = x0;
-        let y1 = y0 + self.tile_size;
-        let zt = self.world_h(h);
-        let zb = self.world_h(h_low);
-        Self::push_quad(
-            mesh,
-            [[x, y1, zb], [x, y0, zb], [x, y0, zt], [x, y1, zt]],
-            self.wall_color,
-        );
-    }
-
-    /// Wall on the tile's +y face, descending from `h` to `h_low`.
-    fn emit_wall_py(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
-        let (x0, y0) = self.world_xy(tx, ty);
-        let x1 = x0 + self.tile_size;
-        let y = y0 + self.tile_size;
-        let zt = self.world_h(h);
-        let zb = self.world_h(h_low);
-        Self::push_quad(
-            mesh,
-            [[x1, y, zb], [x0, y, zb], [x0, y, zt], [x1, y, zt]],
-            self.wall_color,
-        );
-    }
-
-    fn emit_wall_ny(&self, mesh: &mut MeshData, tx: i32, ty: i32, h: i32, h_low: i32) {
-        let (x0, y0) = self.world_xy(tx, ty);
-        let x1 = x0 + self.tile_size;
-        let y = y0;
-        let zt = self.world_h(h);
-        let zb = self.world_h(h_low);
-        Self::push_quad(
-            mesh,
-            [[x0, y, zb], [x1, y, zb], [x1, y, zt], [x0, y, zt]],
-            self.wall_color,
-        );
-    }
-
-    fn emit_liquid_quad(&self, mesh: &mut MeshData, tx: i32, ty: i32, surface_z: f32) {
-        let (x0, y0) = self.world_xy(tx, ty);
-        let x1 = x0 + self.tile_size;
-        let y1 = y0 + self.tile_size;
-        Self::push_quad(
-            mesh,
-            [
-                [x0, y0, surface_z],
-                [x1, y0, surface_z],
-                [x1, y1, surface_z],
-                [x0, y1, surface_z],
-            ],
-            [1.0, 1.0, 1.0, 1.0],
-        );
-    }
 }
 
-impl TerrainMesher for FlatTopsMesher {
-    fn mesh_chunk(&self, terrain: &Terrain, chunk_coord: ChunkCoord) -> ChunkMeshes {
+impl<G: Grid> TerrainMesher<G> for FlatTopsMesher {
+    type Output = ChunkMeshes;
+
+    fn mesh_chunk(&self, terrain: &Terrain<G>, chunk_coord: ChunkCoord) -> ChunkMeshes {
         let mut out = ChunkMeshes::default();
         let Some(chunk) = terrain.chunk(chunk_coord) else {
             return out;
         };
+        let grid = terrain.grid();
         let size = CHUNK_SIZE as i32;
         let origin = chunk_coord * size;
 
         for ly in 0..size {
             for lx in 0..size {
-                let tx = origin.x + lx;
-                let ty = origin.y + ly;
+                let cell = IVec2::new(origin.x + lx, origin.y + ly);
                 let tile = chunk.tile(UVec2::new(lx as u32, ly as u32));
                 let h = tile.floor_height;
 
-                self.emit_top_quad(&mut out.solid, tx, ty, h);
+                self.emit_top_polygon(&mut out.solid, grid, cell, self.world_h(h), self.top_color);
 
                 // Walls: emit only towards a strictly lower neighbour, so the
                 // higher tile owns the cliff and we never double up.
-                let h_px = terrain
-                    .tile_or_default(TileCoord::new(tx + 1, ty))
-                    .floor_height;
-                if h > h_px {
-                    self.emit_wall_px(&mut out.solid, tx, ty, h, h_px);
-                }
-                let h_nx = terrain
-                    .tile_or_default(TileCoord::new(tx - 1, ty))
-                    .floor_height;
-                if h > h_nx {
-                    self.emit_wall_nx(&mut out.solid, tx, ty, h, h_nx);
-                }
-                let h_py = terrain
-                    .tile_or_default(TileCoord::new(tx, ty + 1))
-                    .floor_height;
-                if h > h_py {
-                    self.emit_wall_py(&mut out.solid, tx, ty, h, h_py);
-                }
-                let h_ny = terrain
-                    .tile_or_default(TileCoord::new(tx, ty - 1))
-                    .floor_height;
-                if h > h_ny {
-                    self.emit_wall_ny(&mut out.solid, tx, ty, h, h_ny);
+                for edge in 0..G::EDGES_PER_CELL {
+                    let neighbour = grid.neighbour(cell, edge);
+                    let neighbour_h = terrain.tile_or_default(neighbour).floor_height;
+                    if h > neighbour_h {
+                        self.emit_wall(&mut out.solid, grid, cell, edge, h, neighbour_h);
+                    }
                 }
 
                 if let Some(liq) = tile.liquid {
                     let surface = self.world_h(h + liq.depth as i32);
                     let bucket = out.liquids.entry(liq.kind).or_default();
-                    self.emit_liquid_quad(bucket, tx, ty, surface);
+                    self.emit_top_polygon(bucket, grid, cell, surface, [1.0, 1.0, 1.0, 1.0]);
                 }
             }
         }
@@ -266,7 +230,7 @@ impl TerrainMesher for FlatTopsMesher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::Liquid;
+    use crate::sim::{Liquid, TileCoord};
 
     fn allocate_chunk(t: &mut Terrain, coord: ChunkCoord) {
         // Touching any tile lazily allocates the whole chunk with defaults.
