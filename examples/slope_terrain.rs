@@ -15,16 +15,21 @@
 //! orbit camera because the lit-side variation runs into the sRGB target's
 //! [0, 1] clipping range.
 //!
-//! Controls: 0 pause, 1/2/3 sim speed, Esc to quit.
+//! Controls:
+//! - Right-click drag — rotate yaw / pitch around the focal point.
+//! - W / A / S / D — pan the focal point on the ground.
+//! - Scroll wheel — zoom (orbit distance).
+//! - Y / X — toggle invert-Y / invert-X on the drag rotation.
+//! - 0 pause, 1/2/3 sim speed, Esc to quit.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use currawong::glam::{Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, Liquid, LiquidId, Renderer, Simulation, SlopeMesher,
-    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View, ViewConfig,
-    ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
+    Camera, CameraBinding, EngineCtx, Liquid, LiquidId, OrbitRig, Renderer, Simulation,
+    SlopeMesher, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View,
+    ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -106,11 +111,11 @@ impl Simulation for Game {
 struct TerrainView {
     camera: Camera,
     camera_binding: CameraBinding,
+    rig: OrbitRig,
     material: TerrainMaterial,
     solid_instance: TerrainMaterialInstance,
     liquid_instances: HashMap<LiquidId, TerrainMaterialInstance>,
     terrain: TerrainRenderer,
-    started: Instant,
 }
 
 impl View for TerrainView {
@@ -123,8 +128,22 @@ impl View for TerrainView {
     };
 
     fn init(renderer: &Renderer) -> Self {
-        let camera = Camera::default();
+        let camera = Camera {
+            far: 200.0,
+            ..Camera::default()
+        };
         let camera_binding = CameraBinding::new(&renderer.device);
+
+        // Frame the terrain: focus on the centre at the height the old
+        // auto-orbit pointed at, ~24 units out at ~32° elevation — a
+        // close match to the old `radius=20, height=14` shot. The
+        // farther bound is bumped above the default 80 to keep the
+        // whole 16×16 patch reachable when zoomed out.
+        let mut rig = OrbitRig::new(Vec3::new(0.0, 0.0, 0.0));
+        rig.pitch = 32.0_f32.to_radians();
+        rig.distance = 24.0;
+        rig.config.distance_max = 120.0;
+
         let material = TerrainMaterial::new(renderer, camera_binding.layout());
 
         let solid_instance = material.create_instance(renderer, Vec4::new(1.0, 1.0, 1.0, 1.0));
@@ -138,12 +157,17 @@ impl View for TerrainView {
         Self {
             camera,
             camera_binding,
+            rig,
             material,
             solid_instance,
             liquid_instances,
             terrain: TerrainRenderer::new(),
-            started: Instant::now(),
         }
+    }
+
+    fn update(&mut self, _: &Game, _: &mut EngineCtx, dt: Duration) {
+        self.rig.update(dt);
+        self.rig.apply_to(&mut self.camera);
     }
 
     fn render(
@@ -171,12 +195,6 @@ impl View for TerrainView {
             self.terrain.rebuild_all(renderer, zone.terrain(), &mesher);
         }
 
-        let t = self.started.elapsed().as_secs_f32();
-        let radius = 20.0;
-        let angle = t * 0.25;
-        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 14.0);
-        self.camera.target = Vec3::new(0.0, 0.0, 1.5);
-        self.camera.far = 200.0;
         self.camera_binding.write(&renderer.queue, &self.camera);
 
         pass.set_pipeline(self.material.opaque_pipeline());
@@ -212,6 +230,8 @@ impl View for TerrainView {
     }
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+        self.rig.handle_event(event);
+
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };
@@ -227,6 +247,8 @@ impl View for TerrainView {
             KeyCode::Digit1 => ctx.clock.set_speed(1.0),
             KeyCode::Digit2 => ctx.clock.set_speed(2.0),
             KeyCode::Digit3 => ctx.clock.set_speed(3.0),
+            KeyCode::KeyY => self.rig.config.invert_pitch = !self.rig.config.invert_pitch,
+            KeyCode::KeyX => self.rig.config.invert_yaw = !self.rig.config.invert_yaw,
             _ => {}
         }
     }

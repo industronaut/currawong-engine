@@ -13,6 +13,9 @@
 //!
 //! Controls:
 //! - WASD / arrows — move the player one tile per key press.
+//! - Right-click drag — rotate the camera around the player.
+//! - Scroll wheel — zoom (orbit distance).
+//! - Y / X — toggle invert-Y / invert-X on the drag rotation.
 //! - R — reset to the ground starting tile.
 //! - 0 / 1 — pause / 1× sim speed (the sun is the only thing actively driven
 //!   by the clock).
@@ -23,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, SimEnvironment,
-    Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
-    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, OrbitRig, Renderer,
+    SimEnvironment, Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer,
+    TileCoord, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
     ViewEnvironment, WorldObjectRef, WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu,
     winit,
 };
@@ -296,6 +299,11 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 struct MultiZoneView {
     camera: Camera,
     camera_binding: CameraBinding,
+    /// Orbit rig anchored to the player every frame. Yaw/pitch/distance
+    /// are user-controlled and persist across zone swaps; `focus` is
+    /// re-pinned to the player's local-zone position in `update`, so the
+    /// camera teleports with the player when they take a stair.
+    rig: OrbitRig,
     terrain_material: TerrainMaterial,
     ground_tint: TerrainMaterialInstance,
     upper_tint: TerrainMaterialInstance,
@@ -312,6 +320,9 @@ struct MultiZoneView {
     cube_indices: wgpu::Buffer,
     player_attribs: wgpu::Buffer,
     cube_index_count: u32,
+    /// Wall-clock anchor for the player cube's spin — kept here as a
+    /// visible reminder that view animation runs on real time, not sim
+    /// time (the cube keeps rotating at sim speed 0).
     started: Instant,
 }
 
@@ -350,8 +361,19 @@ impl View for MultiZoneView {
         use wgpu::util::DeviceExt;
         let device = &renderer.device;
 
-        let camera = Camera::default();
+        let camera = Camera {
+            far: 200.0,
+            ..Camera::default()
+        };
         let camera_binding = CameraBinding::new(device);
+
+        // Initial framing: ~11 units back, ~34° elevation — same shape as
+        // the old `radius=9, height=6` shot. Focus is re-pinned to the
+        // player every frame in `update`, so the starting value here is
+        // a placeholder.
+        let mut rig = OrbitRig::new(Vec3::ZERO);
+        rig.pitch = 34.0_f32.to_radians();
+        rig.distance = 11.0;
         let terrain_material = TerrainMaterial::new(renderer, camera_binding.layout());
         let ground_tint = terrain_material.create_instance(renderer, Vec4::new(1.0, 1.0, 1.0, 1.0));
         let upper_tint =
@@ -386,6 +408,7 @@ impl View for MultiZoneView {
         Self {
             camera,
             camera_binding,
+            rig,
             terrain_material,
             ground_tint,
             upper_tint,
@@ -404,6 +427,18 @@ impl View for MultiZoneView {
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {
         Some(sim.player.zone)
+    }
+
+    fn update(&mut self, sim: &Game, _: &mut EngineCtx, dt: Duration) {
+        // Re-pin the rig's focus to the player every frame. When the
+        // player crosses a stair, `player.position` is the destination
+        // zone's local-frame coordinate — yaw/pitch/distance survive
+        // the teleport unchanged, so the camera arrives oriented the
+        // same way it left.
+        let player = sim.player.resolve(&sim.zones).expect("player exists");
+        self.rig.update(dt);
+        self.rig.focus = player.position + Vec3::new(0.0, 0.0, 0.4);
+        self.rig.apply_to(&mut self.camera);
     }
 
     fn extract_environment(&self, sim: &Game, zone: ZoneId) -> ViewEnvironment {
@@ -491,16 +526,14 @@ impl View for MultiZoneView {
             .resolve(&sim.zones)
             .expect("player resolves while alive");
 
-        // Wall-clock orbit so the camera keeps moving even at sim speed 0 —
-        // makes sim/view decoupling visible.
-        let t = self.started.elapsed().as_secs_f32();
-        let radius = 9.0;
-        let angle = t * 0.20;
-        self.camera.position =
-            player.position + Vec3::new(angle.sin() * radius, angle.cos() * radius, 6.0);
-        self.camera.target = player.position + Vec3::new(0.0, 0.0, 0.4);
-        self.camera.far = 200.0;
+        // Camera transform was already written by `update`; just upload
+        // it for the GPU.
         self.camera_binding.write(&renderer.queue, &self.camera);
+
+        // Wall-clock spin on the player cube — separate from the camera
+        // rig, kept so sim/view decoupling is still observable (cube
+        // keeps rotating when sim speed is 0).
+        let t = self.started.elapsed().as_secs_f32();
 
         // --- Terrain pass ------------------------------------------------
         pass.set_pipeline(self.terrain_material.opaque_pipeline());
@@ -528,6 +561,17 @@ impl View for MultiZoneView {
     }
 
     fn input(&mut self, sim: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+        // Route only mouse and scroll events to the rig — the camera
+        // follows the player here, so WASD belongs to the player, not
+        // the rig's pan handler. Y/X invert toggles still come through
+        // the keyboard branch below.
+        match event {
+            WindowEvent::MouseInput { .. }
+            | WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseWheel { .. } => self.rig.handle_event(event),
+            _ => {}
+        }
+
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };
@@ -546,6 +590,8 @@ impl View for MultiZoneView {
             KeyCode::KeyR => sim.reset_player(),
             KeyCode::Digit0 => ctx.clock.set_speed(0.0),
             KeyCode::Digit1 => ctx.clock.set_speed(1.0),
+            KeyCode::KeyY => self.rig.config.invert_pitch = !self.rig.config.invert_pitch,
+            KeyCode::KeyX => self.rig.config.invert_yaw = !self.rig.config.invert_yaw,
             _ => {}
         }
     }

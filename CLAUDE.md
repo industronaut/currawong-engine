@@ -19,7 +19,7 @@ cargo clippy --no-default-features --all-targets
 cargo run --example clear                # window with cleared background
 cargo run --example triangle             # static colored triangle
 cargo run --example input                # input demo + sim speed controls
-cargo run --example camera               # sim/view extract + camera demo
+cargo run --example camera               # interactive orbit rig (RMB-drag, WASD, scroll) over a sim
 cargo run --example terrain              # tile-grid terrain meshing + liquids
 cargo run --example trees                # ~200 trees growing under live sim mutation
 cargo run --example textured_pbr         # PBR cubes lit by a sim-driven sun
@@ -70,10 +70,12 @@ The user implements the `View` trait with an associated `Sim: Simulation`:
 - `init(&Renderer) -> Self` — build pipelines, allocate buffers. The renderer is fully ready when this runs — including the depth attachment if `CONFIG.depth_format.is_some()`.
 - `render(&self, &Sim, alpha, &Renderer, &mut RenderPass)` — read sim, record draw calls. `&Sim` is read-only by signature, structurally preventing sim mutation from the render path.
 - `input(&mut self, &mut Sim, &mut EngineCtx, &WindowEvent)` — sim-mutating user actions go through here.
+- `update(&mut self, &Sim, &mut EngineCtx, dt: Duration)` — per-frame view-side update. The engine calls it once per frame, *after* sim ticking and *before* `extract_environment` / `render`. `dt` is **wall-clock**, not sim time — view animation keeps running at sim speed 0 or 3×. `&Sim` is read-only by signature, mirroring `render`. This is where held-key WASD pan, camera-rig integration, UI tweens, and view-side particle stepping live. Default no-op.
 - `ui(&mut self, &mut Sim, &mut EngineCtx, &egui::Context)` — behind the `egui` feature; build the per-frame debug overlay. May mutate sim and engine context just like `input`.
 - `active_zone(&self, &Sim) -> Option<ZoneId>` — which zone the camera is in. Default `None` is right for UI/2D views; world-space views typically return `self.camera.zone`. The engine uses this to drive `extract_environment` and (later) per-zone culling and streaming.
 - `extract_environment(&self, &Sim, ZoneId) -> ViewEnvironment` — per-frame sim → GPU-friendly environment extraction. Engine calls it before `render`, writes the result into `Renderer::scene_bind_group`, and pipelines that declare `Renderer::scene_layout` read it automatically. Default returns `ViewEnvironment::neutral`. This is the same shape as visual extraction: sim owns facts (time of day), view owns appearance (sun direction + colour), engine drives the seam.
 - `Camera` is a helper struct; the View opts in by holding one (UI/2D views don't need cameras). `Camera::zone: Option<ZoneId>` is the conventional place to stash the active zone so `active_zone` is a one-liner. The engine-standard `CameraUniformData` carries `view_proj` + `right`/`up` basis (for billboards) + `position` (so lit materials can compute view direction per fragment); the `CameraBinding` bgl is `VERTEX_FRAGMENT`-visible.
+- **Camera rigs** are input-driven controllers that *drive* a `Camera`, separate from the camera helper itself. Today there's one: `OrbitRig` — strategy-game-style orbit around a focal point with RMB-drag rotation, WASD pan, and scroll zoom. The View holds both a `Camera` and an `OrbitRig`; route events to `rig.handle_event` in `input`, call `rig.update(dt)` + `rig.apply_to(&mut camera)` in `update`. Designed as a value type the View can hold one or more of — Cinemachine-style blending/cuts between rigs is the planned forward direction, not bundling everything into one fatter camera.
 
 `run::<MyView>(sim)` wires it all up: creates the event loop, builds a `Renderer`, calls `init`, and dispatches events. `run_with_clock` takes a custom `SimClock`.
 
