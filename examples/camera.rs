@@ -1,20 +1,25 @@
-//! Sim-driven rendering: three objects bobbing on Z, viewed through an
-//! orbiting Camera with depth-tested rendering.
+//! Sim-driven rendering with an interactive strategy-style camera rig.
 //!
-//! Demonstrates the sim/view extract path: `Game` ticks objects in its
-//! `Zones`; `SimDriven` reads their positions each frame, uploads them as an
-//! instance buffer, and renders one triangle per object through a Camera's
-//! view-projection matrix. Camera orbit runs off a wall-clock Instant, so it
-//! keeps moving even at sim speed 0 — visible proof the view is independent.
+//! `Game` ticks three bobbing, spinning objects in a single zone.
+//! `SimDriven` holds an `OrbitRig` that translates mouse and keyboard
+//! input into a `Camera` transform each frame. The rig integrates held
+//! WASD keys in `View::update` using a wall-clock dt, so the camera
+//! keeps responding even when the sim is paused (speed 0) — the same
+//! decoupling the old auto-orbit version demonstrated, now interactive.
 //!
-//! Controls: 0 pause, 1/2/3 set sim speed, Esc to quit.
+//! Controls:
+//! - Right-click drag — rotate yaw / pitch around the focal point.
+//! - W / A / S / D — pan the focal point on the ground.
+//! - Scroll wheel — zoom (orbit distance).
+//! - Y / X — toggle invert-Y / invert-X on the drag rotation.
+//! - 0 pause sim, 1/2/3 set sim speed, Esc quit.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use currawong::glam::{Mat4, Quat, Vec3};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, Renderer, Simulation, View, ViewConfig, WorldTransform, Zone,
-    ZoneId, Zones, mat4_instance_attributes, wgpu, winit,
+    Camera, CameraBinding, EngineCtx, OrbitRig, Renderer, Simulation, View, ViewConfig,
+    WorldTransform, Zone, ZoneId, Zones, mat4_instance_attributes, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -39,9 +44,9 @@ impl Game {
         let mut zones = Zones::new();
         let main_zone = zones.insert(Zone::new());
         let zone = zones.get_mut(main_zone).expect("just inserted");
-        // Stagger in both X and Y so the orbiting camera sees their depth
-        // ordering swap as it goes around — without depth testing, the wrong
-        // triangle would be on top from half the angles.
+        // Stagger in both X and Y so the camera, swung around the focal
+        // point, sees depth ordering swap — without depth testing the
+        // wrong triangle would be on top from half the angles.
         for (i, (x, y)) in [(-2.0, -1.0), (0.0, 0.0), (2.0, 1.0)].iter().enumerate() {
             let id = zone.insert(WorldTransform {
                 position: Vec3::new(*x, *y, 0.0),
@@ -66,17 +71,11 @@ impl Simulation for Game {
     fn tick(&mut self, dt: Duration) {
         self.elapsed += dt;
         let t = self.elapsed.as_secs_f32();
-        // Iterate the Bobber component and write back to each object's
-        // transform. `split_mut` hands out independent borrows of the object
-        // map and the component registry so we can do both in one pass.
         let zone = self.zones.get_mut(self.main_zone).expect("main zone");
         let (mut objects, components) = zone.split_mut();
         for (id, bobber) in components.iter::<Bobber>() {
             if let Some(obj) = objects.get_mut(id) {
                 obj.position.z = (t * 2.0 + bobber.phase).sin() * 0.6;
-                // Spin around the world up axis (Z) so the rotation is
-                // visible as a yaw from the orbiting camera — different rates
-                // per object via phase.
                 obj.rotation = Quat::from_rotation_z(t * 0.8 + bobber.phase);
             }
         }
@@ -93,8 +92,6 @@ struct Camera {
 
 struct VsIn {
     @builtin(vertex_index) vidx: u32,
-    // Per-instance model matrix, supplied as four columns. WGSL doesn't allow
-    // a mat4x4 vertex attribute directly, so we receive 4 vec4s and rebuild it.
     @location(0) m0: vec4<f32>,
     @location(1) m1: vec4<f32>,
     @location(2) m2: vec4<f32>,
@@ -108,8 +105,6 @@ struct VsOut {
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
-    // Z-up local space: triangle stands upright in the XZ plane so the
-    // orbiting camera sees it face-on rather than edge-on.
     var local = array<vec3<f32>, 3>(
         vec3<f32>( 0.0, 0.0,  0.4),
         vec3<f32>(-0.4, 0.0, -0.4),
@@ -141,17 +136,17 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 struct SimDriven {
     camera: Camera,
     camera_binding: CameraBinding,
+    rig: OrbitRig,
     pipeline: wgpu::RenderPipeline,
     instance_buffer: wgpu::Buffer,
     instance_scratch: Vec<Mat4>,
-    started: Instant,
 }
 
 impl View for SimDriven {
     type Sim = Game;
 
     const CONFIG: ViewConfig = ViewConfig {
-        title: "currawong — camera demo",
+        title: "currawong — orbit rig demo",
         depth_format: Some(DEPTH_FORMAT),
         ..ViewConfig::DEFAULT
     };
@@ -161,6 +156,7 @@ impl View for SimDriven {
 
         let camera = Camera::default();
         let camera_binding = CameraBinding::new(device);
+        let rig = OrbitRig::new(Vec3::ZERO);
 
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instance buffer"),
@@ -220,11 +216,19 @@ impl View for SimDriven {
         Self {
             camera,
             camera_binding,
+            rig,
             pipeline,
             instance_buffer,
             instance_scratch: Vec::with_capacity(MAX_INSTANCES as usize),
-            started: Instant::now(),
         }
+    }
+
+    fn update(&mut self, _: &Game, _: &mut EngineCtx, dt: Duration) {
+        // Integrate held WASD keys with wall-clock dt — pan keeps
+        // working when sim speed is 0, which is the whole point of
+        // running this in `update` rather than `tick`.
+        self.rig.update(dt);
+        self.rig.apply_to(&mut self.camera);
     }
 
     fn render(
@@ -234,25 +238,13 @@ impl View for SimDriven {
         renderer: &Renderer,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
-        // Refresh aspect — the user may have resized since the last frame.
+        // Refresh aspect — the user may have resized since last frame.
         let size = renderer.window.inner_size();
         if size.height > 0 {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
-
-        // Orbit on a wall-clock timer, deliberately decoupled from sim time:
-        // pausing the sim (speed 0) leaves the camera moving, which makes the
-        // independence of view from sim observable.
-        let t = self.started.elapsed().as_secs_f32();
-        let radius = 5.5;
-        let angle = t * 0.4;
-        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 2.0);
-
-        // Upload the camera uniform (view-proj + billboard basis; this view's
-        // shader only reads view_proj but the engine helper writes both).
         self.camera_binding.write(&renderer.queue, &self.camera);
 
-        // Extract per-object model matrices across all zones.
         self.instance_scratch.clear();
         for (_, zone) in sim.zones.iter() {
             for (_, obj) in zone.iter() {
@@ -279,6 +271,13 @@ impl View for SimDriven {
     }
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+        // Camera rig sees every event — it knows which ones it cares
+        // about and ignores the rest.
+        self.rig.handle_event(event);
+
+        // Sim-speed hotkeys + Esc. These also drive WASD pan because
+        // the rig matched on them first, which is fine: held W can pan
+        // the camera *and* mean nothing to the sim.
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };
@@ -294,6 +293,14 @@ impl View for SimDriven {
             KeyCode::Digit1 => ctx.clock.set_speed(1.0),
             KeyCode::Digit2 => ctx.clock.set_speed(2.0),
             KeyCode::Digit3 => ctx.clock.set_speed(3.0),
+            KeyCode::KeyY => {
+                self.rig.config.invert_pitch = !self.rig.config.invert_pitch;
+                eprintln!("invert_pitch = {}", self.rig.config.invert_pitch);
+            }
+            KeyCode::KeyX => {
+                self.rig.config.invert_yaw = !self.rig.config.invert_yaw;
+                eprintln!("invert_yaw = {}", self.rig.config.invert_yaw);
+            }
             _ => {}
         }
     }

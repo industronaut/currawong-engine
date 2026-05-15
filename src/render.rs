@@ -7,6 +7,8 @@
 //! ## Module layout
 //!
 //! - [`camera`] — perspective camera helper.
+//! - [`camera_rig`] — input-driven controllers that drive a [`Camera`]
+//!   (currently [`OrbitRig`] for strategy-game-style cameras).
 //! - [`environment`] — view-side environment (sun, ambient, sky) + the
 //!   engine-managed scene bind group.
 //! - [`renderer`] — window + GPU device/queue/surface + scene resources.
@@ -33,6 +35,7 @@
 //! see a flat `currawong::*` surface.
 
 mod camera;
+mod camera_rig;
 #[cfg(feature = "egui")]
 mod debug_ui;
 mod emitter;
@@ -57,6 +60,7 @@ mod view;
 mod visibility;
 
 pub use camera::{Camera, CameraBinding, CameraUniformData};
+pub use camera_rig::{OrbitRig, OrbitRigConfig};
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
 pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
 pub use instance::{InstanceBuckets, mat4_instance_attributes};

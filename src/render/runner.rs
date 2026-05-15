@@ -136,6 +136,16 @@ impl<V: View> ApplicationHandler for Handler<V> {
                 for _ in 0..ticks {
                     state.sim.tick(tick_period);
                 }
+                // View-side per-frame update, driven by wall-clock dt rather
+                // than sim time so view animation (camera rigs, UI tweens, …)
+                // keeps moving when the sim is paused.
+                {
+                    let mut ctx = EngineCtx {
+                        event_loop,
+                        clock: &mut state.clock,
+                    };
+                    state.view.update(&state.sim, &mut ctx, wall_dt);
+                }
                 let alpha = state.clock.alpha();
                 render_frame::<V>(state, event_loop, alpha);
                 state.renderer.window.request_redraw();

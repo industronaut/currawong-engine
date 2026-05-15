@@ -1,5 +1,7 @@
 //! The `View` trait: a renderer reads simulation state through one of these.
 
+use std::time::Duration;
+
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 
@@ -109,6 +111,22 @@ pub trait View: 'static {
 
     fn input(&mut self, sim: &mut Self::Sim, ctx: &mut EngineCtx, event: &WindowEvent) {
         let _ = (sim, ctx, event);
+    }
+
+    /// Per-frame view-side update, called by the engine once per frame just
+    /// before [`extract_environment`](Self::extract_environment) and
+    /// [`render`](Self::render). `dt` is wall-clock — the time since the
+    /// previous frame — *not* sim time, so animation driven from here keeps
+    /// running while the sim is paused. This is the place for things like
+    /// camera-rig integration (held-key WASD pan), UI tweens, or view-side
+    /// particle simulation.
+    ///
+    /// `sim` is read-only by signature, mirroring `render`: sim-mutating user
+    /// actions belong in [`input`](Self::input) or [`ui`](Self::ui).
+    ///
+    /// Default no-op; opt in by overriding.
+    fn update(&mut self, sim: &Self::Sim, ctx: &mut EngineCtx, dt: Duration) {
+        let _ = (sim, ctx, dt);
     }
 
     /// Build the per-frame debug UI. Called once per frame after `render`,
