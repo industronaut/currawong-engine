@@ -1,31 +1,43 @@
-//! Tile-grid terrain with flat tops, cliff walls, and a pool of water.
+//! Tile-grid terrain with flat tops, cliff walls, and a pool of water —
+//! plus a hover highlight driven by mouse-over picking.
 //!
 //! Builds a small zone with a multi-step hill in the +X +Y corner and a 3×3
-//! pool of water in the -X -Y corner. The camera orbits on a wall-clock
-//! timer (so the view stays alive even at sim speed 0) while the static
-//! terrain re-issues its draw calls each frame.
+//! pool of water in the -X -Y corner. An [`OrbitRig`] drives the camera so
+//! the user can park it over a region of interest; a [`TerrainPicker`]
+//! converts the cursor into a tile coordinate each frame; a [`CellHighlight`]
+//! paints a translucent yellow overlay over the picked tile.
 //!
-//! Demonstrates the slice we just landed: [`Zone::terrain`] sim data →
-//! [`FlatTopsMesher`] CPU geometry → [`TerrainRenderer`] GPU upload →
-//! [`TerrainMaterial`] opaque + transparent pipelines.
+//! Demonstrates the picking slice on top of the existing terrain pipeline:
+//! ray-cast picker → tile coord → highlight draw, with the hovered cell
+//! also echoed into the window title.
 //!
-//! Controls: 0 pause, 1/2/3 set sim speed (no visible effect — sim is
-//! inert), Esc to quit.
+//! Controls:
+//! - Right-click drag — rotate the camera around the focal point.
+//! - W / A / S / D — pan the focal point on the ground.
+//! - Scroll wheel — zoom.
+//! - 0 pause sim, 1/2/3 set sim speed (no visible effect — sim is inert).
+//! - Mouse over the terrain — picked tile gets a translucent yellow
+//!   overlay; the tile coordinate also shows in the title bar.
+//! - Esc to quit.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use currawong::glam::{Vec3, Vec4};
+use currawong::glam::{Vec2, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, Simulation,
-    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View, ViewConfig,
-    ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
+    Camera, CameraBinding, CellHighlight, EngineCtx, FlatTopsMesher, Liquid, LiquidId, OrbitRig,
+    Renderer, Simulation, SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker,
+    TerrainRenderer, TileCoord, View, ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, wgpu,
+    winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const WATER: LiquidId = LiquidId(1);
+const TILE_SIZE: f32 = 1.0;
+const HEIGHT_UNIT: f32 = 0.1;
+const BASE_TITLE: &str = "currawong — terrain demo";
 
 // --- Simulation ----------------------------------------------------------
 
@@ -95,18 +107,21 @@ impl Simulation for Game {
 struct TerrainView {
     camera: Camera,
     camera_binding: CameraBinding,
+    rig: OrbitRig,
+    picker: TerrainPicker<SquareGrid>,
+    highlight: CellHighlight,
+    last_title_hover: Option<TileCoord>,
     material: TerrainMaterial,
     solid_instance: TerrainMaterialInstance,
     liquid_instances: HashMap<LiquidId, TerrainMaterialInstance>,
     terrain: TerrainRenderer,
-    started: Instant,
 }
 
 impl View for TerrainView {
     type Sim = Game;
 
     const CONFIG: ViewConfig = ViewConfig {
-        title: "currawong — terrain demo",
+        title: BASE_TITLE,
         depth_format: Some(DEPTH_FORMAT),
         ..ViewConfig::DEFAULT
     };
@@ -114,6 +129,21 @@ impl View for TerrainView {
     fn init(renderer: &Renderer) -> Self {
         let camera = Camera::default();
         let camera_binding = CameraBinding::new(&renderer.device);
+        // Start the rig parked over the origin, far enough out to see the
+        // hill, the pool, and a generous border of flat ground.
+        let mut rig = OrbitRig::new(Vec3::new(0.0, 0.0, 0.0));
+        rig.distance = 18.0;
+        rig.pitch = 55.0_f32.to_radians();
+        let picker = TerrainPicker::new(SquareGrid, TILE_SIZE);
+        // Warm yellow at ~50% alpha so the tile colour shows through the
+        // overlay. The highlight starts empty (no cell set) so the first
+        // frame draws nothing — `set_cell` populates it once the cursor
+        // lands on terrain.
+        let highlight = CellHighlight::new(
+            renderer,
+            camera_binding.layout(),
+            Vec4::new(1.0, 0.85, 0.2, 0.5),
+        );
         let material = TerrainMaterial::new(renderer, camera_binding.layout());
 
         // Solid tint = white so per-vertex top/wall colours show through.
@@ -130,12 +160,22 @@ impl View for TerrainView {
         Self {
             camera,
             camera_binding,
+            rig,
+            picker,
+            highlight,
+            last_title_hover: None,
             material,
             solid_instance,
             liquid_instances,
             terrain: TerrainRenderer::new(),
-            started: Instant::now(),
         }
+    }
+
+    fn update(&mut self, _: &Game, _: &mut EngineCtx, dt: Duration) {
+        // Rig integrates held-WASD with wall-clock dt so panning keeps
+        // working at sim speed 0; same pattern as the camera demo.
+        self.rig.update(dt);
+        self.rig.apply_to(&mut self.camera);
     }
 
     fn render(
@@ -149,6 +189,7 @@ impl View for TerrainView {
         if size.height > 0 {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
+        self.camera.far = 200.0;
 
         // Lazy first-frame mesh — init() doesn't have access to the sim, so
         // upload happens here on the first render call. Re-meshing on edit
@@ -159,20 +200,48 @@ impl View for TerrainView {
             // tall rather than a full cube — closer to the RimWorld / DF
             // sim-game aesthetic than a Minecraft voxel look.
             let mesher = FlatTopsMesher {
-                height_unit: 0.1,
+                tile_size: TILE_SIZE,
+                height_unit: HEIGHT_UNIT,
                 ..FlatTopsMesher::new()
             };
             self.terrain.rebuild_all(renderer, zone.terrain(), &mesher);
         }
 
-        // Wall-clock orbit so pausing the sim doesn't freeze the camera —
-        // makes the sim/view decoupling visible.
-        let t = self.started.elapsed().as_secs_f32();
-        let radius = 18.0;
-        let angle = t * 0.25;
-        self.camera.position = Vec3::new(angle.sin() * radius, angle.cos() * radius, 12.0);
-        self.camera.target = Vec3::new(0.0, 0.0, 0.5);
-        self.camera.far = 200.0;
+        // Re-pick every frame — the cursor may not have moved but the
+        // camera might have, which changes which cell the same pixel
+        // covers. Run after the camera's aspect ratio is up to date so the
+        // unproject uses the right projection matrix.
+        let viewport = Vec2::new(size.width as f32, size.height as f32);
+        self.picker.update(&self.camera, viewport);
+        let hover_coord = self
+            .picker
+            .hover()
+            .map(|h| TileCoord::new(h.cell.x, h.cell.y));
+        if hover_coord != self.last_title_hover {
+            let title = match hover_coord {
+                Some(c) => format!("{BASE_TITLE} — hover ({}, {})", c.x, c.y),
+                None => BASE_TITLE.to_string(),
+            };
+            renderer.window.set_title(&title);
+            self.last_title_hover = hover_coord;
+        }
+
+        // Drive the fill overlay off the picker. The highlight Z sits a
+        // hair above the tile top so the fill doesn't Z-fight the mesh
+        // beneath it; the ray-vs-plane picker reads the cell's *base*
+        // floor_height, which is the right answer for flat terrain and an
+        // acceptable approximation on hills until we upgrade to a
+        // height-aware march.
+        match hover_coord {
+            Some(coord) => {
+                let h = zone.terrain().tile_or_default(coord).floor_height;
+                let z = h as f32 * HEIGHT_UNIT + 0.02;
+                self.highlight
+                    .set_cell(renderer, &SquareGrid, coord, z, TILE_SIZE);
+            }
+            None => self.highlight.clear(),
+        }
+
         self.camera_binding.write(&renderer.queue, &self.camera);
 
         // Opaque solids first so depth is populated before we draw liquids.
@@ -185,6 +254,10 @@ impl View for TerrainView {
         // write (set in the material).
         pass.set_pipeline(self.material.transparent_pipeline());
         self.terrain.draw_liquids(pass, &self.liquid_instances);
+
+        // Hover outline last so it lands on top of solids and liquids.
+        // No-op when nothing is hovered.
+        self.highlight.draw(pass);
     }
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {
@@ -204,6 +277,11 @@ impl View for TerrainView {
     }
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+        // Camera rig and picker both see every event. The picker filters to
+        // CursorMoved / CursorLeft; the rig handles MB / scroll / WASD.
+        self.rig.handle_event(event);
+        self.picker.handle_event(event);
+
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };

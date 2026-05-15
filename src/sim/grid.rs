@@ -55,6 +55,16 @@ pub trait Grid {
     /// flanking the corner + the diagonal at their intersection).
     /// For hex: 3 cells (self + the two edge neighbours flanking the corner).
     fn cells_at_corner(&self, cell: IVec2, corner_idx: usize) -> impl Iterator<Item = IVec2>;
+
+    /// Inverse of [`cell_center`](Self::cell_center): the cell whose footprint
+    /// contains `point` in canonical unit space. Total — every point belongs
+    /// to exactly one cell, even points exactly on a shared edge (each impl
+    /// picks a deterministic side).
+    ///
+    /// View-side picking uses this: ray vs. ground plane gives a world XY,
+    /// divide out the mesher's `tile_size` to land in canonical space, then
+    /// ask the grid which cell the cursor is over.
+    fn cell_at(&self, point: Vec2) -> IVec2;
 }
 
 // --- SquareGrid ----------------------------------------------------------
@@ -110,6 +120,13 @@ impl Grid for SquareGrid {
             _ => panic!("SquareGrid::neighbour: edge_idx must be in 0..4, got {edge_idx}",),
         };
         cell + delta
+    }
+
+    fn cell_at(&self, point: Vec2) -> IVec2 {
+        // Cell (tx, ty) covers [tx, tx+1) × [ty, ty+1), so floor maps every
+        // point unambiguously: a point exactly on `x = tx` belongs to cell
+        // `tx`, not `tx - 1`.
+        IVec2::new(point.x.floor() as i32, point.y.floor() as i32)
     }
 
     fn cells_at_corner(&self, cell: IVec2, corner_idx: usize) -> impl Iterator<Item = IVec2> {
@@ -240,6 +257,36 @@ impl Grid for HexGrid {
                 panic!("HexGrid::neighbour: edge_idx must be in 0..6, got {edge_idx}")
             });
         cell + delta
+    }
+
+    fn cell_at(&self, point: Vec2) -> IVec2 {
+        // Inverse of `cell_center`: x = 1.5q and y = (√3/2)q + √3 r, so
+        //   q = (2/3) x
+        //   r = y / √3 − x / 3
+        // gives fractional axial coordinates. The classical fix-up is to go
+        // through cube coordinates (q, r, s) with s = −q − r, round each,
+        // then re-impose s = −q − r by snapping back the axis with the
+        // largest rounding error. Same trick as Red Blob Games' hex rounding.
+        let q_frac = (2.0 / 3.0) * point.x;
+        let r_frac = point.y / SQRT3 - point.x / 3.0;
+        let s_frac = -q_frac - r_frac;
+
+        let mut q = q_frac.round();
+        let mut r = r_frac.round();
+        let s = s_frac.round();
+
+        let dq = (q - q_frac).abs();
+        let dr = (r - r_frac).abs();
+        let ds = (s - s_frac).abs();
+
+        if dq > dr && dq > ds {
+            q = -r - s;
+        } else if dr > ds {
+            r = -q - s;
+        }
+        // `else` branch would snap `s`, but we don't carry s in axial output.
+
+        IVec2::new(q as i32, r as i32)
     }
 
     fn cells_at_corner(&self, cell: IVec2, corner_idx: usize) -> impl Iterator<Item = IVec2> {
@@ -464,6 +511,29 @@ mod tests {
     }
 
     #[test]
+    fn square_cell_at_roundtrips_centers() {
+        // The centre of every cell must hash back to that cell. Catches
+        // off-by-one or sign mistakes in the floor mapping.
+        let g = SquareGrid;
+        for ty in -5..5 {
+            for tx in -5..5 {
+                let cell = IVec2::new(tx, ty);
+                assert_eq!(g.cell_at(g.cell_center(cell)), cell);
+            }
+        }
+    }
+
+    #[test]
+    fn square_cell_at_left_edge_owned_by_higher_cell() {
+        // Convention: a point on x = tx belongs to cell tx, not tx - 1.
+        // Mirrors `[tx, tx+1) × [ty, ty+1)` semi-open ranges.
+        let g = SquareGrid;
+        assert_eq!(g.cell_at(Vec2::new(0.0, 0.0)), IVec2::new(0, 0));
+        assert_eq!(g.cell_at(Vec2::new(-0.0001, 0.0)), IVec2::new(-1, 0));
+        assert_eq!(g.cell_at(Vec2::new(2.0, -3.0)), IVec2::new(2, -3));
+    }
+
+    #[test]
     fn hex_cells_at_corner_is_three() {
         let g = HexGrid;
         for corner in 0..HexGrid::CORNERS_PER_CELL {
@@ -484,5 +554,56 @@ mod tests {
     #[test]
     fn hex_cells_at_corner_symmetric() {
         corner_sharing_symmetric(&HexGrid, IVec2::new(2, -3));
+    }
+
+    #[test]
+    fn hex_cell_at_roundtrips_centers() {
+        // Same correctness pin as the square version, on a range that covers
+        // both axes and crosses the origin.
+        let g = HexGrid;
+        for r in -5..5 {
+            for q in -5..5 {
+                let cell = IVec2::new(q, r);
+                assert_eq!(g.cell_at(g.cell_center(cell)), cell);
+            }
+        }
+    }
+
+    #[test]
+    fn hex_cell_at_near_centre_stays_in_centre_cell() {
+        // Small perturbations from a hex's centre stay inside that hex —
+        // exercises the cube-rounding fix-up path. Step well below the
+        // canonical edge length of 1.
+        let g = HexGrid;
+        let cell = IVec2::new(2, -1);
+        let centre = g.cell_center(cell);
+        for (dx, dy) in [(0.2, 0.0), (-0.2, 0.0), (0.0, 0.3), (0.0, -0.3)] {
+            assert_eq!(
+                g.cell_at(centre + Vec2::new(dx, dy)),
+                cell,
+                "dx={dx} dy={dy}"
+            );
+        }
+    }
+
+    #[test]
+    fn hex_cell_at_corner_picks_one_neighbour_deterministically() {
+        // A point exactly at a shared corner sits equidistant from three
+        // hexes; the cube-rounding fix-up must still pick exactly one.
+        // We don't pin *which* one — just that the result is stable across
+        // calls and is one of the three sharing cells.
+        let g = HexGrid;
+        let cell = IVec2::ZERO;
+        for corner in 0..HexGrid::CORNERS_PER_CELL {
+            let p = g.corner_xy(cell, corner);
+            let picked = g.cell_at(p);
+            let candidates: Vec<_> = g.cells_at_corner(cell, corner).collect();
+            assert!(
+                candidates.contains(&picked),
+                "corner {corner}: picked {picked:?} not in {candidates:?}",
+            );
+            // Determinism: same input twice → same output.
+            assert_eq!(g.cell_at(p), picked);
+        }
     }
 }

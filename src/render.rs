@@ -9,6 +9,8 @@
 //! - [`camera`] — perspective camera helper.
 //! - [`camera_rig`] — input-driven controllers that drive a [`Camera`]
 //!   (currently [`OrbitRig`] for strategy-game-style cameras).
+//! - [`cell_highlight`] — single-cell outline overlay paired with
+//!   [`TerrainPicker`] for hover/selection feedback.
 //! - [`environment`] — view-side environment (sun, ambient, sky) + the
 //!   engine-managed scene bind group.
 //! - [`renderer`] — window + GPU device/queue/surface + scene resources.
@@ -23,6 +25,7 @@
 //! - [`render_object_pass`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
 //! - [`pbr`] — metallic-roughness PBR material; reads scene env + camera.
+//! - [`picking`] — screen-space cursor → world ray + tile-grid hover picker.
 //! - [`terrain`] — view-side meshing of tile-grid terrain into chunk meshes.
 //! - [`terrain_material`] — opaque + transparent terrain material pipelines.
 //! - [`terrain_renderer`] — per-chunk GPU buffer cache + draw routine.
@@ -36,6 +39,7 @@
 
 mod camera;
 mod camera_rig;
+mod cell_highlight;
 #[cfg(feature = "egui")]
 mod debug_ui;
 mod emitter;
@@ -46,6 +50,7 @@ mod instance;
 mod live_render_objects;
 mod material;
 mod pbr;
+mod picking;
 mod render_object;
 mod render_object_pass;
 mod renderer;
@@ -61,6 +66,7 @@ mod visibility;
 
 pub use camera::{Camera, CameraBinding, CameraUniformData};
 pub use camera_rig::{OrbitRig, OrbitRigConfig};
+pub use cell_highlight::CellHighlight;
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
 pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
 pub use instance::{InstanceBuckets, mat4_instance_attributes};
@@ -69,6 +75,7 @@ pub use material::{
     MaterialInstanceRegistry, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial,
 };
 pub use pbr::{PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
+pub use picking::{Hover, Ray, TerrainPicker};
 pub use render_object::{
     EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotRouting,
     SlotValue, SlotValues,
