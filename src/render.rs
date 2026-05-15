@@ -24,6 +24,8 @@
 //! - [`render_object`] — render-object templates + registry (slot schema + parts).
 //! - [`render_object_pass`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
+//! - [`mesh_primitives`] — CPU-side mesh generators (cube, plane, sphere,
+//!   cylinder, cone) in the canonical [`vertex`] layout.
 //! - [`pbr`] — metallic-roughness PBR material; reads scene env + camera.
 //! - [`picking`] — screen-space cursor → world ray + tile-grid hover picker.
 //! - [`terrain`] — view-side meshing of tile-grid terrain into chunk meshes.
@@ -49,6 +51,7 @@ mod game_ui;
 mod instance;
 mod live_render_objects;
 mod material;
+mod mesh_primitives;
 mod pbr;
 mod picking;
 mod render_object;
@@ -74,6 +77,7 @@ pub use live_render_objects::{LiveRenderObject, LiveRenderObjects};
 pub use material::{
     MaterialInstanceRegistry, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial,
 };
+pub use mesh_primitives::PrimitiveMesh;
 pub use pbr::{PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use picking::{Hover, Ray, TerrainPicker};
 pub use render_object::{

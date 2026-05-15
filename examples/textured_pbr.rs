@@ -31,10 +31,10 @@ use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
-    PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PosNormalUv, Renderer,
-    SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, TextureColorSpace, View,
-    ViewConfig, ViewEnvironment, WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu,
-    winit,
+    PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
+    Renderer, SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, TextureColorSpace,
+    View, ViewConfig, ViewEnvironment, WorldTransform, Zone, ZoneId, Zones, sun_direction_for,
+    wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -99,94 +99,6 @@ impl Simulation for Game {
     fn tick(&mut self, dt: Duration) {
         self.env.advance(dt.as_secs_f32());
     }
-}
-
-// --- Mesh data ----------------------------------------------------------
-
-/// Build a 1×1×1 cube as 24 [`PosNormalUv`] vertices (4 per face) + 36
-/// indices. Per-face normals (so each face is flat-shaded) and UVs that
-/// span 0..1 across the face.
-fn cube_mesh() -> (Vec<PosNormalUv>, Vec<u16>) {
-    // Six faces. For each: (normal, four corner positions ccw seen from outside).
-    let h = 0.5;
-    let faces: [(Vec3, [Vec3; 4]); 6] = [
-        (
-            // +X
-            Vec3::X,
-            [
-                Vec3::new(h, -h, -h),
-                Vec3::new(h, h, -h),
-                Vec3::new(h, h, h),
-                Vec3::new(h, -h, h),
-            ],
-        ),
-        (
-            // -X
-            -Vec3::X,
-            [
-                Vec3::new(-h, h, -h),
-                Vec3::new(-h, -h, -h),
-                Vec3::new(-h, -h, h),
-                Vec3::new(-h, h, h),
-            ],
-        ),
-        (
-            // +Y
-            Vec3::Y,
-            [
-                Vec3::new(h, h, -h),
-                Vec3::new(-h, h, -h),
-                Vec3::new(-h, h, h),
-                Vec3::new(h, h, h),
-            ],
-        ),
-        (
-            // -Y
-            -Vec3::Y,
-            [
-                Vec3::new(-h, -h, -h),
-                Vec3::new(h, -h, -h),
-                Vec3::new(h, -h, h),
-                Vec3::new(-h, -h, h),
-            ],
-        ),
-        (
-            // +Z (top)
-            Vec3::Z,
-            [
-                Vec3::new(-h, -h, h),
-                Vec3::new(h, -h, h),
-                Vec3::new(h, h, h),
-                Vec3::new(-h, h, h),
-            ],
-        ),
-        (
-            // -Z (bottom)
-            -Vec3::Z,
-            [
-                Vec3::new(-h, h, -h),
-                Vec3::new(h, h, -h),
-                Vec3::new(h, -h, -h),
-                Vec3::new(-h, -h, -h),
-            ],
-        ),
-    ];
-    let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
-
-    let mut verts = Vec::with_capacity(24);
-    let mut indices = Vec::with_capacity(36);
-    for (face_idx, (normal, corners)) in faces.iter().enumerate() {
-        let base = (face_idx * 4) as u16;
-        for (corner, uv) in corners.iter().zip(uvs.iter()) {
-            verts.push(PosNormalUv {
-                position: corner.to_array(),
-                normal: normal.to_array(),
-                uv: *uv,
-            });
-        }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-    (verts, indices)
 }
 
 // --- View ---------------------------------------------------------------
@@ -266,15 +178,15 @@ impl View for TexturedPbr {
         instances.register(MaterialId::ShinyMetal, make(1.0, 0.15));
         instances.register(MaterialId::GlossyPlastic, make(0.0, 0.18));
 
-        let (verts, indices) = cube_mesh();
+        let mesh = PrimitiveMesh::cube(Vec3::ONE);
         let cube_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("cube vertices"),
-            contents: bytemuck::cast_slice(&verts),
+            contents: bytemuck::cast_slice(&mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let cube_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("cube indices"),
-            contents: bytemuck::cast_slice(&indices),
+            contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
@@ -293,7 +205,7 @@ impl View for TexturedPbr {
             instances,
             cube_vertices,
             cube_indices,
-            cube_index_count: indices.len() as u32,
+            cube_index_count: mesh.index_count(),
             buckets,
             started: Instant::now(),
             #[cfg(feature = "egui")]
@@ -376,7 +288,7 @@ impl View for TexturedPbr {
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
         pass.set_vertex_buffer(0, self.cube_vertices.slice(..));
-        pass.set_index_buffer(self.cube_indices.slice(..), wgpu::IndexFormat::Uint16);
+        pass.set_index_buffer(self.cube_indices.slice(..), wgpu::IndexFormat::Uint32);
         for (mat, instance_buffer, count) in self.buckets.iter_filled() {
             let Some(instance) = self.instances.get(mat) else {
                 continue;
