@@ -1,24 +1,21 @@
-//! Tile-grid terrain with flat tops, cliff walls, and a pool of water.
+//! Flat-top hex terrain. Mirrors the square `terrain` example but builds the
+//! zone over [`HexGrid`] instead — proves the same `FlatTopsMesher` instance
+//! and `TerrainRenderer` work unchanged for both grid topologies.
 //!
-//! Builds a small zone with a multi-step hill in the +X +Y corner and a 3×3
-//! pool of water in the -X -Y corner. The camera orbits on a wall-clock
-//! timer (so the view stays alive even at sim speed 0) while the static
-//! terrain re-issues its draw calls each frame.
+//! Layout: a small hex-shaped patch of cells around the axial origin, with a
+//! three-step hill biased to one side and a 3-cell pool of water on the
+//! opposite side. The mesher renders each cell as a flat hexagonal top with
+//! wall quads dropping to lower neighbours.
 //!
-//! Demonstrates the slice we just landed: [`Zone::terrain`] sim data →
-//! [`FlatTopsMesher`] CPU geometry → [`TerrainRenderer`] GPU upload →
-//! [`TerrainMaterial`] opaque + transparent pipelines.
-//!
-//! Controls: 0 pause, 1/2/3 set sim speed (no visible effect — sim is
-//! inert), Esc to quit.
+//! Controls: 0 pause, 1/2/3 set sim speed, Esc to quit.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use currawong::glam::{Vec3, Vec4};
+use currawong::glam::{IVec2, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, Renderer, Simulation,
-    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View, ViewConfig,
+    Camera, CameraBinding, EngineCtx, FlatTopsMesher, HexGrid, Liquid, LiquidId, Renderer,
+    Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, View, ViewConfig,
     ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
@@ -30,60 +27,71 @@ const WATER: LiquidId = LiquidId(1);
 // --- Simulation ----------------------------------------------------------
 
 struct Game {
-    zones: Zones,
+    zones: Zones<HexGrid>,
     main_zone: ZoneId,
 }
 
 impl Game {
     fn new() -> Self {
-        let mut zones = Zones::new();
-        let main_zone = zones.insert(Zone::new());
+        let mut zones: Zones<HexGrid> = Zones::new();
+        let main_zone = zones.insert(Zone::with_grid(HexGrid));
         let zone = zones.get_mut(main_zone).expect("just inserted");
         let terrain = zone.terrain_mut();
 
-        // Allocate a 16×16 area of ground centred on the origin. All tiles
-        // default to walkable + h=0; we then carve heights and water.
-        for ty in -8..8 {
-            for tx in -8..8 {
-                terrain.tile_mut(TileCoord::new(tx, ty)).floor_height = 0;
+        // Allocate a hex-shaped patch of radius 5 around the axial origin.
+        // For axial coords (q, r), the hex disc of radius N is
+        // `|q| ≤ N ∧ |r| ≤ N ∧ |q + r| ≤ N`.
+        let radius: i32 = 5;
+        for q in -radius..=radius {
+            for r in -radius..=radius {
+                if q.abs() <= radius && r.abs() <= radius && (q + r).abs() <= radius {
+                    terrain.tile_mut(IVec2::new(q, r)).floor_height = 0;
+                }
             }
         }
 
-        // Stepped hill centred at (4, 4): three height bands.
-        for ty in -8..8 {
-            for tx in -8..8 {
-                let dx = tx - 4;
-                let dy = ty - 4;
-                let d2 = dx * dx + dy * dy;
-                let h = if d2 < 3 {
-                    tx
-                } else if d2 < 8 {
-                    3
-                } else if d2 < 16 {
-                    1
-                } else {
-                    0
+        // Three-step hill biased to the (+q, +r) side. Distance is measured
+        // in axial steps via the cube-coord max-of-three formula.
+        let centre = IVec2::new(2, 2);
+        for q in -radius..=radius {
+            for r in -radius..=radius {
+                if q.abs() > radius || r.abs() > radius || (q + r).abs() > radius {
+                    continue;
+                }
+                let d = axial_distance(IVec2::new(q, r), centre);
+                let h = match d {
+                    0 => 3,
+                    1 => 2,
+                    2 => 1,
+                    _ => 0,
                 };
-                terrain.tile_mut(TileCoord::new(tx, ty)).floor_height = h;
+                if h > 0 {
+                    terrain.tile_mut(IVec2::new(q, r)).floor_height = h;
+                }
             }
         }
 
-        // 3×3 pool of water in the -X -Y corner: floor dropped to -10 (a
-        // deep pit), filled with 10 steps of water so the surface sits flush
-        // with the surrounding ground at z=0.
-        for ty in -6..-3 {
-            for tx in -6..-3 {
-                let tile = terrain.tile_mut(TileCoord::new(tx, ty));
-                tile.floor_height = -10;
-                tile.liquid = Some(Liquid {
-                    kind: WATER,
-                    depth: 10,
-                });
-            }
+        // Pool of water on the opposite (-q, -r) side: a 3-cell cluster
+        // dropped to h=-10 and filled with 10 steps of water so the surface
+        // sits flush with the surrounding ground at z=0.
+        for (q, r) in [(-3, -1), (-3, 0), (-2, -1)] {
+            let tile = terrain.tile_mut(IVec2::new(q, r));
+            tile.floor_height = -10;
+            tile.liquid = Some(Liquid {
+                kind: WATER,
+                depth: 10,
+            });
         }
 
         Self { zones, main_zone }
     }
+}
+
+/// Axial-coord distance between two hexes. Equivalent to the cube-coord
+/// Chebyshev distance: `(|dq| + |dr| + |dq + dr|) / 2`.
+fn axial_distance(a: IVec2, b: IVec2) -> i32 {
+    let d = a - b;
+    (d.x.abs() + d.y.abs() + (d.x + d.y).abs()) / 2
 }
 
 impl Simulation for Game {
@@ -106,7 +114,7 @@ impl View for TerrainView {
     type Sim = Game;
 
     const CONFIG: ViewConfig = ViewConfig {
-        title: "currawong — terrain demo",
+        title: "currawong — hex terrain demo",
         depth_format: Some(DEPTH_FORMAT),
         ..ViewConfig::DEFAULT
     };
@@ -116,11 +124,8 @@ impl View for TerrainView {
         let camera_binding = CameraBinding::new(&renderer.device);
         let material = TerrainMaterial::new(renderer, camera_binding.layout());
 
-        // Solid tint = white so per-vertex top/wall colours show through.
         let solid_instance = material.create_instance(renderer, Vec4::new(1.0, 1.0, 1.0, 1.0));
 
-        // One material instance per liquid kind. Tint colour is the liquid's
-        // colour; alpha < 1 enables see-through.
         let mut liquid_instances = HashMap::new();
         liquid_instances.insert(
             WATER,
@@ -150,14 +155,9 @@ impl View for TerrainView {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
 
-        // Lazy first-frame mesh — init() doesn't have access to the sim, so
-        // upload happens here on the first render call. Re-meshing on edit
-        // is the caller's job (this demo's terrain is static).
         let zone = sim.zones.get(sim.main_zone).expect("main zone");
         if self.terrain.is_empty() {
-            // Short height steps so a 1-level cliff is one-tenth of a tile
-            // tall rather than a full cube — closer to the RimWorld / DF
-            // sim-game aesthetic than a Minecraft voxel look.
+            // Same mesher as the square demo — only the grid changes.
             let mesher = FlatTopsMesher {
                 height_unit: 0.1,
                 ..FlatTopsMesher::new()
@@ -165,8 +165,7 @@ impl View for TerrainView {
             self.terrain.rebuild_all(renderer, zone.terrain(), &mesher);
         }
 
-        // Wall-clock orbit so pausing the sim doesn't freeze the camera —
-        // makes the sim/view decoupling visible.
+        // Wall-clock orbit so pausing the sim doesn't freeze the camera.
         let t = self.started.elapsed().as_secs_f32();
         let radius = 18.0;
         let angle = t * 0.25;
@@ -175,14 +174,11 @@ impl View for TerrainView {
         self.camera.far = 200.0;
         self.camera_binding.write(&renderer.queue, &self.camera);
 
-        // Opaque solids first so depth is populated before we draw liquids.
         pass.set_pipeline(self.material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
         self.terrain.draw_solid(pass, &self.solid_instance);
 
-        // Liquids over the top — alpha-blended, depth-test on but no depth
-        // write (set in the material).
         pass.set_pipeline(self.material.transparent_pipeline());
         self.terrain.draw_liquids(pass, &self.liquid_instances);
     }
@@ -192,9 +188,9 @@ impl View for TerrainView {
     }
 
     fn extract_environment(&self, _: &Game, _: ZoneId) -> ViewEnvironment {
-        // Fixed afternoon sun — high enough to light tops well, oblique
-        // enough to shade walls visibly. Brighter sun + low ambient so
-        // cliff faces read by shading, not flat colour.
+        // Same fixed sun as the square `terrain` demo so the two examples
+        // are visually comparable — flat tops on each hex catch the light,
+        // cliffs read by shading.
         ViewEnvironment {
             sun_direction: Vec3::new(0.45, 0.35, 0.8).normalize(),
             sun_color: Vec3::new(1.0, 0.95, 0.85) * 2.2,

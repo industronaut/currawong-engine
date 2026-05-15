@@ -91,4 +91,12 @@ name = "multi_zone"
 required-features = ["render"]
 
 [[example]]
+name = "hex_terrain"
+required-features = ["render"]
+
+[[example]]
+name = "slope_terrain"
+required-features = ["render"]
+
+[[example]]
 name = "headless"

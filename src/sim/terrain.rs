@@ -28,6 +28,8 @@ use std::collections::hash_map;
 
 use glam::{IVec2, UVec2};
 
+use super::grid::{Grid, SquareGrid};
+
 /// Side length of a chunk, in tiles. A chunk holds `CHUNK_SIZE * CHUNK_SIZE`
 /// tiles in row-major order.
 pub const CHUNK_SIZE: u32 = 16;
@@ -124,14 +126,44 @@ impl Default for Chunk {
 }
 
 /// The terrain of a single [`Zone`](super::Zone): a sparse, chunked tile grid.
-#[derive(Default)]
-pub struct Terrain {
+///
+/// Generic over [`Grid`] — the grid impl chooses the cell topology (square,
+/// hex, …) while the per-cell data ([`Tile`], [`Chunk`]) stays the same.
+/// Defaults to [`SquareGrid`] so unparameterized callers keep working.
+pub struct Terrain<G: Grid = SquareGrid> {
+    grid: G,
     chunks: HashMap<ChunkCoord, Chunk>,
 }
 
-impl Terrain {
+impl Default for Terrain<SquareGrid> {
+    fn default() -> Self {
+        Self::with_grid(SquareGrid)
+    }
+}
+
+impl Terrain<SquareGrid> {
+    /// Build an empty terrain over the default [`SquareGrid`]. For other
+    /// grids, construct via [`Terrain::with_grid`].
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl<G: Grid> Terrain<G> {
+    /// Build an empty terrain with an explicit grid instance. Use this when
+    /// the grid carries configuration (none today; reserved for future
+    /// orientation/scale fields).
+    pub fn with_grid(grid: G) -> Self {
+        Self {
+            grid,
+            chunks: HashMap::new(),
+        }
+    }
+
+    /// Borrow the grid impl. Meshers use this to look up corner positions
+    /// and neighbour relations.
+    pub fn grid(&self) -> &G {
+        &self.grid
     }
 
     /// Read a tile. Returns `None` if the containing chunk has never been

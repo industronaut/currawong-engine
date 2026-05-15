@@ -1,7 +1,8 @@
 //! Material for terrain meshes.
 //!
 //! Two pipelines compiled from one shader and one vertex format
-//! ([`TerrainVertex`](super::TerrainVertex), `pos` + per-vertex `color`):
+//! ([`TerrainVertex`](super::TerrainVertex), `pos` + `normal` + per-vertex
+//! `color`):
 //!
 //! - [`Self::opaque_pipeline`] — opaque solid terrain. Depth write on,
 //!   `BlendState::REPLACE`.
@@ -14,6 +15,14 @@
 //! tint (so per-vertex top/wall shading shows through); each liquid kind
 //! gets its own tinted instance (water blue, lava orange, …).
 //!
+//! ## Bind groups
+//!
+//! | group | contents                                                |
+//! |-------|---------------------------------------------------------|
+//! | 0     | camera ([`CameraBinding`](super::CameraBinding))        |
+//! | 1     | scene env ([`Renderer::scene_layout`](super::Renderer)) |
+//! | 2     | material instance — tint uniform                        |
+//!
 //! ## Wiring
 //!
 //! ```text
@@ -23,11 +32,11 @@
 //!                          Vec4::new(0.2, 0.45, 0.85, 0.55));
 //! draw:    pass.set_pipeline(material.opaque_pipeline());
 //!          pass.set_bind_group(0, camera.bind_group(), &[]);
-//!          pass.set_bind_group(1, solid.bind_group(), &[]);
-//!          // bind chunk vertex/index buffers, draw_indexed
+//!          pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
+//!          // draw_solid binds group 2 (material instance) per draw call
+//!          terrain_renderer.draw_solid(pass, &solid);
 //!          pass.set_pipeline(material.transparent_pipeline());
-//!          pass.set_bind_group(1, water.bind_group(), &[]);
-//!          // draw liquid chunk meshes
+//!          terrain_renderer.draw_liquids(pass, &liquid_instances);
 //! ```
 
 use bytemuck::{Pod, Zeroable};
@@ -39,35 +48,55 @@ use super::terrain::TerrainVertex;
 const TERRAIN_SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
+    right:     vec4<f32>,
+    up:        vec4<f32>,
+    position:  vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
+
+struct Scene {
+    sun_direction: vec4<f32>,
+    sun_color:     vec4<f32>,
+    ambient:       vec4<f32>,
+    sky_color:     vec4<f32>,
+};
+@group(1) @binding(0) var<uniform> scene: Scene;
 
 struct Material {
     tint: vec4<f32>,
 };
-@group(1) @binding(0) var<uniform> material: Material;
+@group(2) @binding(0) var<uniform> material: Material;
 
 struct VsIn {
-    @location(0) pos: vec3<f32>,
-    @location(1) color: vec4<f32>,
+    @location(0) pos:    vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) color:  vec4<f32>,
 };
 
 struct VsOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    @builtin(position) clip:  vec4<f32>,
+    @location(0)       n:     vec3<f32>,
+    @location(1)       color: vec4<f32>,
 };
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip = camera.view_proj * vec4<f32>(in.pos, 1.0);
+    out.clip  = camera.view_proj * vec4<f32>(in.pos, 1.0);
+    // Terrain has no model matrix — vertex positions and normals are already
+    // in world space, so the normal passes through untouched.
+    out.n     = in.normal;
     out.color = in.color * material.tint;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    let n          = normalize(in.n);
+    let l          = normalize(scene.sun_direction.xyz);
+    let n_dot_l    = max(dot(n, l), 0.0);
+    let lit        = scene.sun_color.rgb * n_dot_l + scene.ambient.rgb;
+    return vec4<f32>(in.color.rgb * lit, in.color.a);
 }
 "#;
 
@@ -112,7 +141,11 @@ impl TerrainMaterial {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Terrain pipeline layout"),
-            bind_group_layouts: &[Some(camera_layout), Some(&instance_bgl)],
+            bind_group_layouts: &[
+                Some(camera_layout),
+                Some(renderer.scene_layout()),
+                Some(&instance_bgl),
+            ],
             ..Default::default()
         });
 
@@ -125,6 +158,11 @@ impl TerrainMaterial {
             wgpu::VertexAttribute {
                 offset: 12,
                 shader_location: 1,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 24,
+                shader_location: 2,
                 format: wgpu::VertexFormat::Float32x4,
             },
         ];

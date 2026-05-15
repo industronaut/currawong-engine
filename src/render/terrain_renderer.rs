@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::sim::{ChunkCoord, LiquidId, Terrain};
+use crate::sim::{ChunkCoord, Grid, LiquidId, Terrain};
 
 use super::renderer::Renderer;
 use super::terrain::{ChunkMeshes, MeshData, TerrainMesher, TerrainVertex};
@@ -102,11 +102,11 @@ impl TerrainRenderer {
     }
 
     /// Mesh `chunk` with `mesher` and replace the cached GPU buffers.
-    pub fn rebuild_chunk(
+    pub fn rebuild_chunk<G: Grid>(
         &mut self,
         renderer: &Renderer,
-        terrain: &Terrain,
-        mesher: &dyn TerrainMesher,
+        terrain: &Terrain<G>,
+        mesher: &dyn TerrainMesher<G, Output = ChunkMeshes>,
         chunk: ChunkCoord,
     ) {
         let meshes = mesher.mesh_chunk(terrain, chunk);
@@ -117,11 +117,11 @@ impl TerrainRenderer {
     /// Mesh every allocated chunk in `terrain` from scratch, discarding any
     /// previously cached buffers. Useful for first-frame setup or after a
     /// wholesale terrain reload.
-    pub fn rebuild_all(
+    pub fn rebuild_all<G: Grid>(
         &mut self,
         renderer: &Renderer,
-        terrain: &Terrain,
-        mesher: &dyn TerrainMesher,
+        terrain: &Terrain<G>,
+        mesher: &dyn TerrainMesher<G, Output = ChunkMeshes>,
     ) {
         self.chunks.clear();
         let coords: Vec<ChunkCoord> = terrain.chunks().map(|(c, _)| *c).collect();
@@ -130,11 +130,13 @@ impl TerrainRenderer {
         }
     }
 
-    /// Record opaque solid-terrain draws. Caller must have already bound
-    /// [`TerrainMaterial::opaque_pipeline`](super::TerrainMaterial::opaque_pipeline)
-    /// and the camera bind group at index 0.
+    /// Record opaque solid-terrain draws. Caller must have already bound:
+    /// - [`TerrainMaterial::opaque_pipeline`](super::TerrainMaterial::opaque_pipeline)
+    /// - camera bind group at slot 0
+    /// - scene environment bind group at slot 1
+    ///   ([`Renderer::scene_bind_group`](super::Renderer::scene_bind_group))
     pub fn draw_solid(&self, pass: &mut wgpu::RenderPass<'_>, solid: &TerrainMaterialInstance) {
-        pass.set_bind_group(1, solid.bind_group(), &[]);
+        pass.set_bind_group(2, solid.bind_group(), &[]);
         for buffers in self.chunks.values() {
             if let Some(mesh) = &buffers.solid {
                 mesh.draw(pass);
@@ -143,17 +145,20 @@ impl TerrainRenderer {
     }
 
     /// Record transparent liquid draws keyed by [`LiquidId`]. Caller must
-    /// have already bound
-    /// [`TerrainMaterial::transparent_pipeline`](super::TerrainMaterial::transparent_pipeline)
-    /// and the camera bind group at index 0. Any liquid kind present in the
-    /// chunks but missing from `instances` is silently skipped.
+    /// have already bound:
+    /// - [`TerrainMaterial::transparent_pipeline`](super::TerrainMaterial::transparent_pipeline)
+    /// - camera bind group at slot 0
+    /// - scene environment bind group at slot 1
+    ///
+    /// Any liquid kind present in the chunks but missing from `instances` is
+    /// silently skipped.
     pub fn draw_liquids(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
         instances: &HashMap<LiquidId, TerrainMaterialInstance>,
     ) {
         for (id, instance) in instances {
-            pass.set_bind_group(1, instance.bind_group(), &[]);
+            pass.set_bind_group(2, instance.bind_group(), &[]);
             for buffers in self.chunks.values() {
                 if let Some(mesh) = buffers.liquids.get(id) {
                     mesh.draw(pass);
