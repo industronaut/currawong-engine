@@ -268,6 +268,18 @@ impl IdReadback {
         cursor_x: u32,
         cursor_y: u32,
     ) {
+        // The cursor coordinate comes from a winit `CursorMoved` event that
+        // can lag a window resize by a frame — between the resize and the
+        // next CursorMoved, `cursor_px` may still hold pre-resize coords
+        // that now sit past the recreated (smaller) ID texture. wgpu's
+        // validation panics on such a `copy_texture_to_buffer`. Skip the
+        // readback when that happens; the next CursorMoved updates the
+        // coords and normal service resumes, with the picker's ray-plane
+        // fallback covering the missed frame.
+        let size = id_texture.size();
+        if cursor_x >= size.width || cursor_y >= size.height {
+            return;
+        }
         let Some(slot_idx) = self.acquire_slot_idx() else {
             return;
         };

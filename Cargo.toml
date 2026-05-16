@@ -99,4 +99,8 @@ name = "slope_terrain"
 required-features = ["render"]
 
 [[example]]
+name = "lumber_camp"
+required-features = ["yakui"]
+
+[[example]]
 name = "headless"
