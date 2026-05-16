@@ -28,6 +28,8 @@
 //!   cylinder, cone) in the canonical [`vertex`] layout.
 //! - [`pbr`] — metallic-roughness PBR material; reads scene env + camera.
 //! - [`picking`] — screen-space cursor → world ray + tile-grid hover picker.
+//! - [`picking_buffer`] — GPU hit-ID buffer plumbing: per-frame indirection
+//!   table + readback ring for sloped-terrain and mesh-object picking.
 //! - [`terrain`] — view-side meshing of tile-grid terrain into chunk meshes.
 //! - [`terrain_material`] — opaque + transparent terrain material pipelines.
 //! - [`terrain_renderer`] — per-chunk GPU buffer cache + draw routine.
@@ -54,6 +56,7 @@ mod material;
 mod mesh_primitives;
 mod pbr;
 mod picking;
+mod picking_buffer;
 mod render_object;
 mod render_object_pass;
 mod renderer;
@@ -80,6 +83,7 @@ pub use material::{
 pub use mesh_primitives::PrimitiveMesh;
 pub use pbr::{PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use picking::{Hover, Ray, TerrainPicker};
+pub use picking_buffer::{FrameIdTable, HitTarget};
 pub use render_object::{
     EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotRouting,
     SlotValue, SlotValues,

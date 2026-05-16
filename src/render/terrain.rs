@@ -38,12 +38,21 @@ use crate::sim::{CHUNK_SIZE, ChunkCoord, Grid, LiquidId, Terrain};
 /// (also world-space, since terrain is drawn without a model matrix) — `+Z`
 /// for flat tops, in-plane outward for vertical walls. Colour is linear RGBA
 /// in `[0, 1]`.
+///
+/// `cell_id_in_chunk` identifies which cell of the owning chunk this vertex
+/// belongs to — `ly * CHUNK_SIZE + lx` where `(lx, ly)` is the cell's local
+/// position within the chunk. The terrain shader adds the chunk's per-frame
+/// `base_id` (allocated by [`Renderer::reserve_terrain_chunk`](crate::Renderer::reserve_terrain_chunk))
+/// to recover the unique frame-scoped hit ID written to the engine's
+/// R32Uint ID attachment for picking. Top, wall, and liquid vertices of the
+/// same cell share the same `cell_id_in_chunk`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct TerrainVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 4],
+    pub cell_id_in_chunk: u32,
 }
 
 /// CPU-side mesh data ready to be uploaded to a vertex/index buffer pair.
@@ -135,6 +144,7 @@ impl FlatTopsMesher {
         mesh: &mut MeshData,
         grid: &G,
         cell: IVec2,
+        cell_id_in_chunk: u32,
         z: f32,
         color: [f32; 4],
     ) {
@@ -145,6 +155,7 @@ impl FlatTopsMesher {
                 pos: [xy.x, xy.y, z],
                 normal: [0.0, 0.0, 1.0],
                 color,
+                cell_id_in_chunk,
             });
         }
         for i in 1..(G::CORNERS_PER_CELL as u32 - 1) {
@@ -160,11 +171,13 @@ impl FlatTopsMesher {
     /// With corners ordered CCW from above, `(edge_dir.y, -edge_dir.x)` is
     /// the outward direction — verified to match the old axis-aligned wall
     /// directions on `SquareGrid` and to face the right neighbour on hex.
+    #[allow(clippy::too_many_arguments)] // private helper; args are all natural
     fn emit_wall<G: Grid>(
         &self,
         mesh: &mut MeshData,
         grid: &G,
         cell: IVec2,
+        cell_id_in_chunk: u32,
         edge_idx: usize,
         h: i32,
         h_low: i32,
@@ -182,21 +195,25 @@ impl FlatTopsMesher {
             pos: [c0.x, c0.y, zb],
             normal,
             color,
+            cell_id_in_chunk,
         });
         mesh.vertices.push(TerrainVertex {
             pos: [c1.x, c1.y, zb],
             normal,
             color,
+            cell_id_in_chunk,
         });
         mesh.vertices.push(TerrainVertex {
             pos: [c1.x, c1.y, zt],
             normal,
             color,
+            cell_id_in_chunk,
         });
         mesh.vertices.push(TerrainVertex {
             pos: [c0.x, c0.y, zt],
             normal,
             color,
+            cell_id_in_chunk,
         });
         mesh.indices
             .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -220,8 +237,16 @@ impl<G: Grid> TerrainMesher<G> for FlatTopsMesher {
                 let cell = IVec2::new(origin.x + lx, origin.y + ly);
                 let tile = chunk.tile(UVec2::new(lx as u32, ly as u32));
                 let h = tile.floor_height;
+                let cell_id_in_chunk = (ly as u32) * CHUNK_SIZE + (lx as u32);
 
-                self.emit_top_polygon(&mut out.solid, grid, cell, self.world_h(h), self.top_color);
+                self.emit_top_polygon(
+                    &mut out.solid,
+                    grid,
+                    cell,
+                    cell_id_in_chunk,
+                    self.world_h(h),
+                    self.top_color,
+                );
 
                 // Walls: emit only towards a strictly lower neighbour, so the
                 // higher tile owns the cliff and we never double up.
@@ -229,14 +254,29 @@ impl<G: Grid> TerrainMesher<G> for FlatTopsMesher {
                     let neighbour = grid.neighbour(cell, edge);
                     let neighbour_h = terrain.tile_or_default(neighbour).floor_height;
                     if h > neighbour_h {
-                        self.emit_wall(&mut out.solid, grid, cell, edge, h, neighbour_h);
+                        self.emit_wall(
+                            &mut out.solid,
+                            grid,
+                            cell,
+                            cell_id_in_chunk,
+                            edge,
+                            h,
+                            neighbour_h,
+                        );
                     }
                 }
 
                 if let Some(liq) = tile.liquid {
                     let surface = self.world_h(h + liq.depth as i32);
                     let bucket = out.liquids.entry(liq.kind).or_default();
-                    self.emit_top_polygon(bucket, grid, cell, surface, [1.0, 1.0, 1.0, 1.0]);
+                    self.emit_top_polygon(
+                        bucket,
+                        grid,
+                        cell,
+                        cell_id_in_chunk,
+                        surface,
+                        [1.0, 1.0, 1.0, 1.0],
+                    );
                 }
             }
         }
@@ -312,7 +352,12 @@ impl SlopeMesher {
     /// Each triangle emits its own three vertices (no sharing across the
     /// fan) so triangles can carry distinct normals — that's what makes the
     /// shading flat rather than smooth.
-    fn emit_flat_shaded_polygon(mesh: &mut MeshData, corners: &[Vec3], color: [f32; 4]) {
+    fn emit_flat_shaded_polygon(
+        mesh: &mut MeshData,
+        corners: &[Vec3],
+        cell_id_in_chunk: u32,
+        color: [f32; 4],
+    ) {
         for i in 1..(corners.len() - 1) {
             let p0 = corners[0];
             let p1 = corners[i];
@@ -324,16 +369,19 @@ impl SlopeMesher {
                 pos: p0.to_array(),
                 normal,
                 color,
+                cell_id_in_chunk,
             });
             mesh.vertices.push(TerrainVertex {
                 pos: p1.to_array(),
                 normal,
                 color,
+                cell_id_in_chunk,
             });
             mesh.vertices.push(TerrainVertex {
                 pos: p2.to_array(),
                 normal,
                 color,
+                cell_id_in_chunk,
             });
             mesh.indices.extend([base, base + 1, base + 2]);
         }
@@ -358,6 +406,7 @@ impl<G: Grid> TerrainMesher<G> for SlopeMesher {
             for lx in 0..size {
                 let cell = IVec2::new(origin.x + lx, origin.y + ly);
                 let tile = chunk.tile(UVec2::new(lx as u32, ly as u32));
+                let cell_id_in_chunk = (ly as u32) * CHUNK_SIZE + (lx as u32);
 
                 // Sloped top: each corner at max-of-touching-cells.
                 corners.clear();
@@ -366,7 +415,12 @@ impl<G: Grid> TerrainMesher<G> for SlopeMesher {
                     let xy = grid.corner_xy(cell, i) * self.tile_size;
                     corners.push(Vec3::new(xy.x, xy.y, self.world_h(h)));
                 }
-                Self::emit_flat_shaded_polygon(&mut out.solid, &corners, self.top_color);
+                Self::emit_flat_shaded_polygon(
+                    &mut out.solid,
+                    &corners,
+                    cell_id_in_chunk,
+                    self.top_color,
+                );
 
                 // Liquid surface: flat polygon at floor + depth (same shape
                 // contract as FlatTopsMesher — liquid level is per-cell, not
@@ -379,7 +433,12 @@ impl<G: Grid> TerrainMesher<G> for SlopeMesher {
                         let xy = grid.corner_xy(cell, i) * self.tile_size;
                         corners.push(Vec3::new(xy.x, xy.y, surface_z));
                     }
-                    Self::emit_flat_shaded_polygon(bucket, &corners, [1.0, 1.0, 1.0, 1.0]);
+                    Self::emit_flat_shaded_polygon(
+                        bucket,
+                        &corners,
+                        cell_id_in_chunk,
+                        [1.0, 1.0, 1.0, 1.0],
+                    );
                 }
             }
         }

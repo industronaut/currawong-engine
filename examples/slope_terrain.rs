@@ -21,21 +21,31 @@
 //! - Scroll wheel — zoom (orbit distance).
 //! - Y / X — toggle invert-Y / invert-X on the drag rotation.
 //! - 0 pause, 1/2/3 sim speed, Esc to quit.
+//!
+//! Hovered cell appears in the window title — sourced from the engine's
+//! GPU hit-ID buffer (#56 PR 2), so on the rolling hill it reports the
+//! cell whose visible mesh top is actually under the cursor, not the
+//! plane-projected base. Move the cursor up the hill's slope and watch
+//! the cell coords track the visible surface; before PR 2 the
+//! ray-vs-Z=0-plane fallback reported the cell at the hill's base.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use currawong::glam::{Vec3, Vec4};
+use currawong::glam::{Vec2, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, Liquid, LiquidId, OrbitRig, Renderer, Simulation,
-    SlopeMesher, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, View,
-    ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
+    SlopeMesher, SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker,
+    TerrainRenderer, TileCoord, View, ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, wgpu,
+    winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const WATER: LiquidId = LiquidId(1);
+const BASE_TITLE: &str = "currawong — slope terrain demo";
+const TILE_SIZE: f32 = 1.0;
 
 // --- Simulation ----------------------------------------------------------
 
@@ -112,6 +122,8 @@ struct TerrainView {
     camera: Camera,
     camera_binding: CameraBinding,
     rig: OrbitRig,
+    picker: TerrainPicker<SquareGrid>,
+    last_title_hover: Option<TileCoord>,
     material: TerrainMaterial,
     solid_instance: TerrainMaterialInstance,
     liquid_instances: HashMap<LiquidId, TerrainMaterialInstance>,
@@ -122,7 +134,7 @@ impl View for TerrainView {
     type Sim = Game;
 
     const CONFIG: ViewConfig = ViewConfig {
-        title: "currawong — slope terrain demo",
+        title: BASE_TITLE,
         depth_format: Some(DEPTH_FORMAT),
         ..ViewConfig::DEFAULT
     };
@@ -144,6 +156,8 @@ impl View for TerrainView {
         rig.distance = 24.0;
         rig.config.distance_max = 120.0;
 
+        let picker = TerrainPicker::new(SquareGrid, TILE_SIZE);
+
         let material = TerrainMaterial::new(renderer, camera_binding.layout());
 
         let solid_instance = material.create_instance(renderer, Vec4::new(1.0, 1.0, 1.0, 1.0));
@@ -158,6 +172,8 @@ impl View for TerrainView {
             camera,
             camera_binding,
             rig,
+            picker,
+            last_title_hover: None,
             material,
             solid_instance,
             liquid_instances,
@@ -195,12 +211,36 @@ impl View for TerrainView {
             self.terrain.rebuild_all(renderer, zone.terrain(), &mesher);
         }
 
+        // Re-pick every frame — same as the flat-terrain demo, but here the
+        // GPU ID-buffer path is what actually makes hover correct over the
+        // sloped hill. The ray-vs-plane fallback reports the cell at z=0
+        // under the cursor; on a hill that's the cell at the *base*, not
+        // the slope facet the cursor is visually over. After PR 2 of #56
+        // the engine writes per-pixel hit IDs from the terrain shader and
+        // we read them back here.
+        let viewport = Vec2::new(size.width as f32, size.height as f32);
+        self.picker.update(&self.camera, viewport);
+        self.picker.set_id_hover(renderer.hit_id_hover());
+        let hover_coord = self
+            .picker
+            .hover()
+            .map(|h| TileCoord::new(h.cell.x, h.cell.y));
+        if hover_coord != self.last_title_hover {
+            let title = match hover_coord {
+                Some(c) => format!("{BASE_TITLE} — hover ({}, {})", c.x, c.y),
+                None => BASE_TITLE.to_string(),
+            };
+            renderer.window.set_title(&title);
+            self.last_title_hover = hover_coord;
+        }
+
         self.camera_binding.write(&renderer.queue, &self.camera);
 
         pass.set_pipeline(self.material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        self.terrain.draw_solid(pass, &self.solid_instance);
+        self.terrain
+            .draw_solid(pass, renderer, sim.main_zone, &self.solid_instance);
 
         pass.set_pipeline(self.material.transparent_pipeline());
         self.terrain.draw_liquids(pass, &self.liquid_instances);
@@ -231,6 +271,7 @@ impl View for TerrainView {
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
         self.rig.handle_event(event);
+        self.picker.handle_event(event);
 
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;

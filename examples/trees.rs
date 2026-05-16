@@ -327,7 +327,8 @@ impl View for Demo {
         pass.set_pipeline(self.terrain_material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        self.terrain.draw_solid(pass, &self.terrain_solid);
+        self.terrain
+            .draw_solid(pass, renderer, sim.main_zone, &self.terrain_solid);
         // Every chunk in this example has a solid mesh (all tiles set their
         // floor_height), so chunk_count is the exact terrain draw total.
         let mut draws = self.terrain.chunk_count() as u32;

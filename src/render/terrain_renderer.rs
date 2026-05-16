@@ -9,10 +9,20 @@
 //! [`TerrainRenderer::rebuild_chunk`] whenever a chunk's tiles change.
 //! Reuse of GPU buffers across rebuilds is deferred; edits today reallocate
 //! the chunk's buffers, which is fine while edit cadence is low.
+//!
+//! Per chunk we also hold a 16-byte uniform buffer + bind group for the
+//! per-frame hit-ID base. [`Self::draw_solid`] reserves a base ID via
+//! [`Renderer::reserve_terrain_chunk`](super::Renderer::reserve_terrain_chunk)
+//! once per chunk per frame and writes it into the chunk's uniform; the
+//! terrain shader sums it with each vertex's chunk-local cell index to
+//! produce the unique frame-scoped ID written to the engine's R32Uint
+//! attachment for picking (#56 PR 2). Liquids draw through the transparent
+//! pipeline that opts out of the ID slot, so [`Self::draw_liquids`] doesn't
+//! need the renderer.
 
 use std::collections::HashMap;
 
-use crate::sim::{ChunkCoord, Grid, LiquidId, Terrain};
+use crate::sim::{ChunkCoord, Grid, LiquidId, Terrain, ZoneId};
 
 use super::renderer::Renderer;
 use super::terrain::{ChunkMeshes, MeshData, TerrainMesher, TerrainVertex};
@@ -60,9 +70,50 @@ impl GpuMesh {
     }
 }
 
+/// Per-chunk uniform buffer + bind group for the hit-ID base. Bound at
+/// `@group(3)` by `draw_solid`; the engine's `id_base_layout` is the
+/// source of truth for the bind-group shape.
+struct ChunkIdBinding {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+impl ChunkIdBinding {
+    fn new(renderer: &Renderer) -> Self {
+        // 16 bytes — std140 minimum uniform-buffer size; the WGSL struct
+        // pads its single u32 out to 16 bytes for the same reason.
+        let buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Terrain chunk id-base uniform"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = renderer
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Terrain chunk id-base bg"),
+                layout: renderer.id_base_layout(),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+        Self { buffer, bind_group }
+    }
+
+    fn write(&self, renderer: &Renderer, base_id: u32) {
+        // 16-byte payload: base_id at offset 0, three padding u32s after.
+        let payload: [u32; 4] = [base_id, 0, 0, 0];
+        renderer
+            .queue
+            .write_buffer(&self.buffer, 0, bytemuck::cast_slice(&payload));
+    }
+}
+
 struct ChunkBuffers {
     solid: Option<GpuMesh>,
     liquids: HashMap<LiquidId, GpuMesh>,
+    id_binding: ChunkIdBinding,
 }
 
 impl ChunkBuffers {
@@ -74,7 +125,11 @@ impl ChunkBuffers {
             .filter(|(_, m)| !m.is_empty())
             .map(|(id, m)| (id, GpuMesh::upload(renderer, &m)))
             .collect();
-        Self { solid, liquids }
+        Self {
+            solid,
+            liquids,
+            id_binding: ChunkIdBinding::new(renderer),
+        }
     }
 }
 
@@ -135,12 +190,26 @@ impl TerrainRenderer {
     /// - camera bind group at slot 0
     /// - scene environment bind group at slot 1
     ///   ([`Renderer::scene_bind_group`](super::Renderer::scene_bind_group))
-    pub fn draw_solid(&self, pass: &mut wgpu::RenderPass<'_>, solid: &TerrainMaterialInstance) {
+    ///
+    /// Per chunk, this reserves a fresh hit-ID base from the engine's
+    /// frame ID table, writes it into the chunk's uniform, binds the chunk's
+    /// id-base bind group at slot 3, then issues the draw. `zone` identifies
+    /// which zone these chunks belong to so the eventual readback resolves
+    /// to the right [`HitTarget`](super::HitTarget).
+    pub fn draw_solid(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        renderer: &Renderer,
+        zone: ZoneId,
+        solid: &TerrainMaterialInstance,
+    ) {
         pass.set_bind_group(2, solid.bind_group(), &[]);
-        for buffers in self.chunks.values() {
-            if let Some(mesh) = &buffers.solid {
-                mesh.draw(pass);
-            }
+        for (coord, buffers) in &self.chunks {
+            let Some(mesh) = &buffers.solid else { continue };
+            let base_id = renderer.reserve_terrain_chunk(zone, *coord);
+            buffers.id_binding.write(renderer, base_id);
+            pass.set_bind_group(3, &buffers.id_binding.bind_group, &[]);
+            mesh.draw(pass);
         }
     }
 
@@ -149,6 +218,10 @@ impl TerrainRenderer {
     /// - [`TerrainMaterial::transparent_pipeline`](super::TerrainMaterial::transparent_pipeline)
     /// - camera bind group at slot 0
     /// - scene environment bind group at slot 1
+    ///
+    /// Liquids opt out of the hit-ID attachment, so this binds the chunk's
+    /// id-base bind group at slot 3 only to satisfy the pipeline layout —
+    /// the value never reaches the ID buffer.
     ///
     /// Any liquid kind present in the chunks but missing from `instances` is
     /// silently skipped.
@@ -161,6 +234,7 @@ impl TerrainRenderer {
             pass.set_bind_group(2, instance.bind_group(), &[]);
             for buffers in self.chunks.values() {
                 if let Some(mesh) = buffers.liquids.get(id) {
+                    pass.set_bind_group(3, &buffers.id_binding.bind_group, &[]);
                     mesh.draw(pass);
                 }
             }
