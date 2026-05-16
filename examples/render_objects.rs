@@ -22,9 +22,9 @@ use std::time::Instant;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Aabb, Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, Frustum,
-    InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, ParticleLifecycle,
-    RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKind, SlotValue,
-    SlotValues, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshInstanceAttribs,
+    ParticleLifecycle, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation,
+    SlotKind, SlotValue, SlotValues, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
     WorldTransform, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
@@ -266,7 +266,7 @@ struct Demo {
     live_objects: LiveRenderObjects<RenderId>,
     cube_vertices: wgpu::Buffer,
     cube_indices: wgpu::Buffer,
-    buckets: InstanceBuckets<BucketKey, UnlitColoredAttribs>,
+    buckets: InstanceBuckets<BucketKey, MeshInstanceAttribs>,
 
     // Particle path.
     particle_pipeline: wgpu::RenderPipeline,
@@ -391,7 +391,7 @@ impl View for Demo {
         });
 
         // Buckets per (mesh, material) pair that appears in any template.
-        let mut buckets = InstanceBuckets::<BucketKey, UnlitColoredAttribs>::new(
+        let mut buckets = InstanceBuckets::<BucketKey, MeshInstanceAttribs>::new(
             "render-object attribs",
             MAX_INSTANCES,
         );
@@ -573,7 +573,7 @@ impl View for Demo {
                         mesh: part.mesh,
                         material: part.material,
                     },
-                    UnlitColoredAttribs::new(world, part_tint).with_hit_id(hit_id),
+                    MeshInstanceAttribs::new(world, part_tint).with_hit_id(hit_id),
                 );
             },
             |parent, _rid, part, world, _slots, _hit_id| {

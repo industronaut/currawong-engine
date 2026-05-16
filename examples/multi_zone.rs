@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, OrbitRig, Renderer,
-    SimEnvironment, Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer,
-    TileCoord, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, MeshInstanceAttribs,
+    OrbitRig, Renderer, SimEnvironment, Simulation, TerrainMaterial, TerrainMaterialInstance,
+    TerrainRenderer, TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
     ViewEnvironment, WorldObjectRef, WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu,
     winit,
 };
@@ -400,7 +400,7 @@ impl View for MultiZoneView {
         });
         let player_attribs = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("player attribs"),
-            size: std::mem::size_of::<UnlitColoredAttribs>() as u64,
+            size: std::mem::size_of::<MeshInstanceAttribs>() as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -548,7 +548,7 @@ impl View for MultiZoneView {
         // --- Player pass -------------------------------------------------
         let spin = Quat::from_rotation_z(t * 0.8);
         let model = Mat4::from_rotation_translation(player.rotation * spin, player.position);
-        let attribs = UnlitColoredAttribs::new(model, Vec4::ONE);
+        let attribs = MeshInstanceAttribs::new(model, Vec4::ONE);
         renderer
             .queue
             .write_buffer(&self.player_attribs, 0, bytemuck::bytes_of(&attribs));

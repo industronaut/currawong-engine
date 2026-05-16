@@ -110,10 +110,10 @@ impl Renderer {
     /// Reserve a single hit ID for a mesh object. Returns the ID, which
     /// callers write into the per-instance attributes of every pickable
     /// draw for that object — typically the `hit_id` field on
-    /// [`UnlitColoredAttribs`](super::UnlitColoredAttribs) or
-    /// [`PbrInstanceAttribs`](super::PbrInstanceAttribs) via their
-    /// `with_hit_id` builders. The engine's `R32Uint` attachment then holds
-    /// this ID at every pixel the object covers.
+    /// [`MeshInstanceAttribs`](super::MeshInstanceAttribs) via
+    /// [`MeshInstanceAttribs::with_hit_id`](super::MeshInstanceAttribs::with_hit_id).
+    /// The engine's `R32Uint` attachment then holds this ID at every pixel
+    /// the object covers.
     ///
     /// All mesh parts of one sim object should share a single hit ID — see
     /// [`RenderObjectPass::for_each_alive_with_hit_id`](super::RenderObjectPass::for_each_alive_with_hit_id)
