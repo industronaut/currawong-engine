@@ -12,11 +12,19 @@
 //! `input`, calls [`update`](TerrainPicker::update) from `update`, and
 //! reads [`hover`](TerrainPicker::hover) from `render` / `ui`.
 //!
-//! The current intersection model is a ray against the **Z = 0 plane**.
-//! That is exact for flat terrain and wrong on slopes — the cursor visually
-//! hits a hilltop but reports the cell under the hill's base. Acceptable
-//! while terrain heights stay small; upgrade path is a DDA march along the
-//! ray sampling per-cell `floor_height`, no API change.
+//! The picker keeps two parallel hover results:
+//!
+//! - `latest_plane_hover` — zero-latency ray vs. the Z = 0 plane, exact on
+//!   flat terrain and wrong on slopes. Always runs.
+//! - `latest_id_hover` — derived from the engine's GPU hit-ID buffer
+//!   ([`Renderer::hit_id_hover`](super::Renderer::hit_id_hover)). Correct
+//!   on sloped terrain and at cliff edges, but 1–3 frames behind because
+//!   readback is asynchronous. Set each frame via [`Self::set_id_hover`].
+//!
+//! [`Self::hover`] prefers the ID-buffer result when present and falls back
+//! to the plane ray otherwise, so the camera-orbit feel stays snappy at the
+//! moment readback isn't yet caught up while still being correct everywhere
+//! else.
 
 use glam::{IVec2, Vec2, Vec3, Vec4};
 use winit::event::WindowEvent;
@@ -24,6 +32,7 @@ use winit::event::WindowEvent;
 use crate::sim::Grid;
 
 use super::camera::Camera;
+use super::picking_buffer::HitTarget;
 
 /// A world-space ray with a normalised direction. Picking primitives —
 /// `intersect_z_plane`, future `intersect_aabb`, etc. — hang off this type.
@@ -108,7 +117,8 @@ pub struct TerrainPicker<G: Grid> {
     tile_size: f32,
     plane_z: f32,
     last_cursor_px: Option<Vec2>,
-    hover: Option<Hover>,
+    plane_hover: Option<Hover>,
+    id_hover: Option<Hover>,
 }
 
 impl<G: Grid> TerrainPicker<G> {
@@ -121,7 +131,8 @@ impl<G: Grid> TerrainPicker<G> {
             tile_size,
             plane_z: 0.0,
             last_cursor_px: None,
-            hover: None,
+            plane_hover: None,
+            id_hover: None,
         }
     }
 
@@ -133,8 +144,8 @@ impl<G: Grid> TerrainPicker<G> {
     }
 
     /// Ingest a winit window event. Tracks cursor position from
-    /// `CursorMoved` and clears it on `CursorLeft`. Events the picker
-    /// doesn't care about are ignored.
+    /// `CursorMoved` and clears both hover results on `CursorLeft`. Events
+    /// the picker doesn't care about are ignored.
     pub fn handle_event(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::CursorMoved { position, .. } => {
@@ -142,38 +153,81 @@ impl<G: Grid> TerrainPicker<G> {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.last_cursor_px = None;
-                self.hover = None;
+                self.plane_hover = None;
+                self.id_hover = None;
             }
             _ => {}
         }
     }
 
-    /// Re-run the pick with the current cursor position. Call once per
-    /// frame from [`View::update`](crate::View::update). The pick has to
-    /// re-run every frame even when the cursor is stationary, because the
-    /// camera might have moved.
+    /// Re-run the ray-vs-plane pick. Call once per frame from
+    /// [`View::update`](crate::View::update); the pick has to re-run every
+    /// frame even when the cursor is stationary because the camera might
+    /// have moved. Updates the plane-hover slot only; ID-buffer hover is
+    /// fed in via [`Self::set_id_hover`].
     pub fn update(&mut self, camera: &Camera, viewport_px: Vec2) {
         let Some(cursor) = self.last_cursor_px else {
-            self.hover = None;
+            self.plane_hover = None;
             return;
         };
         let ray = camera.ray_from_cursor(cursor, viewport_px);
         let Some(hit) = ray.intersect_z_plane(self.plane_z) else {
-            self.hover = None;
+            self.plane_hover = None;
             return;
         };
         let canonical_xy = Vec2::new(hit.x, hit.y) / self.tile_size;
         let cell = self.grid.cell_at(canonical_xy);
-        self.hover = Some(Hover {
+        self.plane_hover = Some(Hover {
             cell,
             world_pos: hit,
         });
     }
 
-    /// Latest pick result, or `None` if the cursor is off-window or the
-    /// ray missed the ground plane (looking at the sky).
+    /// Feed the engine's latest hit-ID result into the picker. The View's
+    /// per-frame update typically does
+    /// `picker.set_id_hover(renderer.hit_id_hover())`. Only
+    /// [`HitTarget::TerrainCell`] is consumed (mesh-object hits go through
+    /// a different path); other variants clear the slot.
+    ///
+    /// `world_pos` on the resulting [`Hover`] is the cell centre on the
+    /// picking plane — the ID buffer gives us a cell, not a precise hit
+    /// point. Callers that need an exact world position should consult
+    /// [`Self::plane_hover`] for the ray result instead.
+    pub fn set_id_hover(&mut self, target: Option<HitTarget>) {
+        self.id_hover = target.map(|HitTarget::TerrainCell { cell, .. }| {
+            let centre_canonical: Vec2 = (0..G::CORNERS_PER_CELL)
+                .map(|i| self.grid.corner_xy(cell, i))
+                .fold(Vec2::ZERO, |acc, v| acc + v)
+                / G::CORNERS_PER_CELL as f32;
+            let centre = centre_canonical * self.tile_size;
+            Hover {
+                cell,
+                world_pos: Vec3::new(centre.x, centre.y, self.plane_z),
+            }
+        });
+    }
+
+    /// Latest pick result. Prefers the ID-buffer hover when present
+    /// (correct on slopes / at cliff edges, 1–3 frames of latency) and
+    /// falls back to the plane ray (zero latency, exact only on flat
+    /// ground). Returns `None` if both are clear (cursor off-window or
+    /// looking at the sky with no readback yet).
     pub fn hover(&self) -> Option<Hover> {
-        self.hover
+        self.id_hover.or(self.plane_hover)
+    }
+
+    /// The ray-vs-plane hover specifically — useful when the caller needs
+    /// the exact world hit point regardless of latency, e.g. positioning a
+    /// world-space cursor over flat terrain.
+    pub fn plane_hover(&self) -> Option<Hover> {
+        self.plane_hover
+    }
+
+    /// The ID-buffer hover specifically — useful when the caller wants to
+    /// distinguish "the GPU saw this cell under the cursor" from a plane
+    /// fallback.
+    pub fn id_hover(&self) -> Option<Hover> {
+        self.id_hover
     }
 
     /// Cursor's last known pixel position. `None` between `CursorLeft` and

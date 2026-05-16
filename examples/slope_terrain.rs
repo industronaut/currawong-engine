@@ -200,7 +200,8 @@ impl View for TerrainView {
         pass.set_pipeline(self.material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        self.terrain.draw_solid(pass, &self.solid_instance);
+        self.terrain
+            .draw_solid(pass, renderer, sim.main_zone, &self.solid_instance);
 
         pass.set_pipeline(self.material.transparent_pipeline());
         self.terrain.draw_liquids(pass, &self.liquid_instances);

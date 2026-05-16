@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
+use crate::sim::{ChunkCoord, ZoneId};
+
 use super::environment::ViewEnvironment;
+use super::picking_buffer::HitTarget;
 use super::scene_resources::SceneResources;
 
 /// Owns the window and the wgpu device/queue/surface, plus engine-managed
@@ -69,6 +72,74 @@ impl Renderer {
             blend: None,
             write_mask: wgpu::ColorWrites::empty(),
         })
+    }
+
+    /// `ColorTargetState` for pipelines that *write* to the hit-ID slot —
+    /// terrain in PR 2, opt-in mesh materials in PR 3. R32Uint format,
+    /// write-mask ALL, no blend (integer formats can't be blended).
+    pub fn id_target_writer(&self) -> Option<wgpu::ColorTargetState> {
+        Some(wgpu::ColorTargetState {
+            format: self.id_format(),
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })
+    }
+
+    /// Bind-group layout for the per-draw "ID base" uniform that pipelines
+    /// participating in picking declare alongside their normal bind groups.
+    /// Holds a single `u32`; terrain uses one of these per chunk, written
+    /// to the bound buffer at draw time with the chunk's base hit ID. Pass
+    /// to [`PipelineLayoutDescriptor`](wgpu::PipelineLayoutDescriptor) when
+    /// building any pipeline that writes to the hit-ID attachment via a
+    /// per-draw uniform.
+    pub fn id_base_layout(&self) -> &wgpu::BindGroupLayout {
+        self.scene.id_base_layout()
+    }
+
+    /// Reserve a chunk's worth of hit IDs in the current frame's table.
+    /// Engine renderers (and, eventually, user-side mesh renderers) call
+    /// this once per drawn chunk; the returned `base_id` is written into
+    /// the chunk's per-frame uniform and added to the per-vertex
+    /// chunk-local cell index in the shader so each pixel emits a unique
+    /// frame-scoped hit ID. See [`Self::hit_id_hover`] for the readback
+    /// side.
+    pub fn reserve_terrain_chunk(&self, zone: ZoneId, chunk: ChunkCoord) -> u32 {
+        self.scene.reserve_terrain_chunk(zone, chunk)
+    }
+
+    /// Latest hit target delivered by the readback ring, or `None` if the
+    /// most recent sampled pixel was the no-hit sentinel, no readback has
+    /// landed yet, or the cursor has left the window. `View::update` is
+    /// the typical reader — call it once per frame and feed the result
+    /// into [`TerrainPicker::set_id_hover`](super::TerrainPicker::set_id_hover).
+    pub fn hit_id_hover(&self) -> Option<HitTarget> {
+        self.scene.hit_id_hover()
+    }
+
+    /// Hit-ID texture handle — used by the engine's frame loop for the
+    /// per-frame cursor-pixel `copy_texture_to_buffer`. Not normally needed
+    /// by views.
+    pub(super) fn id_texture(&self) -> &wgpu::Texture {
+        self.scene.id_texture()
+    }
+
+    pub(super) fn reset_frame_id_table(&self) {
+        self.scene.reset_frame_id_table();
+    }
+
+    pub(super) fn snapshot_frame_id_table(&self) -> super::picking_buffer::FrameIdTable {
+        self.scene.snapshot_frame_id_table()
+    }
+
+    pub(super) fn id_readback(&self) -> &super::picking_buffer::IdReadback {
+        self.scene.id_readback()
+    }
+
+    /// Clear the latest hit-id result — runner calls this on `CursorLeft`
+    /// so a stale hover doesn't persist after the input source stops
+    /// updating.
+    pub(super) fn clear_hit_id_hover(&self) {
+        self.scene.id_readback().clear_latest();
     }
 
     /// Hit-ID texture view. Used by the engine's frame loop to attach to the

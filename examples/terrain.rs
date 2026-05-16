@@ -210,9 +210,12 @@ impl View for TerrainView {
         // Re-pick every frame — the cursor may not have moved but the
         // camera might have, which changes which cell the same pixel
         // covers. Run after the camera's aspect ratio is up to date so the
-        // unproject uses the right projection matrix.
+        // unproject uses the right projection matrix. Pull the GPU
+        // ID-buffer result in too; on sloped terrain it disagrees with the
+        // ray-plane fallback and takes precedence inside `hover()`.
         let viewport = Vec2::new(size.width as f32, size.height as f32);
         self.picker.update(&self.camera, viewport);
+        self.picker.set_id_hover(renderer.hit_id_hover());
         let hover_coord = self
             .picker
             .hover()
@@ -228,10 +231,10 @@ impl View for TerrainView {
 
         // Drive the fill overlay off the picker. The highlight Z sits a
         // hair above the tile top so the fill doesn't Z-fight the mesh
-        // beneath it; the ray-vs-plane picker reads the cell's *base*
-        // floor_height, which is the right answer for flat terrain and an
-        // acceptable approximation on hills until we upgrade to a
-        // height-aware march.
+        // beneath it. With #56 PR 2 the picker prefers the GPU ID-buffer
+        // result over its ray-vs-plane fallback, so the cell coordinate is
+        // correct even on slopes; the overlay's Z still reads `floor_height`
+        // directly from the sim so the outline tracks the visible mesh top.
         match hover_coord {
             Some(coord) => {
                 let h = zone.terrain().tile_or_default(coord).floor_height;
@@ -248,7 +251,8 @@ impl View for TerrainView {
         pass.set_pipeline(self.material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        self.terrain.draw_solid(pass, &self.solid_instance);
+        self.terrain
+            .draw_solid(pass, renderer, sim.main_zone, &self.solid_instance);
 
         // Liquids over the top — alpha-blended, depth-test on but no depth
         // write (set in the material).

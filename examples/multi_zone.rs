@@ -539,7 +539,8 @@ impl View for MultiZoneView {
         pass.set_pipeline(self.terrain_material.opaque_pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        self.terrain_cache.draw_solid(pass, terrain_tint);
+        self.terrain_cache
+            .draw_solid(pass, renderer, active, terrain_tint);
         pass.set_pipeline(self.terrain_material.transparent_pipeline());
         self.terrain_cache
             .draw_liquids(pass, &self.liquid_instances);

@@ -17,11 +17,12 @@
 //!
 //! ## Bind groups
 //!
-//! | group | contents                                                |
-//! |-------|---------------------------------------------------------|
-//! | 0     | camera ([`CameraBinding`](super::CameraBinding))        |
-//! | 1     | scene env ([`Renderer::scene_layout`](super::Renderer)) |
-//! | 2     | material instance — tint uniform                        |
+//! | group | contents                                                       |
+//! |-------|----------------------------------------------------------------|
+//! | 0     | camera ([`CameraBinding`](super::CameraBinding))               |
+//! | 1     | scene env ([`Renderer::scene_layout`](super::Renderer))        |
+//! | 2     | material instance — tint uniform                               |
+//! | 3     | hit-ID base ([`Renderer::id_base_layout`](super::Renderer)) — per-chunk u32 written by `TerrainRenderer::draw_solid` each frame |
 //!
 //! ## Wiring
 //!
@@ -33,8 +34,9 @@
 //! draw:    pass.set_pipeline(material.opaque_pipeline());
 //!          pass.set_bind_group(0, camera.bind_group(), &[]);
 //!          pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-//!          // draw_solid binds group 2 (material instance) per draw call
-//!          terrain_renderer.draw_solid(pass, &solid);
+//!          // draw_solid binds groups 2 (material instance) and 3 (per-chunk
+//!          // ID base) per draw call.
+//!          terrain_renderer.draw_solid(pass, renderer, zone, &solid);
 //!          pass.set_pipeline(material.transparent_pipeline());
 //!          terrain_renderer.draw_liquids(pass, &liquid_instances);
 //! ```
@@ -67,36 +69,63 @@ struct Material {
 };
 @group(2) @binding(0) var<uniform> material: Material;
 
+struct IdBase {
+    // First u32 is the per-frame chunk base; the three trailing u32s are
+    // padding out to 16 bytes (wgpu requires uniform buffers to meet
+    // their struct's WGSL size; `vec3<u32>` would force 16-byte alignment
+    // and a 32-byte struct, hence individual u32s instead).
+    base_id: u32,
+    _pad0:   u32,
+    _pad1:   u32,
+    _pad2:   u32,
+};
+@group(3) @binding(0) var<uniform> id_base: IdBase;
+
 struct VsIn {
-    @location(0) pos:    vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) color:  vec4<f32>,
+    @location(0) pos:               vec3<f32>,
+    @location(1) normal:            vec3<f32>,
+    @location(2) color:             vec4<f32>,
+    @location(3) cell_id_in_chunk:  u32,
 };
 
 struct VsOut {
-    @builtin(position) clip:  vec4<f32>,
-    @location(0)       n:     vec3<f32>,
-    @location(1)       color: vec4<f32>,
+    @builtin(position)             clip:    vec4<f32>,
+    @location(0)                   n:       vec3<f32>,
+    @location(1)                   color:   vec4<f32>,
+    // Integer values must be flat-interpolated through vertex→fragment.
+    @location(2) @interpolate(flat) cell_id: u32,
+};
+
+struct FsOut {
+    @location(0) color:   vec4<f32>,
+    // Per-pixel hit ID. The opaque pipeline writes this slot (R32Uint);
+    // the transparent pipeline declares the slot but its write mask is
+    // empty, so the value is discarded — terrain is the only PR-2 writer.
+    @location(1) hit_id:  u32,
 };
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip  = camera.view_proj * vec4<f32>(in.pos, 1.0);
+    out.clip    = camera.view_proj * vec4<f32>(in.pos, 1.0);
     // Terrain has no model matrix — vertex positions and normals are already
     // in world space, so the normal passes through untouched.
-    out.n     = in.normal;
-    out.color = in.color * material.tint;
+    out.n       = in.normal;
+    out.color   = in.color * material.tint;
+    out.cell_id = in.cell_id_in_chunk + id_base.base_id;
     return out;
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FsOut {
     let n          = normalize(in.n);
     let l          = normalize(scene.sun_direction.xyz);
     let n_dot_l    = max(dot(n, l), 0.0);
     let lit        = scene.sun_color.rgb * n_dot_l + scene.ambient.rgb;
-    return vec4<f32>(in.color.rgb * lit, in.color.a);
+    var out: FsOut;
+    out.color  = vec4<f32>(in.color.rgb * lit, in.color.a);
+    out.hit_id = in.cell_id;
+    return out;
 }
 "#;
 
@@ -145,6 +174,7 @@ impl TerrainMaterial {
                 Some(camera_layout),
                 Some(renderer.scene_layout()),
                 Some(&instance_bgl),
+                Some(renderer.id_base_layout()),
             ],
             ..Default::default()
         });
@@ -164,6 +194,15 @@ impl TerrainMaterial {
                 offset: 24,
                 shader_location: 2,
                 format: wgpu::VertexFormat::Float32x4,
+            },
+            // cell_id_in_chunk: u32 — feeds the shader's per-vertex hit-ID
+            // local index. The shader adds the chunk's frame-scoped
+            // `base_id` uniform (group 3) to produce the unique hit ID
+            // written to the R32Uint attachment.
+            wgpu::VertexAttribute {
+                offset: 40,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Uint32,
             },
         ];
         let buffers = [wgpu::VertexBufferLayout {
@@ -216,7 +255,8 @@ impl TerrainMaterial {
         let make_pipeline =
             |label: &'static str,
              blend: wgpu::BlendState,
-             depth_stencil: Option<wgpu::DepthStencilState>| {
+             depth_stencil: Option<wgpu::DepthStencilState>,
+             id_target: Option<wgpu::ColorTargetState>| {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&layout),
@@ -236,9 +276,7 @@ impl TerrainMaterial {
                                 blend: Some(blend),
                                 write_mask: wgpu::ColorWrites::ALL,
                             }),
-                            // Opt out of the hit-ID attachment (#56 PR 1):
-                            // terrain becomes a writer in PR 2.
-                            renderer.id_target_opt_out(),
+                            id_target,
                         ],
                     }),
                     primitive,
@@ -249,11 +287,20 @@ impl TerrainMaterial {
                 })
             };
 
-        let opaque_pipeline = make_pipeline("Terrain opaque pipeline", opaque_blend, depth_opaque);
+        // Opaque terrain *writes* hit IDs (the first writer of the #56 ID
+        // attachment); transparent liquids share the shader but opt out —
+        // alpha-blended IDs make no semantic sense (one pixel = one ID).
+        let opaque_pipeline = make_pipeline(
+            "Terrain opaque pipeline",
+            opaque_blend,
+            depth_opaque,
+            renderer.id_target_writer(),
+        );
         let transparent_pipeline = make_pipeline(
             "Terrain transparent pipeline",
             alpha_blend,
             depth_transparent,
+            renderer.id_target_opt_out(),
         );
 
         Self {

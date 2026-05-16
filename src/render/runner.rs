@@ -51,6 +51,11 @@ struct RunState<V: View> {
     sim: V::Sim,
     clock: SimClock,
     last_redraw: Instant,
+    /// Latest cursor position in physical pixels; `None` while the cursor
+    /// is outside the window. Drives the per-frame hit-ID readback
+    /// (`copy_texture_to_buffer` at this pixel). Tracked independently from
+    /// any view-side picker because the readback is engine-managed.
+    cursor_px: Option<(u32, u32)>,
     #[cfg(feature = "egui")]
     debug_ui: DebugUi,
     #[cfg(feature = "yakui")]
@@ -82,6 +87,7 @@ impl<V: View> ApplicationHandler for Handler<V> {
             sim,
             clock,
             last_redraw: Instant::now(),
+            cursor_px: None,
             #[cfg(feature = "egui")]
             debug_ui,
             #[cfg(feature = "yakui")]
@@ -125,6 +131,19 @@ impl<V: View> ApplicationHandler for Handler<V> {
             WindowEvent::Resized(size) => {
                 state.renderer.resize(size.width, size.height);
                 state.renderer.window.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                // Cursor positions are in physical pixels matching the
+                // swapchain extent; clamp into-bounds and drop sub-pixel
+                // precision so it can be passed to copy_texture_to_buffer.
+                let (w, h) = state.renderer.surface_size();
+                let x = (position.x as i64).clamp(0, w.saturating_sub(1) as i64) as u32;
+                let y = (position.y as i64).clamp(0, h.saturating_sub(1) as i64) as u32;
+                state.cursor_px = Some((x, y));
+            }
+            WindowEvent::CursorLeft { .. } => {
+                state.cursor_px = None;
+                state.renderer.clear_hit_id_hover();
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
@@ -173,6 +192,14 @@ struct Frame {
 }
 
 fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, alpha: f32) {
+    // Drain any hit-ID readbacks whose GPU writes finished since the last
+    // frame. `Poll` is non-blocking — callbacks for not-yet-done buffers
+    // simply don't fire this tick.
+    let _ = state.renderer.device.poll(wgpu::PollType::Poll);
+    // Per-frame indirection table is built up fresh inside main_pass via
+    // engine-side renderers calling Renderer::reserve_terrain_chunk.
+    state.renderer.reset_frame_id_table();
+
     let Some(mut frame) = begin_frame(&mut state.renderer) else {
         return;
     };
@@ -184,6 +211,20 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         &state.renderer,
         &mut frame,
     );
+    // Record a 1×1 cursor-pixel copy into the next free readback slot.
+    // No-ops if the cursor is outside the window or every slot is in
+    // flight; the TerrainPicker's ray-plane path covers the gap. The
+    // matching `schedule_readback` runs after `queue.submit` in
+    // `end_frame` because wgpu requires `map_async` to be called *after*
+    // the submission that writes the staging buffer.
+    if let Some((cx, cy)) = state.cursor_px {
+        state.renderer.id_readback().enqueue_copy(
+            &mut frame.encoder,
+            state.renderer.id_texture(),
+            cx,
+            cy,
+        );
+    }
     // Build the per-frame EngineCtx once and share &mut across both overlay
     // dispatch sites — keeps the construction in one place so new fields on
     // EngineCtx don't have to be threaded through each callback by hand.
@@ -213,6 +254,15 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         &mut frame,
     );
     end_frame(&state.renderer, frame);
+    // After submit, register the map_async on the readback slot we
+    // copied into. Captures a snapshot of this frame's ID table so the
+    // eventual callback resolves the sampled u32 through *this* frame's
+    // mapping even though it fires 1–3 frames later.
+    let table_snapshot = state.renderer.snapshot_frame_id_table();
+    state
+        .renderer
+        .id_readback()
+        .schedule_readback(table_snapshot);
 }
 
 /// Phase 1: acquire the swapchain image and create the frame encoder.
