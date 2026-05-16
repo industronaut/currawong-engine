@@ -272,14 +272,20 @@ impl View for TexturedPbr {
         let cube_yaw = Quat::from_rotation_z(t * 0.4);
 
         self.buckets.begin_frame();
-        for (_, zone) in sim.zones.iter() {
+        for (zone_id, zone) in sim.zones.iter() {
             for (id, obj) in zone.iter() {
                 let Some(&mat) = zone.components().get::<MaterialId>(id) else {
                     continue;
                 };
                 let model = Mat4::from_rotation_translation(obj.rotation * cube_yaw, obj.position);
-                self.buckets
-                    .push(mat, PbrInstanceAttribs::new(model, Vec4::ONE));
+                // Reserve a per-cube hit ID so the GPU readback can resolve
+                // a cursor over any of these cubes back to its sim
+                // `WorldObjectId` (#56 PR 3).
+                let hit_id = renderer.reserve_object(zone_id, id);
+                self.buckets.push(
+                    mat,
+                    PbrInstanceAttribs::new(model, Vec4::ONE).with_hit_id(hit_id),
+                );
             }
         }
         self.buckets.upload(&renderer.queue);

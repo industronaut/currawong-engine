@@ -116,11 +116,23 @@ struct VsIn {
     @location(4) m3: vec4<f32>,
     // Per-instance tint, multiplied with the material's base_color.
     @location(5) tint: vec4<f32>,
+    // Per-instance hit ID, written to the engine's R32Uint attachment by
+    // the fragment shader. 0 = no-hit (matches the attachment's clear
+    // value); non-zero comes from Renderer::reserve_object (#56 PR 3).
+    @location(6) hit_id: u32,
 };
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) tint: vec4<f32>,
+    // Integer attributes can't be linearly interpolated; flat ships one
+    // value per primitive.
+    @location(1) @interpolate(flat) hit_id: u32,
+};
+
+struct FsOut {
+    @location(0) color:  vec4<f32>,
+    @location(1) hit_id: u32,
 };
 
 @vertex
@@ -128,25 +140,34 @@ fn vs_main(in: VsIn) -> VsOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let world = model * vec4<f32>(in.pos, 1.0);
     var out: VsOut;
-    out.clip = camera.view_proj * world;
-    out.tint = in.tint;
+    out.clip   = camera.view_proj * world;
+    out.tint   = in.tint;
+    out.hit_id = in.hit_id;
     return out;
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return material.base_color * in.tint;
+fn fs_main(in: VsOut) -> FsOut {
+    var out: FsOut;
+    out.color  = material.base_color * in.tint;
+    out.hit_id = in.hit_id;
+    return out;
 }
 "#;
 
-/// Per-instance attributes for [`UnlitColoredMaterial`]: model matrix plus a
-/// per-instance tint multiplier (multiplied with the material instance's
-/// `base_color` in the shader).
+/// Per-instance attributes for [`UnlitColoredMaterial`]: model matrix plus
+/// a per-instance tint multiplier (multiplied with the material instance's
+/// `base_color` in the shader) plus a GPU hit ID (#56 PR 3).
 ///
 /// Pack instances of this struct into a `wgpu::Buffer` with `VERTEX` usage,
 /// bind it as vertex buffer slot 1, and the pipeline's baked-in instance
 /// layout will read it directly. Stride is `size_of::<UnlitColoredAttribs>()`
-/// = 80 bytes (Mat4 columns 0/16/32/48, tint 64).
+/// = 84 bytes (Mat4 columns 0/16/32/48, tint 64, hit_id 80).
+///
+/// `hit_id` defaults to `0` (the no-hit sentinel, matching the engine's
+/// hit-ID attachment clear value). Opt in to picking via
+/// [`Self::with_hit_id`] passing an ID returned by
+/// [`Renderer::reserve_object`](super::Renderer::reserve_object).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct UnlitColoredAttribs {
@@ -156,6 +177,9 @@ pub struct UnlitColoredAttribs {
     /// Linear RGBA in `[0, 1]`; multiplied with the material's base colour.
     /// Use `[1.0; 4]` for "no per-instance tint."
     pub tint: [f32; 4],
+    /// GPU hit ID written into the engine's `R32Uint` attachment for every
+    /// pixel this instance covers. `0` = no-hit sentinel.
+    pub hit_id: u32,
 }
 
 impl UnlitColoredAttribs {
@@ -163,7 +187,18 @@ impl UnlitColoredAttribs {
         Self {
             model: model.to_cols_array_2d(),
             tint: tint.to_array(),
+            hit_id: 0,
         }
+    }
+
+    /// Builder: stamp this instance with the GPU hit ID returned by
+    /// [`Renderer::reserve_object`](super::Renderer::reserve_object). All
+    /// pixels the instance covers in the opaque pass carry this ID in the
+    /// hit-ID attachment, so a cursor over any of them resolves back to
+    /// the originating `WorldObjectId`.
+    pub fn with_hit_id(mut self, hit_id: u32) -> Self {
+        self.hit_id = hit_id;
+        self
     }
 }
 
@@ -239,7 +274,7 @@ impl UnlitColoredMaterial {
                             format: wgpu::VertexFormat::Float32x3,
                         }],
                     },
-                    // Slot 1: per-instance Mat4 + tint.
+                    // Slot 1: per-instance Mat4 + tint + hit_id.
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<UnlitColoredAttribs>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
@@ -269,6 +304,10 @@ impl UnlitColoredMaterial {
                                 shader_location: 5,
                                 format: wgpu::VertexFormat::Float32x4,
                             },
+                            // hit_id at offset 80 / location 6 — written to
+                            // the engine's R32Uint attachment by the fragment
+                            // shader (#56 PR 3).
+                            super::u32_id_instance_attribute(80, 6),
                         ],
                     },
                 ],
@@ -283,9 +322,12 @@ impl UnlitColoredMaterial {
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
-                    // Opt out of the hit-ID attachment (#56 PR 1): unlit
-                    // meshes become writers in PR 3.
-                    renderer.id_target_opt_out(),
+                    // Write per-instance hit IDs to the engine's R32Uint
+                    // attachment (#56 PR 3). Instances that don't care
+                    // about picking leave their `hit_id` at the 0 default,
+                    // which matches the attachment's clear value —
+                    // semantically identical to PR 1's opt-out shape.
+                    renderer.id_target_writer(),
                 ],
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -413,10 +455,12 @@ mod tests {
 
     #[test]
     fn attribs_size_matches_layout() {
-        // Pipeline's instance VertexBufferLayout uses offsets 0/16/32/48 for
-        // the Mat4 columns and 64 for the tint, total 80. If this assertion
-        // fails the pipeline's attribute layout is out of sync with the Pod.
-        assert_eq!(std::mem::size_of::<UnlitColoredAttribs>(), 80);
+        // Pipeline's instance VertexBufferLayout uses offsets 0/16/32/48
+        // for the Mat4 columns, 64 for tint, and 80 for hit_id, total 84.
+        // Struct alignment is 4 (largest field alignment among Mat4 (4),
+        // Vec4 (4), u32 (4)), so no tail padding. If this assertion fails
+        // the pipeline's attribute layout is out of sync with the Pod.
+        assert_eq!(std::mem::size_of::<UnlitColoredAttribs>(), 84);
     }
 
     #[test]
@@ -426,5 +470,13 @@ mod tests {
         // Mat4 is column-major; column 3 holds the translation.
         assert_eq!(attribs.model[3], [1.0, 2.0, 3.0, 1.0]);
         assert_eq!(attribs.tint, [0.5, 0.6, 0.7, 1.0]);
+        // Default hit_id is the no-hit sentinel.
+        assert_eq!(attribs.hit_id, 0);
+    }
+
+    #[test]
+    fn with_hit_id_round_trips() {
+        let attribs = UnlitColoredAttribs::new(Mat4::IDENTITY, Vec4::ONE).with_hit_id(42);
+        assert_eq!(attribs.hit_id, 42);
     }
 }

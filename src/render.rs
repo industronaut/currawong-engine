@@ -75,7 +75,7 @@ pub use camera_rig::{OrbitRig, OrbitRigConfig};
 pub use cell_highlight::CellHighlight;
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
 pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
-pub use instance::{InstanceBuckets, mat4_instance_attributes};
+pub use instance::{InstanceBuckets, mat4_instance_attributes, u32_id_instance_attribute};
 pub use live_render_objects::{LiveRenderObject, LiveRenderObjects};
 pub use material::{
     MaterialInstanceRegistry, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial,

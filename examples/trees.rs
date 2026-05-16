@@ -308,6 +308,13 @@ impl View for Demo {
         // Per-frame slot extraction loop. The whole slot-driven mapping
         // (age → height → world matrix; age + seed → tint) lives inside
         // `extract_part`; adding a new slot is local to that function.
+        //
+        // A single GPU hit ID per tree is reserved here (#56 PR 3) and
+        // stamped onto every mesh part of that tree, so a cursor over the
+        // trunk or canopy resolves to the same `WorldObjectId` through
+        // `renderer.hit_id_hover()`. The picker that consumes that hover
+        // isn't wired up in this example — the demonstration is purely
+        // that the writes happen.
         self.buckets.begin_frame();
         for (parent, rid, object) in self.live_objects.iter() {
             let tree = sim
@@ -317,9 +324,12 @@ impl View for Demo {
                 .copied()
                 .unwrap_or_default();
             let template = self.templates.get(rid).expect("declared template");
+            let hit_id = renderer.reserve_object(parent.zone, parent.id);
             for part in template.mesh_parts() {
-                self.buckets
-                    .push(part.mesh, extract_part(&tree, part, object.world_xform));
+                self.buckets.push(
+                    part.mesh,
+                    extract_part(&tree, part, object.world_xform).with_hit_id(hit_id),
+                );
             }
         }
         self.buckets.upload(&renderer.queue);

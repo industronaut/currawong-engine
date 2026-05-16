@@ -1,9 +1,10 @@
-//! GPU hit-ID buffer plumbing (PR 2 of #56).
+//! GPU hit-ID buffer plumbing (#56 PRs 2 + 3).
 //!
 //! Three pieces live here:
 //!
-//! - [`HitTarget`] — what a hit ID resolves to. PR 2 only emits
-//!   [`HitTarget::TerrainCell`]; mesh objects join in PR 3.
+//! - [`HitTarget`] — what a hit ID resolves to. PR 2 added
+//!   [`HitTarget::TerrainCell`]; PR 3 adds [`HitTarget::Object`] for mesh
+//!   objects in the scene.
 //! - [`FrameIdTable`] — the per-frame indirection table. Things that draw
 //!   into the ID attachment ask it for an ID and the table remembers what
 //!   that ID stood for. Lives inside the engine's [`SceneResources`] behind
@@ -27,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use glam::IVec2;
 
-use crate::sim::{CHUNK_SIZE, ChunkCoord, ZoneId};
+use crate::sim::{CHUNK_SIZE, ChunkCoord, WorldObjectId, ZoneId};
 
 /// What a GPU hit ID stands for. The picker resolves a sampled u32 to one
 /// of these (or `None` for the no-hit sentinel `0`) by consulting the
@@ -36,7 +37,13 @@ use crate::sim::{CHUNK_SIZE, ChunkCoord, ZoneId};
 pub enum HitTarget {
     /// A terrain tile within a specific zone.
     TerrainCell { zone: ZoneId, cell: IVec2 },
-    // PR 3 will add Object { zone: ZoneId, id: WorldObjectId } here.
+    /// A mesh object within a specific zone. The `id` may be stale by the
+    /// time the readback lands (the object can be removed between
+    /// rendering frame N and the readback for frame N completing 1–3
+    /// frames later); the natural place to detect that is
+    /// [`Zone::get`](crate::sim::Zone::get), which returns `None` for a
+    /// stale generational key.
+    Object { zone: ZoneId, id: WorldObjectId },
 }
 
 /// One terrain chunk's reservation in a [`FrameIdTable`]. A chunk reserves
@@ -49,29 +56,55 @@ struct TerrainChunkEntry {
     chunk_coord: ChunkCoord,
 }
 
+/// One object's reservation in a [`FrameIdTable`]. Each visible object gets
+/// a single ID — there's no equivalent of terrain's intra-chunk range
+/// because one object writes one ID per pixel it covers.
+#[derive(Clone, Copy, Debug)]
+struct ObjectEntry {
+    hit_id: u32,
+    zone: ZoneId,
+    object_id: WorldObjectId,
+}
+
 /// Cells per chunk — the size of one chunk's reservation in the ID space.
 const CELLS_PER_CHUNK: u32 = CHUNK_SIZE * CHUNK_SIZE;
 
 /// Per-frame indirection from GPU hit IDs back to [`HitTarget`]s.
 ///
-/// Built up during the frame: callers (engine-side terrain/object renderers)
+/// Built up during the frame: callers (engine-side terrain/object renderers,
+/// user code via [`Renderer::reserve_object`](super::Renderer::reserve_object))
 /// reserve IDs as they record draws; the rendered ID buffer holds those IDs
 /// per pixel. When readback completes (1–3 frames later) the captured
 /// snapshot of the table that was current when *that* frame was submitted
 /// is what resolves the sampled u32 — so the table is cloned into each
 /// readback slot rather than mutated in place across frames.
+///
+/// Reservations from both [`Self::reserve_terrain_chunk`] and
+/// [`Self::reserve_object`] share one monotonic ID counter so every reserved
+/// range is disjoint regardless of the order in which the two kinds of
+/// reservation interleave.
 #[derive(Clone, Default)]
 pub struct FrameIdTable {
+    /// Next free hit ID. `0` is the no-hit sentinel (clear value of the ID
+    /// attachment); first reservation returns `1`.
+    next_id: u32,
     terrain_chunks: Vec<TerrainChunkEntry>,
+    objects: Vec<ObjectEntry>,
 }
 
 impl FrameIdTable {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            next_id: 1,
+            terrain_chunks: Vec::new(),
+            objects: Vec::new(),
+        }
     }
 
     pub fn clear(&mut self) {
+        self.next_id = 1;
         self.terrain_chunks.clear();
+        self.objects.clear();
     }
 
     /// Reserve `CELLS_PER_CHUNK` IDs for the given chunk's cells. Returns
@@ -81,17 +114,33 @@ impl FrameIdTable {
     /// Allocations begin at 1; ID 0 is reserved as the no-hit sentinel
     /// (the clear value of the ID attachment).
     pub fn reserve_terrain_chunk(&mut self, zone: ZoneId, chunk_coord: ChunkCoord) -> u32 {
-        let next = self
-            .terrain_chunks
-            .last()
-            .map(|e| e.base_id + CELLS_PER_CHUNK)
-            .unwrap_or(1);
+        let base = self.next_id;
+        self.next_id = self.next_id.saturating_add(CELLS_PER_CHUNK);
         self.terrain_chunks.push(TerrainChunkEntry {
-            base_id: next,
+            base_id: base,
             zone,
             chunk_coord,
         });
-        next
+        base
+    }
+
+    /// Reserve a single hit ID for a mesh object. Returns the ID, which the
+    /// caller writes into the per-instance attributes of any pickable draw
+    /// for that object; the engine's `R32Uint` attachment will hold the ID
+    /// at every pixel the object covers.
+    ///
+    /// All mesh parts of one sim object should share the same hit ID — see
+    /// [`RenderObjectPass::for_each_alive_with_hit_id`](super::RenderObjectPass::for_each_alive_with_hit_id)
+    /// for the engine-driven path that reserves once per parent.
+    pub fn reserve_object(&mut self, zone: ZoneId, object_id: WorldObjectId) -> u32 {
+        let hit_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.objects.push(ObjectEntry {
+            hit_id,
+            zone,
+            object_id,
+        });
+        hit_id
     }
 
     /// Resolve a u32 sampled from the ID buffer. Returns `None` for the
@@ -101,8 +150,14 @@ impl FrameIdTable {
         if id == 0 {
             return None;
         }
+        // Terrain entries are inserted in strictly ascending base_id order
+        // (one monotonic `next_id` allocates both kinds), so we can stop
+        // scanning the moment an entry's base exceeds `id`.
         for entry in &self.terrain_chunks {
-            let local = id.checked_sub(entry.base_id)?;
+            if id < entry.base_id {
+                break;
+            }
+            let local = id - entry.base_id;
             if local < CELLS_PER_CHUNK {
                 let lx = (local % CHUNK_SIZE) as i32;
                 let ly = (local / CHUNK_SIZE) as i32;
@@ -111,6 +166,20 @@ impl FrameIdTable {
                     zone: entry.zone,
                     cell,
                 });
+            }
+        }
+        // Object entries — exact match. Also ascending, but each covers a
+        // single ID so range arithmetic doesn't help; a linear scan over
+        // visible objects is well within the readback callback's budget.
+        for entry in &self.objects {
+            if entry.hit_id == id {
+                return Some(HitTarget::Object {
+                    zone: entry.zone,
+                    id: entry.object_id,
+                });
+            }
+            if entry.hit_id > id {
+                break;
             }
         }
         None
@@ -286,6 +355,10 @@ mod tests {
         ZoneId::from_raw(idx, 0)
     }
 
+    fn object(idx: u32) -> WorldObjectId {
+        WorldObjectId::from_raw(idx, 0)
+    }
+
     #[test]
     fn resolve_no_hit_returns_none() {
         let table = FrameIdTable::new();
@@ -311,6 +384,14 @@ mod tests {
     fn unwrap_cell(target: Option<HitTarget>) -> (ZoneId, IVec2) {
         match target.expect("expected a hit target") {
             HitTarget::TerrainCell { zone, cell } => (zone, cell),
+            HitTarget::Object { .. } => panic!("expected TerrainCell, got Object"),
+        }
+    }
+
+    fn unwrap_object(target: Option<HitTarget>) -> (ZoneId, WorldObjectId) {
+        match target.expect("expected a hit target") {
+            HitTarget::Object { zone, id } => (zone, id),
+            HitTarget::TerrainCell { .. } => panic!("expected Object, got TerrainCell"),
         }
     }
 
@@ -358,10 +439,64 @@ mod tests {
     fn clear_resets_to_empty() {
         let mut table = FrameIdTable::new();
         table.reserve_terrain_chunk(zone(0), ChunkCoord::ZERO);
+        table.reserve_object(zone(0), object(0));
         table.clear();
         assert_eq!(table.resolve(1), None);
         // After clear, the next reservation should restart at 1 again.
         let base = table.reserve_terrain_chunk(zone(0), ChunkCoord::new(5, 5));
         assert_eq!(base, 1);
+    }
+
+    // PR 3 — object reservations.
+
+    #[test]
+    fn object_reservation_resolves_to_zone_and_id() {
+        let mut table = FrameIdTable::new();
+        let id = table.reserve_object(zone(3), object(42));
+        let (z, oid) = unwrap_object(table.resolve(id));
+        assert_eq!(z, zone(3));
+        assert_eq!(oid, object(42));
+    }
+
+    #[test]
+    fn object_reservations_share_counter_with_terrain() {
+        // Terrain takes 256 IDs (1..=256); the object reservation should
+        // land at 257 — proves both kinds use the same monotonic counter so
+        // ranges never overlap.
+        let mut table = FrameIdTable::new();
+        let terrain_base = table.reserve_terrain_chunk(zone(0), ChunkCoord::ZERO);
+        let object_id = table.reserve_object(zone(0), object(7));
+        assert_eq!(terrain_base, 1);
+        assert_eq!(object_id, 1 + CELLS_PER_CHUNK);
+    }
+
+    #[test]
+    fn interleaved_reservations_resolve_to_their_owners() {
+        // Mix terrain and object reservations; verify each ID resolves to
+        // the kind that reserved it.
+        let mut table = FrameIdTable::new();
+        let chunk_a = table.reserve_terrain_chunk(zone(0), ChunkCoord::new(0, 0));
+        let obj_a = table.reserve_object(zone(0), object(11));
+        let chunk_b = table.reserve_terrain_chunk(zone(0), ChunkCoord::new(1, 0));
+        let obj_b = table.reserve_object(zone(1), object(22));
+
+        // Terrain cells from both chunks resolve correctly.
+        let (_, cell) = unwrap_cell(table.resolve(chunk_a));
+        assert_eq!(cell, IVec2::new(0, 0));
+        let (_, cell) = unwrap_cell(table.resolve(chunk_b));
+        assert_eq!(cell, IVec2::new(CHUNK_SIZE as i32, 0));
+
+        // Objects resolve to the right `(zone, id)` pair.
+        let (z, oid) = unwrap_object(table.resolve(obj_a));
+        assert_eq!((z, oid), (zone(0), object(11)));
+        let (z, oid) = unwrap_object(table.resolve(obj_b));
+        assert_eq!((z, oid), (zone(1), object(22)));
+    }
+
+    #[test]
+    fn object_ids_outside_any_reservation_return_none() {
+        let mut table = FrameIdTable::new();
+        let id = table.reserve_object(zone(0), object(0));
+        assert!(table.resolve(id + 1).is_none());
     }
 }

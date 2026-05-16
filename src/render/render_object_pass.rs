@@ -22,6 +22,7 @@ use crate::sim::{WorldObjectRef, Zones};
 
 use super::live_render_objects::LiveRenderObjects;
 use super::render_object::{EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotValues};
+use super::renderer::Renderer;
 use super::visibility::Frustum;
 
 /// Engine helper that drives the per-frame render-object walk. Stateless;
@@ -133,6 +134,82 @@ impl RenderObjectPass {
                 on_emitter(parent, rid, part, world, slots);
             }
         }
+    }
+
+    /// Phase 2 (mesh + emitter), with GPU hit-ID reservation (#56 PR 3).
+    ///
+    /// Same shape as [`Self::for_each_alive`], with one extra step: per
+    /// alive parent, reserve a single hit ID via
+    /// [`Renderer::reserve_object`] and pass it to **both** the mesh and
+    /// emitter callbacks. All mesh parts of one sim object share the same
+    /// hit ID, so a cursor over any of them resolves back to the same
+    /// `WorldObjectId` via the engine's hit-ID readback. Emitters (which
+    /// don't write to the hit-ID attachment in v1) receive the same ID
+    /// for symmetry — view code typically ignores it.
+    ///
+    /// The view's per-instance attribute writer (typically
+    /// [`UnlitColoredAttribs::with_hit_id`](super::UnlitColoredAttribs::with_hit_id)
+    /// or [`PbrInstanceAttribs::with_hit_id`](super::PbrInstanceAttribs::with_hit_id))
+    /// is responsible for stamping the ID onto the draw — this helper
+    /// just allocates and threads it.
+    pub fn for_each_alive_with_hit_id<R, M, MK, E, S>(
+        zones: &Zones,
+        templates: &RenderRegistry<R, M, MK, E, S>,
+        live_objects: &LiveRenderObjects<R>,
+        renderer: &Renderer,
+        mut on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues, u32),
+        mut on_emitter: impl FnMut(WorldObjectRef, R, &EmitterPart<E, S>, Mat4, &SlotValues, u32),
+    ) where
+        R: Copy + Eq + Hash + 'static,
+    {
+        let empty = SlotValues::new();
+        for (parent, rid, object) in live_objects.iter() {
+            let Some(template) = templates.get(rid) else {
+                continue;
+            };
+            let zone = zones
+                .get(parent.zone)
+                .expect("zone alive while proxy lives");
+            let slots = zone
+                .components()
+                .get::<SlotValues>(parent.id)
+                .unwrap_or(&empty);
+            validate_slot_values(template, slots);
+
+            // One ID per parent (not per part) — clicking any part of the
+            // template must resolve to the same `WorldObjectId`.
+            let hit_id = renderer.reserve_object(parent.zone, parent.id);
+
+            for part in template.mesh_parts() {
+                let world = object.world_xform * part.local_transform;
+                on_part(parent, rid, part, world, slots, hit_id);
+            }
+            for part in template.emitter_parts() {
+                let world = object.world_xform * part.local_transform;
+                on_emitter(parent, rid, part, world, slots, hit_id);
+            }
+        }
+    }
+
+    /// Mesh-only variant of [`Self::for_each_alive_with_hit_id`] — the
+    /// convenient default for templates that carry no emitter parts.
+    pub fn for_each_alive_part_with_hit_id<R, M, MK, E, S>(
+        zones: &Zones,
+        templates: &RenderRegistry<R, M, MK, E, S>,
+        live_objects: &LiveRenderObjects<R>,
+        renderer: &Renderer,
+        on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues, u32),
+    ) where
+        R: Copy + Eq + Hash + 'static,
+    {
+        Self::for_each_alive_with_hit_id(
+            zones,
+            templates,
+            live_objects,
+            renderer,
+            on_part,
+            |_, _, _, _, _, _| {},
+        );
     }
 }
 
