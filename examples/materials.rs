@@ -4,13 +4,13 @@
 //! [`UnlitColoredMaterial`] (template — pipeline + bgl) and two instances
 //! ([`MaterialInstanceId::Red`], [`MaterialInstanceId::Gold`]). Each frame the
 //! extract step walks the sim and pushes per-cube
-//! [`UnlitColoredAttribs`] (model matrix + tint) into the bucket keyed by
+//! [`MeshInstanceAttribs`] (model matrix + tint) into the bucket keyed by
 //! the cube's material id. One instanced draw per material instance.
 //!
 //! The three tiers in one place:
 //! - template — `UnlitColoredMaterial` (one)
 //! - instance — `UnlitColoredInstance` x 2 (red, gold)
-//! - per-instance attribs — `UnlitColoredAttribs` packed into instance buffers
+//! - per-instance attribs — `MeshInstanceAttribs` packed into instance buffers
 //!
 //! Controls: Esc to quit.
 
@@ -18,9 +18,9 @@ use std::time::Instant;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry, Renderer,
-    Simulation, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
-    WorldTransform, Zone, Zones, wgpu, winit,
+    Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
+    MeshInstanceAttribs, Renderer, Simulation, UnlitColoredInstance, UnlitColoredMaterial, View,
+    ViewConfig, WorldTransform, Zone, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -123,7 +123,7 @@ struct Materials {
     instances: MaterialInstanceRegistry<UnlitColoredInstance, MaterialInstanceId>,
     cube_vertices: wgpu::Buffer,
     cube_indices: wgpu::Buffer,
-    buckets: InstanceBuckets<MaterialInstanceId, UnlitColoredAttribs>,
+    buckets: InstanceBuckets<MaterialInstanceId, MeshInstanceAttribs>,
     started: Instant,
 }
 
@@ -165,7 +165,7 @@ impl View for Materials {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let mut buckets = InstanceBuckets::<MaterialInstanceId, UnlitColoredAttribs>::new(
+        let mut buckets = InstanceBuckets::<MaterialInstanceId, MeshInstanceAttribs>::new(
             "material instance attribs",
             MAX_INSTANCES,
         );
@@ -217,7 +217,7 @@ impl View for Materials {
                     .unwrap_or(Vec4::ONE);
                 let model = Mat4::from_rotation_translation(obj.rotation, obj.position);
                 self.buckets
-                    .push(mid, UnlitColoredAttribs::new(model, tint));
+                    .push(mid, MeshInstanceAttribs::new(model, tint));
             }
         }
         self.buckets.upload(&renderer.queue);

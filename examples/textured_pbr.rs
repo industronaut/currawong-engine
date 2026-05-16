@@ -31,7 +31,7 @@ use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
-    PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
+    MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
     Renderer, SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, TextureColorSpace,
     View, ViewConfig, ViewEnvironment, WorldTransform, Zone, ZoneId, Zones, sun_direction_for,
     wgpu, winit,
@@ -114,7 +114,7 @@ struct TexturedPbr {
     cube_vertices: wgpu::Buffer,
     cube_indices: wgpu::Buffer,
     cube_index_count: u32,
-    buckets: InstanceBuckets<MaterialId, PbrInstanceAttribs>,
+    buckets: InstanceBuckets<MaterialId, MeshInstanceAttribs>,
     started: Instant,
     #[cfg(feature = "egui")]
     frame_samples: VecDeque<f32>,
@@ -190,7 +190,7 @@ impl View for TexturedPbr {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let mut buckets = InstanceBuckets::<MaterialId, PbrInstanceAttribs>::new(
+        let mut buckets = InstanceBuckets::<MaterialId, MeshInstanceAttribs>::new(
             "pbr instance attribs",
             MAX_INSTANCES,
         );
@@ -284,7 +284,7 @@ impl View for TexturedPbr {
                 let hit_id = renderer.reserve_object(zone_id, id);
                 self.buckets.push(
                     mat,
-                    PbrInstanceAttribs::new(model, Vec4::ONE).with_hit_id(hit_id),
+                    MeshInstanceAttribs::new(model, Vec4::ONE).with_hit_id(hit_id),
                 );
             }
         }

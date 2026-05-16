@@ -18,7 +18,7 @@
 //!   (PR 2). Hovering over the ground highlights the tile and shows its
 //!   coordinate in the title bar.
 //! - Trees are pickable through per-instance hit-ID writes via
-//!   [`UnlitColoredAttribs::with_hit_id`] (PR 3). Hovering over any part
+//!   [`MeshInstanceAttribs::with_hit_id`] (PR 3). Hovering over any part
 //!   of a tree (trunk or canopy) highlights *that whole tree* and shows
 //!   its `WorldObjectId` + current age in the title bar — clicking the
 //!   trunk or the canopy resolves to the same sim object.
@@ -52,11 +52,11 @@ use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, CellHighlight, EngineCtx, FlatTopsMesher, Frustum, HitTarget,
-    InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshPart, OrbitRig,
-    RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKey, SlotKind,
-    SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker, TerrainRenderer,
-    TileCoord, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
-    WorldObjectId, WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
+    InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshInstanceAttribs, MeshPart,
+    OrbitRig, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKey,
+    SlotKind, SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker, TerrainRenderer,
+    TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig, WorldObjectId,
+    WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -216,7 +216,7 @@ struct Demo {
     templates: Templates,
     live_objects: LiveRenderObjects<RenderId>,
     meshes: HashMap<MeshHandle, GpuMesh>,
-    buckets: InstanceBuckets<MeshHandle, UnlitColoredAttribs>,
+    buckets: InstanceBuckets<MeshHandle, MeshInstanceAttribs>,
     terrain_material: TerrainMaterial,
     terrain_solid: TerrainMaterialInstance,
     terrain: TerrainRenderer,
@@ -663,7 +663,7 @@ fn extract_part(
     tree: &Tree,
     part: &MeshPart<MeshHandle, MatKey>,
     root: Mat4,
-) -> UnlitColoredAttribs {
+) -> MeshInstanceAttribs {
     let maturity = smoothstep((tree.age_ticks as f32 / MATURE_AGE as f32).clamp(0.0, 1.0));
     // `height` slot: 0.3 → 3.0 along Z, applied between root and part transform
     // so the trunk's XY radius stays put while the tree grows upward.
@@ -689,7 +689,7 @@ fn extract_part(
         MatKey::Leaf => tint,
         MatKey::Bark => Vec4::ONE,
     };
-    UnlitColoredAttribs::new(world, part_tint)
+    MeshInstanceAttribs::new(world, part_tint)
 }
 
 fn smoothstep(t: f32) -> f32 {

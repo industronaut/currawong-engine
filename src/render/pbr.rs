@@ -16,19 +16,19 @@
 //! | slot | contents                                                            |
 //! |------|---------------------------------------------------------------------|
 //! | 0    | [`PosNormalUv`] per vertex (32 B)                                   |
-//! | 1    | [`PbrInstanceAttribs`] per instance — model matrix + tint + hit ID (84) |
+//! | 1    | [`MeshInstanceAttribs`] per instance — model matrix + tint + hit ID (84) |
 //!
 //! ## Picking (#56 PR 3)
 //!
-//! Every draw writes the per-instance [`PbrInstanceAttribs::hit_id`] to the
+//! Every draw writes the per-instance [`MeshInstanceAttribs::hit_id`] to the
 //! engine's `R32Uint` hit-ID attachment, flat-interpolated through
 //! `@location(1)`. `hit_id == 0` is the no-hit sentinel and matches the
 //! attachment's clear value, so instances that don't care about picking
-//! can leave it at the `0` default from [`PbrInstanceAttribs::new`].
+//! can leave it at the `0` default from [`MeshInstanceAttribs::new`].
 //! Callers that do want a clickable mesh call
 //! [`Renderer::reserve_object`](super::Renderer::reserve_object) once per
 //! parent and feed the result through
-//! [`PbrInstanceAttribs::with_hit_id`].
+//! [`MeshInstanceAttribs::with_hit_id`].
 //!
 //! ## What's not in v1
 //!
@@ -43,8 +43,9 @@
 //!   occlusion. Multi-light support means a different scene-uniform shape.
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec4};
+use glam::Vec4;
 
+use super::material::{MeshInstanceAttribs, MeshMaterial};
 use super::renderer::Renderer;
 use super::texture::{SamplerKind, SamplerRegistry, Texture};
 use super::vertex::PosNormalUv;
@@ -194,45 +195,6 @@ fn fs_main(in: VsOut) -> FsOut {
 }
 "#;
 
-/// Per-instance attribs for [`PbrMaterial`]: model matrix, tint multiplier,
-/// and GPU hit ID (#56 PR 3). Identical shape to
-/// [`UnlitColoredAttribs`](super::UnlitColoredAttribs), kept as a separate
-/// type so each material owns its own layout contract.
-///
-/// `hit_id` is written to the engine's `R32Uint` hit-ID attachment for
-/// every pixel the instance covers. `0` is the no-hit sentinel and matches
-/// the attachment's clear value, so the default constructor leaves it at
-/// `0` (instance is drawn but contributes nothing to picking). Opt in via
-/// [`Self::with_hit_id`], passing an ID returned by
-/// [`Renderer::reserve_object`](super::Renderer::reserve_object).
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, Debug)]
-pub struct PbrInstanceAttribs {
-    pub model: [[f32; 4]; 4],
-    pub tint: [f32; 4],
-    pub hit_id: u32,
-}
-
-impl PbrInstanceAttribs {
-    pub fn new(model: Mat4, tint: Vec4) -> Self {
-        Self {
-            model: model.to_cols_array_2d(),
-            tint: tint.to_array(),
-            hit_id: 0,
-        }
-    }
-
-    /// Builder: stamp this instance with the GPU hit ID returned by
-    /// [`Renderer::reserve_object`](super::Renderer::reserve_object). All
-    /// pixels the instance covers in the opaque pass will carry this ID in
-    /// the hit-ID attachment, so a cursor over any of them resolves back
-    /// to the originating `WorldObjectId`.
-    pub fn with_hit_id(mut self, hit_id: u32) -> Self {
-        self.hit_id = hit_id;
-        self
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct PbrMaterialUniform {
@@ -316,21 +278,9 @@ impl PbrMaterial {
         });
 
         let pos_normal_uv_attrs = PosNormalUv::attributes(0);
-        let mat4_attrs = super::mat4_instance_attributes(3);
-        let instance_attrs = [
-            mat4_attrs[0],
-            mat4_attrs[1],
-            mat4_attrs[2],
-            mat4_attrs[3],
-            wgpu::VertexAttribute {
-                offset: 64,
-                shader_location: 7,
-                format: wgpu::VertexFormat::Float32x4,
-            },
-            // hit_id at offset 80, location 8 — the per-instance counterpart
-            // to the per-vertex cell_id terrain already writes (#56 PR 3).
-            super::u32_id_instance_attribute(80, 8),
-        ];
+        // PosNormalUv consumes per-vertex locations 0..3; instance attribs
+        // start at @location(3) (four mat4 columns, tint, hit_id → 3..9).
+        let instance_attrs = MeshInstanceAttribs::vertex_attributes(3);
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Pbr pipeline"),
@@ -346,7 +296,7 @@ impl PbrMaterial {
                         attributes: &pos_normal_uv_attrs,
                     },
                     wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<PbrInstanceAttribs>() as u64,
+                        array_stride: std::mem::size_of::<MeshInstanceAttribs>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &instance_attrs,
                     },
@@ -441,6 +391,14 @@ impl PbrMaterial {
     }
 }
 
+impl MeshMaterial for PbrMaterial {
+    type Instance = PbrMaterialInstance;
+
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline()
+    }
+}
+
 /// A live PBR material instance — uniform buffer (factors) + bind group
 /// holding the albedo texture, sampler, and uniform. Bind as `@group(2)`
 /// when drawing through the material's pipeline.
@@ -476,24 +434,6 @@ impl PbrMaterialInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn attribs_size_matches_layout() {
-        // Pipeline reads model at offsets 0/16/32/48, tint at 64, and
-        // hit_id at 80; total 84. Struct alignment is 4 (largest field
-        // alignment among Mat4 (4), Vec4 (4), u32 (4)), so no tail padding.
-        // If this fails the pipeline's instance layout is out of sync with
-        // the Pod.
-        assert_eq!(std::mem::size_of::<PbrInstanceAttribs>(), 84);
-    }
-
-    #[test]
-    fn with_hit_id_round_trips() {
-        let attribs = PbrInstanceAttribs::new(Mat4::IDENTITY, Vec4::ONE).with_hit_id(7);
-        assert_eq!(attribs.hit_id, 7);
-        // Default is 0 (no-hit sentinel).
-        assert_eq!(PbrInstanceAttribs::new(Mat4::IDENTITY, Vec4::ONE).hit_id, 0);
-    }
 
     #[test]
     fn material_uniform_is_std140_safe() {

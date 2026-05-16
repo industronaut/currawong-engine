@@ -148,8 +148,7 @@ impl RenderObjectPass {
     /// for symmetry — view code typically ignores it.
     ///
     /// The view's per-instance attribute writer (typically
-    /// [`UnlitColoredAttribs::with_hit_id`](super::UnlitColoredAttribs::with_hit_id)
-    /// or [`PbrInstanceAttribs::with_hit_id`](super::PbrInstanceAttribs::with_hit_id))
+    /// [`MeshInstanceAttribs::with_hit_id`](super::MeshInstanceAttribs::with_hit_id))
     /// is responsible for stamping the ID onto the draw — this helper
     /// just allocates and threads it.
     pub fn for_each_alive_with_hit_id<R, M, MK, E, S>(

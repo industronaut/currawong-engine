@@ -78,10 +78,11 @@ pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
 pub use instance::{InstanceBuckets, mat4_instance_attributes, u32_id_instance_attribute};
 pub use live_render_objects::{LiveRenderObject, LiveRenderObjects};
 pub use material::{
-    MaterialInstanceRegistry, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial,
+    MaterialInstanceRegistry, MeshInstanceAttribs, MeshMaterial, UnlitColoredInstance,
+    UnlitColoredMaterial,
 };
 pub use mesh_primitives::PrimitiveMesh;
-pub use pbr::{PbrInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
+pub use pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use picking::{Hover, Ray, TerrainPicker};
 pub use picking_buffer::{FrameIdTable, HitTarget};
 pub use render_object::{

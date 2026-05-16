@@ -4,18 +4,17 @@
 //!
 //! - **Material template** — a concrete Rust struct per material kind, owning
 //!   the compiled pipeline + bind-group layout for the per-material bind
-//!   group. Currently the only template is [`UnlitColoredMaterial`].
+//!   group. Today: [`UnlitColoredMaterial`] (this file) and
+//!   [`PbrMaterial`](super::PbrMaterial). Both implement the [`MeshMaterial`]
+//!   trait — the shared structural shape.
 //! - **Material instance** — a bind group + uniform buffer bound to a
 //!   template, holding concrete uniform values. Many sim objects share one
 //!   instance ("red metal," "gold trim"). Stored in a
 //!   [`MaterialInstanceRegistry`].
 //! - **Per-instance attribs** — `repr(C)` `Pod` struct packed into a vertex
-//!   buffer with `step_mode = Instance`; varies per drawn copy. For
-//!   `UnlitColored` this is [`UnlitColoredAttribs`] (model matrix + tint).
-//!
-//! The base abstraction is deliberately thin — no `Material` trait yet.
-//! Materials share patterns (template + instance + attribs) but not an
-//! interface, until we have a second material that justifies one.
+//!   buffer with `step_mode = Instance`; varies per drawn copy. Both mesh
+//!   materials read the same [`MeshInstanceAttribs`] layout (84 B: model
+//!   matrix + tint + GPU hit ID).
 //!
 //! ## Wiring `UnlitColoredMaterial`
 //!
@@ -27,7 +26,7 @@
 //!         pass.set_bind_group(0, camera.bind_group(), &[]);
 //!         pass.set_bind_group(1, red.bind_group(), &[]);
 //!         pass.set_vertex_buffer(0, mesh.vertices.slice(..));  // pos: vec3
-//!         pass.set_vertex_buffer(1, instance_buf.slice(..));   // UnlitColoredAttribs
+//!         pass.set_vertex_buffer(1, instance_buf.slice(..));   // MeshInstanceAttribs
 //!         pass.draw_indexed(..., 0..count);
 //! ```
 
@@ -94,6 +93,124 @@ where
     }
 }
 
+// --- MeshMaterial: shared trait + per-instance attribs --------------------
+
+/// Per-instance attributes shared by every mesh material (today
+/// [`UnlitColoredMaterial`] and [`PbrMaterial`](super::PbrMaterial)). Pack
+/// instances of this struct into a `wgpu::Buffer` with `VERTEX` usage, bind
+/// it as vertex buffer slot 1, and the material's pipeline reads it directly.
+///
+/// Layout (84 B total, alignment 4 — no tail padding):
+/// - bytes 0..64 — model matrix as four column-major `vec4`s
+/// - bytes 64..80 — per-instance tint (linear RGBA, multiplied with material
+///   colour in the shader)
+/// - bytes 80..84 — GPU hit ID (`0` = no-hit sentinel, matching the engine's
+///   `R32Uint` attachment clear value)
+///
+/// New mesh materials should consume this layout — declaring their own would
+/// fragment the per-instance pipeline plumbing without buying anything.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+pub struct MeshInstanceAttribs {
+    /// `Mat4` as four column-major `vec4`s; layout matches
+    /// [`mat4_instance_attributes`](super::mat4_instance_attributes).
+    pub model: [[f32; 4]; 4],
+    /// Linear RGBA in `[0, 1]`; multiplied with the material's base / albedo
+    /// colour. Use `[1.0; 4]` for "no per-instance tint."
+    pub tint: [f32; 4],
+    /// GPU hit ID stamped into the engine's `R32Uint` attachment for every
+    /// pixel this instance covers. `0` = no-hit sentinel. Opt in to picking
+    /// via [`Self::with_hit_id`], passing an ID returned by
+    /// [`Renderer::reserve_object`](super::Renderer::reserve_object).
+    pub hit_id: u32,
+}
+
+impl MeshInstanceAttribs {
+    pub fn new(model: Mat4, tint: Vec4) -> Self {
+        Self {
+            model: model.to_cols_array_2d(),
+            tint: tint.to_array(),
+            hit_id: 0,
+        }
+    }
+
+    /// Builder: stamp this instance with a GPU hit ID returned by
+    /// [`Renderer::reserve_object`](super::Renderer::reserve_object). Every
+    /// pixel the instance covers in the opaque pass carries this ID in the
+    /// hit-ID attachment, so a cursor over any of them resolves back to the
+    /// originating `WorldObjectId`.
+    pub fn with_hit_id(mut self, hit_id: u32) -> Self {
+        self.hit_id = hit_id;
+        self
+    }
+
+    /// Vertex attributes for a buffer of `MeshInstanceAttribs` consumed
+    /// per-instance. `start_location` is the first `@location(N)` the vertex
+    /// shader reserves; six attributes are claimed (four mat4 columns, tint,
+    /// hit_id) at locations `start_location..start_location + 6`.
+    ///
+    /// Pair with a `wgpu::VertexBufferLayout` of stride
+    /// `size_of::<MeshInstanceAttribs>()` and `step_mode = Instance`.
+    pub const fn vertex_attributes(start_location: u32) -> [wgpu::VertexAttribute; 6] {
+        [
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: start_location,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 16,
+                shader_location: start_location + 1,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 32,
+                shader_location: start_location + 2,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 48,
+                shader_location: start_location + 3,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 64,
+                shader_location: start_location + 4,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 80,
+                shader_location: start_location + 5,
+                format: wgpu::VertexFormat::Uint32,
+            },
+        ]
+    }
+}
+
+/// Common shape of every mesh-material template — the structural pattern
+/// behind [`UnlitColoredMaterial`] and [`PbrMaterial`](super::PbrMaterial).
+///
+/// The contract:
+/// - The pipeline reads camera at `@group(0)` and the material-instance bind
+///   group at the material's chosen index (per-kind; PBR adds the scene
+///   environment in between).
+/// - Vertex buffer slot 1 carries [`MeshInstanceAttribs`].
+/// - The fragment shader writes per-instance `hit_id` to the engine's
+///   `R32Uint` hit-ID attachment.
+///
+/// The trait is deliberately thin today (one accessor + the
+/// [`Instance`](Self::Instance) associated type) — generic draw helpers will
+/// land here when a call site actually needs them.
+pub trait MeshMaterial {
+    /// Concrete material-instance type produced by this template. Each
+    /// material kind owns its own instance shape (uniform layout, sampler /
+    /// texture bindings) — the trait just names it.
+    type Instance;
+
+    /// The compiled render pipeline. Bind via `pass.set_pipeline`.
+    fn pipeline(&self) -> &wgpu::RenderPipeline;
+}
+
 // --- UnlitColored: the first concrete material ----------------------------
 
 const UNLIT_COLORED_SHADER: &str = r#"
@@ -155,53 +272,6 @@ fn fs_main(in: VsOut) -> FsOut {
 }
 "#;
 
-/// Per-instance attributes for [`UnlitColoredMaterial`]: model matrix plus
-/// a per-instance tint multiplier (multiplied with the material instance's
-/// `base_color` in the shader) plus a GPU hit ID (#56 PR 3).
-///
-/// Pack instances of this struct into a `wgpu::Buffer` with `VERTEX` usage,
-/// bind it as vertex buffer slot 1, and the pipeline's baked-in instance
-/// layout will read it directly. Stride is `size_of::<UnlitColoredAttribs>()`
-/// = 84 bytes (Mat4 columns 0/16/32/48, tint 64, hit_id 80).
-///
-/// `hit_id` defaults to `0` (the no-hit sentinel, matching the engine's
-/// hit-ID attachment clear value). Opt in to picking via
-/// [`Self::with_hit_id`] passing an ID returned by
-/// [`Renderer::reserve_object`](super::Renderer::reserve_object).
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, Debug)]
-pub struct UnlitColoredAttribs {
-    /// `Mat4` as four column-major vec4s; layout matches
-    /// [`mat4_instance_attributes`](super::mat4_instance_attributes).
-    pub model: [[f32; 4]; 4],
-    /// Linear RGBA in `[0, 1]`; multiplied with the material's base colour.
-    /// Use `[1.0; 4]` for "no per-instance tint."
-    pub tint: [f32; 4],
-    /// GPU hit ID written into the engine's `R32Uint` attachment for every
-    /// pixel this instance covers. `0` = no-hit sentinel.
-    pub hit_id: u32,
-}
-
-impl UnlitColoredAttribs {
-    pub fn new(model: Mat4, tint: Vec4) -> Self {
-        Self {
-            model: model.to_cols_array_2d(),
-            tint: tint.to_array(),
-            hit_id: 0,
-        }
-    }
-
-    /// Builder: stamp this instance with the GPU hit ID returned by
-    /// [`Renderer::reserve_object`](super::Renderer::reserve_object). All
-    /// pixels the instance covers in the opaque pass carry this ID in the
-    /// hit-ID attachment, so a cursor over any of them resolves back to
-    /// the originating `WorldObjectId`.
-    pub fn with_hit_id(mut self, hit_id: u32) -> Self {
-        self.hit_id = hit_id;
-        self
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct UnlitColoredUniform {
@@ -217,7 +287,7 @@ struct UnlitColoredUniform {
 ///   [`CameraBinding`](super::CameraBinding))
 /// - `@group(1)` — material uniform (`base_color: vec4<f32>`)
 /// - vertex buffer slot 0 — `position: vec3<f32>` per vertex
-/// - vertex buffer slot 1 — [`UnlitColoredAttribs`] per instance
+/// - vertex buffer slot 1 — [`MeshInstanceAttribs`] per instance
 ///
 /// Auto-adapts to the View's depth choice via
 /// [`Renderer::depth_format`]: includes depth-test state when the renderer
@@ -256,6 +326,7 @@ impl UnlitColoredMaterial {
             ..Default::default()
         });
 
+        let instance_attrs = MeshInstanceAttribs::vertex_attributes(1);
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("UnlitColored pipeline"),
             layout: Some(&layout),
@@ -276,39 +347,9 @@ impl UnlitColoredMaterial {
                     },
                     // Slot 1: per-instance Mat4 + tint + hit_id.
                     wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<UnlitColoredAttribs>() as u64,
+                        array_stride: std::mem::size_of::<MeshInstanceAttribs>() as u64,
                         step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                offset: 0,
-                                shader_location: 1,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: 16,
-                                shader_location: 2,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: 32,
-                                shader_location: 3,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: 48,
-                                shader_location: 4,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: 64,
-                                shader_location: 5,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
-                            // hit_id at offset 80 / location 6 — written to
-                            // the engine's R32Uint attachment by the fragment
-                            // shader (#56 PR 3).
-                            super::u32_id_instance_attribute(80, 6),
-                        ],
+                        attributes: &instance_attrs,
                     },
                 ],
             },
@@ -382,6 +423,14 @@ impl UnlitColoredMaterial {
                 }],
             });
         UnlitColoredInstance { buffer, bind_group }
+    }
+}
+
+impl MeshMaterial for UnlitColoredMaterial {
+    type Instance = UnlitColoredInstance;
+
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline()
     }
 }
 
@@ -459,14 +508,15 @@ mod tests {
         // for the Mat4 columns, 64 for tint, and 80 for hit_id, total 84.
         // Struct alignment is 4 (largest field alignment among Mat4 (4),
         // Vec4 (4), u32 (4)), so no tail padding. If this assertion fails
-        // the pipeline's attribute layout is out of sync with the Pod.
-        assert_eq!(std::mem::size_of::<UnlitColoredAttribs>(), 84);
+        // every mesh-material pipeline that consumes MeshInstanceAttribs is
+        // out of sync with the Pod.
+        assert_eq!(std::mem::size_of::<MeshInstanceAttribs>(), 84);
     }
 
     #[test]
     fn attribs_new_round_trips() {
         let m = Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0));
-        let attribs = UnlitColoredAttribs::new(m, Vec4::new(0.5, 0.6, 0.7, 1.0));
+        let attribs = MeshInstanceAttribs::new(m, Vec4::new(0.5, 0.6, 0.7, 1.0));
         // Mat4 is column-major; column 3 holds the translation.
         assert_eq!(attribs.model[3], [1.0, 2.0, 3.0, 1.0]);
         assert_eq!(attribs.tint, [0.5, 0.6, 0.7, 1.0]);
@@ -476,7 +526,19 @@ mod tests {
 
     #[test]
     fn with_hit_id_round_trips() {
-        let attribs = UnlitColoredAttribs::new(Mat4::IDENTITY, Vec4::ONE).with_hit_id(42);
+        let attribs = MeshInstanceAttribs::new(Mat4::IDENTITY, Vec4::ONE).with_hit_id(42);
         assert_eq!(attribs.hit_id, 42);
+    }
+
+    #[test]
+    fn vertex_attributes_match_pod_layout() {
+        // Pin offsets/locations the pipeline depends on. If MeshInstanceAttribs
+        // grows a field, this must change in lockstep.
+        let attrs = MeshInstanceAttribs::vertex_attributes(1);
+        let offsets: Vec<u64> = attrs.iter().map(|a| a.offset).collect();
+        assert_eq!(offsets, vec![0, 16, 32, 48, 64, 80]);
+        let locations: Vec<u32> = attrs.iter().map(|a| a.shader_location).collect();
+        assert_eq!(locations, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(attrs[5].format, wgpu::VertexFormat::Uint32);
     }
 }
