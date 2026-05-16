@@ -9,7 +9,9 @@
 //! Per-instance hit IDs feed [`Renderer::hit_id_hover`]: the hovered object
 //! gets a warm-gold tint, and left-clicking a tree toggles a [`Designated`]
 //! component on it. Every designated tree gets a small red downward-pointing
-//! cone floating above its apex.
+//! cone floating above its apex, and every [`Carrying`] pawn gets a brown
+//! log riding on their shoulders (rotates with the pawn for free, since
+//! the log's model matrix is `pawn_model * log_local`).
 
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
@@ -26,7 +28,7 @@ use currawong::{
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use crate::sim::{Designated, Game, HEIGHT_UNIT, Move, RenderId, TILE_SIZE};
+use crate::sim::{Carrying, Designated, Game, HEIGHT_UNIT, Move, RenderId, TILE_SIZE};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MAX_INSTANCES_PER_TEMPLATE: u32 = 64;
@@ -53,6 +55,9 @@ const IDLE_BOB_AMPLITUDE: f32 = 0.035;
 /// Idle-bob frequency in Hz. Slow enough to feel like a breath rather
 /// than a hop; wall-clock driven so paused pawns still breathe.
 const IDLE_BOB_HZ: f32 = 1.4;
+/// Upper bound on simultaneously-carried logs (= number of pawns in
+/// flight to the stockpile). Sized for the log instance buffer.
+const MAX_LOGS: u32 = 32;
 
 // --- Per-template GPU resources -----------------------------------------
 
@@ -144,6 +149,14 @@ pub struct LumberCampView {
     marker_template: MeshTemplate,
     marker_buffer: wgpu::Buffer,
     marker_scratch: Vec<MeshInstanceAttribs>,
+
+    /// Log template (small wood-brown cylinder) drawn across the shoulders
+    /// of every pawn with a `Carrying` component. Pushed inline during the
+    /// main pawn-render walk so the log inherits the pawn's interpolated
+    /// position + facing for free.
+    log_template: MeshTemplate,
+    log_buffer: wgpu::Buffer,
+    log_scratch: Vec<MeshInstanceAttribs>,
 
     /// Pawn positions captured at the previous tick boundary. With
     /// [`pawn_curr`](Self::pawn_curr) and the current tick's `alpha`, the
@@ -297,6 +310,30 @@ impl View for LumberCampView {
             mapped_at_creation: false,
         });
 
+        // Carried log: short cylinder oriented horizontal in the pawn's
+        // local frame at render time, riding on the pawn's model matrix.
+        // Brown so it reads as wood against the body's skin tone.
+        let log_mesh = PrimitiveMesh::cylinder(0.07, 0.6, 12, true);
+        let log_template = MeshTemplate::new(
+            renderer,
+            &material,
+            &samplers,
+            &albedo,
+            &log_mesh,
+            TemplateParams {
+                label: "lumber-camp carried log",
+                albedo_factor: Vec4::new(0.42, 0.27, 0.16, 1.0), // wood brown
+                metallic: 0.0,
+                roughness: 0.85,
+            },
+        );
+        let log_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lumber-camp log instances"),
+            size: u64::from(MAX_LOGS) * std::mem::size_of::<MeshInstanceAttribs>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             camera,
             camera_binding,
@@ -311,6 +348,9 @@ impl View for LumberCampView {
             marker_template,
             marker_buffer,
             marker_scratch: Vec::with_capacity(MAX_MARKERS as usize),
+            log_template,
+            log_buffer,
+            log_scratch: Vec::with_capacity(MAX_LOGS as usize),
             pawn_prev: HashMap::new(),
             pawn_curr: HashMap::new(),
             last_seen_tick: 0,
@@ -399,9 +439,16 @@ impl View for LumberCampView {
         // Pawn positions lerp between the two most recent tick-boundary
         // snapshots using `alpha`; idle pawns get a wall-clock sin-bob on
         // top of that. Other objects don't move, so they draw from the live
-        // sim transform.
+        // sim transform. Carrying pawns also push a log instance whose
+        // model matrix is `pawn_model * log_local` — log inherits position,
+        // facing, and any future per-pawn animation for free.
         let bob_phase = self.started.elapsed().as_secs_f32() * IDLE_BOB_HZ * TAU;
+        let log_local = Mat4::from_rotation_translation(
+            Quat::from_rotation_x(PI / 2.0),
+            Vec3::new(0.0, 0.0, 0.95),
+        );
         self.buckets.begin_frame();
+        self.log_scratch.clear();
         for (zone_id, zone) in sim.zones.iter() {
             for (id, transform) in zone.iter() {
                 let Some(&render_id) = zone.components().get::<RenderId>(id) else {
@@ -437,9 +484,25 @@ impl View for LumberCampView {
                     render_id,
                     MeshInstanceAttribs::new(model, tint).with_hit_id(hit_id),
                 );
+
+                if render_id == RenderId::Pawn
+                    && zone.components().get::<Carrying>(id).is_some()
+                    && self.log_scratch.len() < MAX_LOGS as usize
+                {
+                    let log_model = model * log_local;
+                    self.log_scratch
+                        .push(MeshInstanceAttribs::new(log_model, Vec4::ONE));
+                }
             }
         }
         self.buckets.upload(&renderer.queue);
+        if !self.log_scratch.is_empty() {
+            renderer.queue.write_buffer(
+                &self.log_buffer,
+                0,
+                bytemuck::cast_slice(&self.log_scratch),
+            );
+        }
 
         // Terrain first so opaque ground is in the depth buffer before meshes
         // draw on top of it. Same camera + scene env bindings serve both.
@@ -497,8 +560,9 @@ impl View for LumberCampView {
             pass.draw_indexed(0..template.index_count, 0, 0..count);
         }
 
-        // Markers last — same pipeline, swap to the marker template's mesh
-        // and material, draw the per-frame scratch range.
+        // Markers and logs — same pipeline as the main meshes, just swap
+        // the template's mesh + material bind group and draw the per-frame
+        // scratch range.
         if !self.marker_scratch.is_empty() {
             pass.set_bind_group(2, self.marker_template.material.bind_group(), &[]);
             pass.set_vertex_buffer(0, self.marker_template.vertices.slice(..));
@@ -511,6 +575,20 @@ impl View for LumberCampView {
                 0..self.marker_template.index_count,
                 0,
                 0..self.marker_scratch.len() as u32,
+            );
+        }
+        if !self.log_scratch.is_empty() {
+            pass.set_bind_group(2, self.log_template.material.bind_group(), &[]);
+            pass.set_vertex_buffer(0, self.log_template.vertices.slice(..));
+            pass.set_vertex_buffer(1, self.log_buffer.slice(..));
+            pass.set_index_buffer(
+                self.log_template.indices.slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            pass.draw_indexed(
+                0..self.log_template.index_count,
+                0,
+                0..self.log_scratch.len() as u32,
             );
         }
     }
