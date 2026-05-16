@@ -13,10 +13,22 @@
 //!
 //! ## Vertex buffers
 //!
-//! | slot | contents                                                       |
-//! |------|----------------------------------------------------------------|
-//! | 0    | [`PosNormalUv`] per vertex (32 B)                              |
-//! | 1    | [`PbrInstanceAttribs`] per instance — model matrix + tint (80) |
+//! | slot | contents                                                            |
+//! |------|---------------------------------------------------------------------|
+//! | 0    | [`PosNormalUv`] per vertex (32 B)                                   |
+//! | 1    | [`PbrInstanceAttribs`] per instance — model matrix + tint + hit ID (84) |
+//!
+//! ## Picking (#56 PR 3)
+//!
+//! Every draw writes the per-instance [`PbrInstanceAttribs::hit_id`] to the
+//! engine's `R32Uint` hit-ID attachment, flat-interpolated through
+//! `@location(1)`. `hit_id == 0` is the no-hit sentinel and matches the
+//! attachment's clear value, so instances that don't care about picking
+//! can leave it at the `0` default from [`PbrInstanceAttribs::new`].
+//! Callers that do want a clickable mesh call
+//! [`Renderer::reserve_object`](super::Renderer::reserve_object) once per
+//! parent and feed the result through
+//! [`PbrInstanceAttribs::with_hit_id`].
 //!
 //! ## What's not in v1
 //!
@@ -70,11 +82,15 @@ struct VsIn {
     @location(1) normal:   vec3<f32>,
     @location(2) uv:       vec2<f32>,
     // Per-instance model matrix as four vec4 columns.
-    @location(3) m0:   vec4<f32>,
-    @location(4) m1:   vec4<f32>,
-    @location(5) m2:   vec4<f32>,
-    @location(6) m3:   vec4<f32>,
-    @location(7) tint: vec4<f32>,
+    @location(3) m0:     vec4<f32>,
+    @location(4) m1:     vec4<f32>,
+    @location(5) m2:     vec4<f32>,
+    @location(6) m3:     vec4<f32>,
+    @location(7) tint:   vec4<f32>,
+    // Per-instance hit ID, written into the engine's R32Uint attachment by
+    // the fragment shader. 0 = no-hit sentinel (matches the attachment's
+    // clear value); non-zero comes from Renderer::reserve_object.
+    @location(8) hit_id: u32,
 };
 
 struct VsOut {
@@ -83,6 +99,14 @@ struct VsOut {
     @location(1)       world_n:   vec3<f32>,
     @location(2)       uv:        vec2<f32>,
     @location(3)       tint:      vec4<f32>,
+    // Integer attributes can't be linearly interpolated; flat ships one
+    // value per primitive.
+    @location(4) @interpolate(flat) hit_id: u32,
+};
+
+struct FsOut {
+    @location(0) color:  vec4<f32>,
+    @location(1) hit_id: u32,
 };
 
 @vertex
@@ -99,6 +123,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.world_n   = n_world;
     out.uv        = in.uv;
     out.tint      = in.tint;
+    out.hit_id    = in.hit_id;
     return out;
 }
 
@@ -128,7 +153,7 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_main(in: VsOut) -> FsOut {
     let albedo = textureSample(albedo_tex, albedo_sampler, in.uv).rgb
                  * material.albedo.rgb
                  * in.tint.rgb;
@@ -162,18 +187,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let direct = (diffuse + specular) * scene.sun_color.rgb * n_dot_l;
     let ambient = scene.ambient.rgb * albedo;
 
-    return vec4<f32>(direct + ambient, material.albedo.a * in.tint.a);
+    var out: FsOut;
+    out.color  = vec4<f32>(direct + ambient, material.albedo.a * in.tint.a);
+    out.hit_id = in.hit_id;
+    return out;
 }
 "#;
 
-/// Per-instance attribs for [`PbrMaterial`]: model matrix + tint multiplier.
-/// Identical shape to [`UnlitColoredAttribs`](super::UnlitColoredAttribs) —
-/// kept as a separate type so each material owns its own layout contract.
+/// Per-instance attribs for [`PbrMaterial`]: model matrix, tint multiplier,
+/// and GPU hit ID (#56 PR 3). Identical shape to
+/// [`UnlitColoredAttribs`](super::UnlitColoredAttribs), kept as a separate
+/// type so each material owns its own layout contract.
+///
+/// `hit_id` is written to the engine's `R32Uint` hit-ID attachment for
+/// every pixel the instance covers. `0` is the no-hit sentinel and matches
+/// the attachment's clear value, so the default constructor leaves it at
+/// `0` (instance is drawn but contributes nothing to picking). Opt in via
+/// [`Self::with_hit_id`], passing an ID returned by
+/// [`Renderer::reserve_object`](super::Renderer::reserve_object).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct PbrInstanceAttribs {
     pub model: [[f32; 4]; 4],
     pub tint: [f32; 4],
+    pub hit_id: u32,
 }
 
 impl PbrInstanceAttribs {
@@ -181,7 +218,18 @@ impl PbrInstanceAttribs {
         Self {
             model: model.to_cols_array_2d(),
             tint: tint.to_array(),
+            hit_id: 0,
         }
+    }
+
+    /// Builder: stamp this instance with the GPU hit ID returned by
+    /// [`Renderer::reserve_object`](super::Renderer::reserve_object). All
+    /// pixels the instance covers in the opaque pass will carry this ID in
+    /// the hit-ID attachment, so a cursor over any of them resolves back
+    /// to the originating `WorldObjectId`.
+    pub fn with_hit_id(mut self, hit_id: u32) -> Self {
+        self.hit_id = hit_id;
+        self
     }
 }
 
@@ -279,6 +327,9 @@ impl PbrMaterial {
                 shader_location: 7,
                 format: wgpu::VertexFormat::Float32x4,
             },
+            // hit_id at offset 80, location 8 — the per-instance counterpart
+            // to the per-vertex cell_id terrain already writes (#56 PR 3).
+            super::u32_id_instance_attribute(80, 8),
         ];
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -311,9 +362,12 @@ impl PbrMaterial {
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
-                    // Opt out of the hit-ID attachment (#56 PR 1): PBR meshes
-                    // become writers in PR 3.
-                    renderer.id_target_opt_out(),
+                    // Write per-instance hit IDs to the engine's R32Uint
+                    // attachment (#56 PR 3). Instances that don't care about
+                    // picking leave their `hit_id` at the 0 default, which
+                    // matches the attachment's clear value — semantically
+                    // identical to PR 1's opt-out shape.
+                    renderer.id_target_writer(),
                 ],
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -425,10 +479,20 @@ mod tests {
 
     #[test]
     fn attribs_size_matches_layout() {
-        // Pipeline reads model at offsets 0/16/32/48 and tint at 64;
-        // total 80. If this fails the pipeline's instance layout is out
-        // of sync with the Pod.
-        assert_eq!(std::mem::size_of::<PbrInstanceAttribs>(), 80);
+        // Pipeline reads model at offsets 0/16/32/48, tint at 64, and
+        // hit_id at 80; total 84. Struct alignment is 4 (largest field
+        // alignment among Mat4 (4), Vec4 (4), u32 (4)), so no tail padding.
+        // If this fails the pipeline's instance layout is out of sync with
+        // the Pod.
+        assert_eq!(std::mem::size_of::<PbrInstanceAttribs>(), 84);
+    }
+
+    #[test]
+    fn with_hit_id_round_trips() {
+        let attribs = PbrInstanceAttribs::new(Mat4::IDENTITY, Vec4::ONE).with_hit_id(7);
+        assert_eq!(attribs.hit_id, 7);
+        // Default is 0 (no-hit sentinel).
+        assert_eq!(PbrInstanceAttribs::new(Mat4::IDENTITY, Vec4::ONE).hit_id, 0);
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use std::sync::Mutex;
 
-use crate::sim::{ChunkCoord, ZoneId};
+use crate::sim::{ChunkCoord, WorldObjectId, ZoneId};
 
 use super::environment::{SceneEnvironmentBinding, ViewEnvironment};
 use super::picking_buffer::{FrameIdTable, HitTarget, IdReadback};
@@ -145,6 +145,19 @@ impl SceneResources {
             .lock()
             .expect("frame_id_table poisoned")
             .reserve_terrain_chunk(zone, chunk)
+    }
+
+    /// Reserve a single hit ID for a mesh object in the current frame's
+    /// table. Called by user code (or
+    /// [`RenderObjectPass::for_each_alive_with_hit_id`](super::RenderObjectPass::for_each_alive_with_hit_id))
+    /// once per drawn object; the returned ID is written into the object's
+    /// per-instance attributes so every pixel it covers in the opaque pass
+    /// carries that ID in the `R32Uint` attachment.
+    pub(super) fn reserve_object(&self, zone: ZoneId, id: WorldObjectId) -> u32 {
+        self.frame_id_table
+            .lock()
+            .expect("frame_id_table poisoned")
+            .reserve_object(zone, id)
     }
 
     /// Clear the frame ID table — called once at the start of each frame.

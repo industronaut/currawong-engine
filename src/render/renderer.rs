@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
-use crate::sim::{ChunkCoord, ZoneId};
+use crate::sim::{ChunkCoord, WorldObjectId, ZoneId};
 
 use super::environment::ViewEnvironment;
 use super::picking_buffer::HitTarget;
@@ -105,6 +105,23 @@ impl Renderer {
     /// side.
     pub fn reserve_terrain_chunk(&self, zone: ZoneId, chunk: ChunkCoord) -> u32 {
         self.scene.reserve_terrain_chunk(zone, chunk)
+    }
+
+    /// Reserve a single hit ID for a mesh object. Returns the ID, which
+    /// callers write into the per-instance attributes of every pickable
+    /// draw for that object — typically the `hit_id` field on
+    /// [`UnlitColoredAttribs`](super::UnlitColoredAttribs) or
+    /// [`PbrInstanceAttribs`](super::PbrInstanceAttribs) via their
+    /// `with_hit_id` builders. The engine's `R32Uint` attachment then holds
+    /// this ID at every pixel the object covers.
+    ///
+    /// All mesh parts of one sim object should share a single hit ID — see
+    /// [`RenderObjectPass::for_each_alive_with_hit_id`](super::RenderObjectPass::for_each_alive_with_hit_id)
+    /// for the engine-driven path that reserves once per parent so a click
+    /// on any part resolves to the same `WorldObjectId`. Users walking the
+    /// sim by hand should reserve once per parent themselves.
+    pub fn reserve_object(&self, zone: ZoneId, id: WorldObjectId) -> u32 {
+        self.scene.reserve_object(zone, id)
     }
 
     /// Latest hit target delivered by the readback ring, or `None` if the

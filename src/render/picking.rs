@@ -186,25 +186,33 @@ impl<G: Grid> TerrainPicker<G> {
     /// Feed the engine's latest hit-ID result into the picker. The View's
     /// per-frame update typically does
     /// `picker.set_id_hover(renderer.hit_id_hover())`. Only
-    /// [`HitTarget::TerrainCell`] is consumed (mesh-object hits go through
-    /// a different path); other variants clear the slot.
+    /// [`HitTarget::TerrainCell`] is consumed (mesh-object hits are routed
+    /// through whichever picker the View dedicates to them); other variants
+    /// — including [`HitTarget::Object`] — clear the terrain slot so a
+    /// stale terrain hover doesn't sit under a mesh the user is hovering
+    /// instead.
     ///
     /// `world_pos` on the resulting [`Hover`] is the cell centre on the
     /// picking plane — the ID buffer gives us a cell, not a precise hit
     /// point. Callers that need an exact world position should consult
     /// [`Self::plane_hover`] for the ray result instead.
     pub fn set_id_hover(&mut self, target: Option<HitTarget>) {
-        self.id_hover = target.map(|HitTarget::TerrainCell { cell, .. }| {
-            let centre_canonical: Vec2 = (0..G::CORNERS_PER_CELL)
-                .map(|i| self.grid.corner_xy(cell, i))
-                .fold(Vec2::ZERO, |acc, v| acc + v)
-                / G::CORNERS_PER_CELL as f32;
-            let centre = centre_canonical * self.tile_size;
-            Hover {
-                cell,
-                world_pos: Vec3::new(centre.x, centre.y, self.plane_z),
+        self.id_hover = match target {
+            Some(HitTarget::TerrainCell { cell, .. }) => {
+                let centre_canonical: Vec2 = (0..G::CORNERS_PER_CELL)
+                    .map(|i| self.grid.corner_xy(cell, i))
+                    .fold(Vec2::ZERO, |acc, v| acc + v)
+                    / G::CORNERS_PER_CELL as f32;
+                let centre = centre_canonical * self.tile_size;
+                Some(Hover {
+                    cell,
+                    world_pos: Vec3::new(centre.x, centre.y, self.plane_z),
+                })
             }
-        });
+            // No terrain hit when the cursor is over a mesh object, or
+            // when readback hasn't landed yet.
+            Some(HitTarget::Object { .. }) | None => None,
+        };
     }
 
     /// Latest pick result. Prefers the ID-buffer hover when present

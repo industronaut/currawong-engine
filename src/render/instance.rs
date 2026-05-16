@@ -163,3 +163,27 @@ pub const fn mat4_instance_attributes(start_location: u32) -> [wgpu::VertexAttri
         },
     ]
 }
+
+/// Vertex attribute for a `u32` hit-ID consumed per-instance — the
+/// canonical building block for materials that opt in to the GPU hit-ID
+/// buffer (#56). Use with `wgpu::VertexStepMode::Instance` and an integer
+/// vertex input in WGSL (`@location(N) hit_id: u32`). Integer attributes
+/// can't be interpolated, so the vertex shader must forward the value with
+/// `@interpolate(flat)`.
+///
+/// `offset` is the byte offset within the per-instance attribute struct
+/// (typically immediately after the model matrix + tint fields).
+/// `shader_location` is the `@location(N)` the vertex shader declares.
+///
+/// ```text
+/// // Instance buffer holds Mat4 (offsets 0..64) + Vec4 tint (64..80) + u32 id (80..84).
+/// let mat4_attrs = currawong::mat4_instance_attributes(3);
+/// let id_attr    = currawong::u32_id_instance_attribute(80, 8);
+/// ```
+pub const fn u32_id_instance_attribute(offset: u64, shader_location: u32) -> wgpu::VertexAttribute {
+    wgpu::VertexAttribute {
+        offset,
+        shader_location,
+        format: wgpu::VertexFormat::Uint32,
+    }
+}

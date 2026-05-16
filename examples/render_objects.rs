@@ -542,20 +542,24 @@ impl View for Demo {
             &frustum,
         );
 
-        // Phase 2: engine-driven fan-out. The helper iterates alive
-        // proxies, validates each parent's SlotValues against the
-        // template schema, and calls our closures with already-composed
-        // world transforms for each part. The "tint" slot drives the
-        // per-instance attrib tint for *Wood* parts only — the stone base
-        // stays neutral, so the campfire's coloured-log identity reads
-        // clearly without staining the rock.
+        // Phase 2: engine-driven fan-out. The hit-ID-aware variant reserves
+        // one GPU hit ID per alive parent so every mesh part of a single
+        // campfire (or stake) ends up writing the *same* ID to the engine's
+        // R32Uint attachment — a cursor over either the wooden log or the
+        // stone base resolves back to the same `WorldObjectId` via
+        // `renderer.hit_id_hover()` (#56 PR 3).
+        //
+        // The "tint" slot drives the per-instance attrib tint for *Wood*
+        // parts only — the stone base stays neutral, so the campfire's
+        // coloured-log identity reads clearly without staining the rock.
         self.buckets.begin_frame();
         self.emitters.begin_frame();
-        RenderObjectPass::for_each_alive(
+        RenderObjectPass::for_each_alive_with_hit_id(
             &sim.zones,
             &self.templates,
             &self.live_objects,
-            |_parent, _rid, part, world, slots| {
+            renderer,
+            |_parent, _rid, part, world, slots, hit_id| {
                 let tint = match slots.get("tint") {
                     Some(SlotValue::Color(c)) => c,
                     _ => Vec4::ONE,
@@ -569,10 +573,12 @@ impl View for Demo {
                         mesh: part.mesh,
                         material: part.material,
                     },
-                    UnlitColoredAttribs::new(world, part_tint),
+                    UnlitColoredAttribs::new(world, part_tint).with_hit_id(hit_id),
                 );
             },
-            |parent, _rid, part, world, _slots| {
+            |parent, _rid, part, world, _slots, _hit_id| {
+                // Emitters don't write hit IDs (transparent pass opts out
+                // of the attachment); ignore the per-parent ID here.
                 self.emitters
                     .declare(parent, part.attachment, part.template, world);
             },
