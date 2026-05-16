@@ -78,10 +78,20 @@ pub struct Hauling {
 }
 
 /// Accumulated logs delivered to a stockpile. Updated by Phase 3 (arrival)
-/// when a `Hauling` pawn reaches its target; read by the HUD when that
-/// slice lands.
+/// when a `Hauling` pawn reaches its target; read by the HUD and by the
+/// win-condition check at end of tick.
 pub struct WoodStored {
     pub count: u32,
+}
+
+/// Overall game state. The sim ticks gameplay only while `Playing`; on
+/// `Won`/`Lost` the world freezes in place and the HUD shows a banner.
+/// No in-game restart for v1 — quit and rerun to play again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GameState {
+    Playing,
+    Won,
+    Lost,
 }
 
 /// Tile size in metres. One world unit per tile.
@@ -95,6 +105,13 @@ pub const PAWN_SPEED: f32 = 2.2;
 /// Ticks of `ChopProgress` per tree at default 60 Hz — 1.5 seconds of
 /// "chopping" once a pawn reaches the tree.
 pub const CHOP_TICKS: u32 = 90;
+/// Logs the player needs to deliver to win. Five trees on the map; need
+/// to clear most of them.
+pub const WOOD_GOAL: u32 = 5;
+/// Wall-time budget (sim seconds — same thing at 1× speed) before the
+/// game is lost. Tuned so a fresh player who clicks all trees quickly
+/// can win with a few seconds to spare.
+pub const TIME_LIMIT_SECS: f32 = 60.0;
 
 // Visual extents (used here only to compute the resting Z so the bottom of
 // each primitive sits on the ground). The view picks the same numbers when
@@ -112,6 +129,12 @@ pub struct Game {
     /// The (only) stockpile in this PoC. Cached so Phase 5 can route
     /// `Hauling` jobs at it without walking the zone every tick.
     pub stockpile: WorldObjectId,
+    /// Game-state machine. Gameplay phases run only while `Playing`; the
+    /// HUD reads `Won`/`Lost` to swap in the end-of-game banner.
+    pub state: GameState,
+    /// Sim-seconds elapsed since the run started — drives the time-limit
+    /// check and the HUD's countdown. Only advances while `Playing`.
+    pub elapsed: f32,
 }
 
 impl Game {
@@ -168,13 +191,33 @@ impl Game {
             zones,
             zone: zone_id,
             stockpile,
+            state: GameState::Playing,
+            elapsed: 0.0,
         }
+    }
+
+    /// Logs delivered so far — read by the HUD and the win check. Returns 0
+    /// if the stockpile was somehow destroyed (can't happen today, but the
+    /// stockpile is a `WorldObjectId` like any other and could be removed
+    /// by a future feature).
+    pub fn wood_count(&self) -> u32 {
+        self.zones
+            .get(self.zone)
+            .and_then(|z| z.components().get::<WoodStored>(self.stockpile))
+            .map(|s| s.count)
+            .unwrap_or(0)
     }
 }
 
 impl Simulation for Game {
     fn tick(&mut self, dt: Duration) {
+        if self.state != GameState::Playing {
+            // Freeze gameplay on win/lose: no pawn motion, no chop ticks,
+            // no timer advancement. The HUD keeps drawing the banner.
+            return;
+        }
         let dt = dt.as_secs_f32();
+        self.elapsed += dt;
         let Some(zone) = self.zones.get_mut(self.zone) else {
             return;
         };
@@ -357,51 +400,60 @@ impl Simulation for Game {
             }
         }
 
-        let mut claimed: HashSet<WorldObjectId> = zone
-            .components()
-            .iter::<Chopping>()
-            .map(|(_, c)| c.tree)
-            .collect();
         let designated: Vec<(WorldObjectId, Vec3)> = zone
             .components()
             .iter::<Designated>()
             .filter_map(|(id, _)| zone.get(id).map(|t| (id, t.position)))
             .collect();
-        if designated.is_empty() {
-            return;
-        }
-        let idle: Vec<(WorldObjectId, Vec3)> = zone
-            .iter()
-            .filter(|(id, _)| {
-                zone.components().get::<RenderId>(*id) == Some(&RenderId::Pawn)
-                    && zone.components().get::<Move>(*id).is_none()
-                    && zone.components().get::<Chopping>(*id).is_none()
-                    && zone.components().get::<Carrying>(*id).is_none()
-            })
-            .map(|(id, t)| (id, t.position))
-            .collect();
-        for (pawn, pawn_pos) in idle {
-            let Some(&(tree_id, tree_pos)) = designated
+        if !designated.is_empty() {
+            let mut claimed: HashSet<WorldObjectId> = zone
+                .components()
+                .iter::<Chopping>()
+                .map(|(_, c)| c.tree)
+                .collect();
+            let idle: Vec<(WorldObjectId, Vec3)> = zone
                 .iter()
-                .filter(|(tree, _)| !claimed.contains(tree))
-                .min_by(|a, b| {
-                    let da = (a.1 - pawn_pos).length_squared();
-                    let db = (b.1 - pawn_pos).length_squared();
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                .filter(|(id, _)| {
+                    zone.components().get::<RenderId>(*id) == Some(&RenderId::Pawn)
+                        && zone.components().get::<Move>(*id).is_none()
+                        && zone.components().get::<Chopping>(*id).is_none()
+                        && zone.components().get::<Carrying>(*id).is_none()
                 })
-            else {
-                continue;
-            };
-            claimed.insert(tree_id);
-            zone.components_mut()
-                .insert(pawn, Chopping { tree: tree_id });
-            zone.components_mut().insert(
-                pawn,
-                Move {
-                    target: tree_pos,
-                    speed: PAWN_SPEED,
-                },
-            );
+                .map(|(id, t)| (id, t.position))
+                .collect();
+            for (pawn, pawn_pos) in idle {
+                let Some(&(tree_id, tree_pos)) = designated
+                    .iter()
+                    .filter(|(tree, _)| !claimed.contains(tree))
+                    .min_by(|a, b| {
+                        let da = (a.1 - pawn_pos).length_squared();
+                        let db = (b.1 - pawn_pos).length_squared();
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                else {
+                    continue;
+                };
+                claimed.insert(tree_id);
+                zone.components_mut()
+                    .insert(pawn, Chopping { tree: tree_id });
+                zone.components_mut().insert(
+                    pawn,
+                    Move {
+                        target: tree_pos,
+                        speed: PAWN_SPEED,
+                    },
+                );
+            }
+        }
+
+        // Phase 6 — win/lose check. Win has priority: if a delivery during
+        // this same tick crossed the goal, that beats the timer expiring on
+        // the same tick. State transition freezes the world on the next
+        // call to `tick` via the early-return at the top.
+        if self.wood_count() >= WOOD_GOAL {
+            self.state = GameState::Won;
+        } else if self.elapsed >= TIME_LIMIT_SECS {
+            self.state = GameState::Lost;
         }
     }
 }

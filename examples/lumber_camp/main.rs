@@ -5,11 +5,11 @@
 //! modules land here as the game grows (jobs, pathfind, picking, hud, …) —
 //! see issue #58 for the planned shape.
 //!
-//! Today the example renders a 16×16 flat square-grid zone with three pawns
-//! (capsules), five trees (cones), and a stockpile (cube). Hovered objects
-//! light up gold; left-clicking a tree toggles a designation marker on it.
-//! Nothing moves yet — pawns are inert until the `Move` component slice
-//! lands.
+//! Today the example renders a 16×16 flat square-grid zone with three
+//! pawns (capsules), five trees (cones), and a stockpile (cube). Click
+//! trees to designate them; idle pawns walk over, chop them down, haul
+//! the log to the stockpile, and head out for the next designation.
+//! Win by delivering `WOOD_GOAL` logs before the timer expires.
 //!
 //! Controls:
 //! - Mouse over — hover highlight on the object under the cursor.

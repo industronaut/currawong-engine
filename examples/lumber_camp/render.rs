@@ -23,12 +23,15 @@ use currawong::{
     MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance, PbrMaterialParams,
     PosNormalUv, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
     TerrainMaterialInstance, TerrainRenderer, Texture, View, ViewConfig, ViewEnvironment,
-    WorldObjectId, WorldObjectRef, ZoneId, wgpu, winit,
+    WorldObjectId, WorldObjectRef, ZoneId, wgpu, winit, yakui,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use crate::sim::{Carrying, Designated, Game, HEIGHT_UNIT, Move, RenderId, TILE_SIZE};
+use crate::sim::{
+    Carrying, Designated, Game, GameState, HEIGHT_UNIT, Move, RenderId, TILE_SIZE, TIME_LIMIT_SECS,
+    WOOD_GOAL,
+};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MAX_INSTANCES_PER_TEMPLATE: u32 = 64;
@@ -610,6 +613,54 @@ impl View for LumberCampView {
             _ => {}
         }
     }
+
+    fn game_ui(&mut self, sim: &mut Game, ctx: &mut EngineCtx) {
+        // Top-left status panel: wood progress + countdown. Always present
+        // so the player sees the goal even after winning.
+        let wood = sim.wood_count();
+        let remaining = (TIME_LIMIT_SECS - sim.elapsed).max(0.0);
+        yakui::pad(yakui::widgets::Pad::all(16.0), || {
+            yakui::align(yakui::Alignment::TOP_LEFT, || {
+                yakui::colored_box_container(yakui::Color::rgba(20, 24, 32, 220), || {
+                    yakui::pad(yakui::widgets::Pad::all(12.0), || {
+                        yakui::column(|| {
+                            yakui::label(format!("Wood: {wood} / {WOOD_GOAL}"));
+                            yakui::label(format!("Time: {}", format_clock(remaining)));
+                            if yakui::button("quit").clicked {
+                                ctx.event_loop.exit();
+                            }
+                        });
+                    });
+                });
+            });
+        });
+
+        // Centre banner on game-over. Colour-coded so win and loss read
+        // distinctly even before the eye parses the text.
+        let banner = match sim.state {
+            GameState::Won => Some(("VICTORY", yakui::Color::rgba(40, 100, 50, 240))),
+            GameState::Lost => Some(("OUT OF TIME", yakui::Color::rgba(120, 40, 40, 240))),
+            GameState::Playing => None,
+        };
+        if let Some((text, bg)) = banner {
+            yakui::align(yakui::Alignment::CENTER, || {
+                yakui::colored_box_container(bg, || {
+                    yakui::pad(yakui::widgets::Pad::all(28.0), || {
+                        yakui::column(|| {
+                            yakui::label(text);
+                            yakui::label("Esc to quit");
+                        });
+                    });
+                });
+            });
+        }
+    }
+}
+
+/// Format `seconds` as `M:SS` for the HUD countdown.
+fn format_clock(seconds: f32) -> String {
+    let total = seconds.max(0.0) as u32;
+    format!("{}:{:02}", total / 60, total % 60)
 }
 
 /// Toggle a [`Designated`] component on whichever sim object is currently

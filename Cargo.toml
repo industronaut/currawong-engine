@@ -100,7 +100,7 @@ required-features = ["render"]
 
 [[example]]
 name = "lumber_camp"
-required-features = ["render"]
+required-features = ["yakui"]
 
 [[example]]
 name = "headless"
