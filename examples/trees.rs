@@ -1,4 +1,4 @@
-//! Smoke test for the render-template pipeline under live sim mutation.
+//! Live-sim render template + end-to-end picking showcase.
 //!
 //! Sim spawns ~200 trees, each carrying a [`Tree`] component (age + seed).
 //! Every tick increments age; every frame the view feeds the engine's
@@ -10,7 +10,31 @@
 //! `with_slot(...)` on the template and a one-liner in [`extract_part`].
 //! No edits to the render walk itself — the v1 ergonomics goal from #8.
 //!
-//! Controls: `0`/`P` pause, `1`/`2`/`3` set sim speed, `Esc` to quit.
+//! ## Picking (#56)
+//!
+//! This is the first example that exercises **both** halves of the GPU
+//! hit-ID buffer:
+//! - Terrain cells are pickable through the engine's per-chunk ID writes
+//!   (PR 2). Hovering over the ground highlights the tile and shows its
+//!   coordinate in the title bar.
+//! - Trees are pickable through per-instance hit-ID writes via
+//!   [`UnlitColoredAttribs::with_hit_id`] (PR 3). Hovering over any part
+//!   of a tree (trunk or canopy) highlights *that whole tree* and shows
+//!   its `WorldObjectId` + current age in the title bar — clicking the
+//!   trunk or the canopy resolves to the same sim object.
+//!
+//! The dispatch from a single [`Renderer::hit_id_hover`] call to the two
+//! consumers (terrain → [`CellHighlight`], tree → per-instance tint
+//! override) is the v1 reference for any user code that wants to do
+//! multi-kind picking.
+//!
+//! Controls:
+//! - Right-click drag — rotate the camera around the focal point.
+//! - W / A / S / D — pan the focal point on the ground.
+//! - Scroll wheel — zoom.
+//! - Mouse over terrain or trees — highlight + title-bar readout.
+//! - `0`/`P` pause, `1`/`2`/`3` set sim speed.
+//! - `Esc` to quit.
 //!
 //! Build with `--features egui` for a debug overlay: FPS, a rolling
 //! frametime strip chart with a 60 Hz reference line, and sim-clock controls.
@@ -19,17 +43,20 @@ use std::collections::HashMap;
 #[cfg(feature = "egui")]
 use std::collections::VecDeque;
 use std::f32::consts::TAU;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "egui")]
+use std::time::Instant;
 
 #[cfg(feature = "egui")]
 use currawong::egui;
-use currawong::glam::{Mat4, Quat, Vec3, Vec4};
+use currawong::glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, InstanceBuckets, LiveRenderObjects,
-    MaterialInstanceRegistry, MeshPart, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer,
-    Simulation, SlotKind, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord,
-    UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
-    WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
+    Camera, CameraBinding, CellHighlight, EngineCtx, FlatTopsMesher, Frustum, HitTarget,
+    InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshPart, OrbitRig,
+    RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKey, SlotKind,
+    SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker, TerrainRenderer,
+    TileCoord, UnlitColoredAttribs, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
+    WorldObjectId, WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -45,7 +72,14 @@ struct Tree {
 const MATURE_AGE: u32 = 720; // ~12 s at the default 60 Hz tick rate.
 const TERRAIN_HALF: i32 = 12;
 const HEIGHT_UNIT: f32 = 0.1;
+const TILE_SIZE: f32 = 1.0;
 const TREE_COUNT: u32 = 200;
+const BASE_TITLE: &str = "currawong — trees demo";
+
+// Tint applied to whichever tree is under the cursor, replacing the
+// per-instance leaf/trunk tint for that one frame. Hot orange reads well
+// against the green canopy palette without clobbering depth cues.
+const HOVER_TINT: Vec4 = Vec4::new(1.0, 0.55, 0.10, 1.0);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum RenderId {
@@ -163,6 +197,20 @@ type Templates = RenderRegistry<RenderId, MeshHandle, MatKey>;
 struct Demo {
     camera: Camera,
     camera_binding: CameraBinding,
+    rig: OrbitRig,
+    /// Terrain-side picker. Drives both the zero-latency ray-vs-plane
+    /// fallback and the GPU ID-buffer terrain hover. Mesh-object hits
+    /// bypass this and land in [`Self::hovered_object`] instead.
+    picker: TerrainPicker<SquareGrid>,
+    /// Per-frame yellow overlay over the hovered terrain tile.
+    highlight: CellHighlight,
+    /// Which tree (if any) the cursor is currently over — driven by the
+    /// engine's `HitTarget::Object` resolution this frame. The extract
+    /// loop swaps in [`HOVER_TINT`] for whichever tree matches.
+    hovered_object: Option<WorldObjectId>,
+    /// Cache of the last title text we sent to winit, so we only call
+    /// `set_title` when the readout actually changes.
+    last_title: Option<String>,
     material: UnlitColoredMaterial,
     instances: MaterialInstanceRegistry<UnlitColoredInstance, MatKey>,
     templates: Templates,
@@ -172,7 +220,6 @@ struct Demo {
     terrain_material: TerrainMaterial,
     terrain_solid: TerrainMaterialInstance,
     terrain: TerrainRenderer,
-    started: Instant,
     last_draws: u32,
     #[cfg(feature = "egui")]
     last_frame: Instant,
@@ -190,7 +237,7 @@ impl View for Demo {
     type Sim = Game;
 
     const CONFIG: ViewConfig = ViewConfig {
-        title: "currawong — trees demo",
+        title: BASE_TITLE,
         depth_format: Some(DEPTH_FORMAT),
         ..ViewConfig::DEFAULT
     };
@@ -199,6 +246,25 @@ impl View for Demo {
         let device = &renderer.device;
         let camera_binding = CameraBinding::new(device);
         let material = UnlitColoredMaterial::new(renderer, camera_binding.layout());
+
+        // Orbit rig with the focal point parked over the origin; pitch +
+        // distance chosen so the whole tree field is visible at startup,
+        // and the user can pan WASD to put any specific tree under the
+        // cursor for picking.
+        let mut rig = OrbitRig::new(Vec3::new(0.0, 0.0, 1.0));
+        rig.distance = 18.0;
+        rig.pitch = 45.0_f32.to_radians();
+        rig.config.distance_max = 80.0;
+
+        let picker = TerrainPicker::new(SquareGrid, TILE_SIZE);
+        // Warm yellow at 50% alpha for the hovered terrain cell — same
+        // colour the terrain demo uses, so the picker readout is visually
+        // consistent across examples.
+        let highlight = CellHighlight::new(
+            renderer,
+            camera_binding.layout(),
+            Vec4::new(1.0, 0.85, 0.2, 0.5),
+        );
 
         let mut instances = MaterialInstanceRegistry::new();
         instances.register(
@@ -247,6 +313,11 @@ impl View for Demo {
         Self {
             camera: Camera::default(),
             camera_binding,
+            rig,
+            picker,
+            highlight,
+            hovered_object: None,
+            last_title: None,
             material,
             instances,
             templates,
@@ -256,13 +327,19 @@ impl View for Demo {
             terrain_material,
             terrain_solid,
             terrain: TerrainRenderer::new(),
-            started: Instant::now(),
             last_draws: 0,
             #[cfg(feature = "egui")]
             last_frame: Instant::now(),
             #[cfg(feature = "egui")]
             frame_samples: VecDeque::with_capacity(FRAMETIME_HISTORY),
         }
+    }
+
+    fn update(&mut self, _: &Game, _: &mut EngineCtx, dt: Duration) {
+        // Integrate held-WASD pan + held rotation against wall-clock dt so
+        // panning keeps working at sim speed 0 — see camera_rig docs.
+        self.rig.update(dt);
+        self.rig.apply_to(&mut self.camera);
     }
 
     fn render(
@@ -276,12 +353,6 @@ impl View for Demo {
         if size.height > 0 {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
-
-        // Wall-clock orbit: the view keeps moving even when sim is paused.
-        let t = self.started.elapsed().as_secs_f32();
-        let angle = t * 0.2;
-        self.camera.position = Vec3::new(angle.sin() * 16.0, angle.cos() * 16.0, 9.0);
-        self.camera.target = Vec3::new(0.0, 0.0, 1.0);
         self.camera.far = 200.0;
         self.camera_binding.write(&renderer.queue, &self.camera);
 
@@ -291,11 +362,76 @@ impl View for Demo {
                 renderer,
                 zone.terrain(),
                 &FlatTopsMesher {
+                    tile_size: TILE_SIZE,
                     height_unit: HEIGHT_UNIT,
                     ..FlatTopsMesher::new()
                 },
             );
         }
+
+        // --- Picker dispatch ---------------------------------------------
+        //
+        // One GPU readback feeds two consumers this frame: the terrain
+        // hover lands in `TerrainPicker::id_hover` (which prefers it over
+        // the ray-plane fallback for slope correctness), and an object hit
+        // lands in `self.hovered_object` so the extract loop below can
+        // swap in the highlight tint for that one tree. Hand-rolling this
+        // dispatch — instead of having a single picker handle both — is
+        // the v1 reference for any user code with more than one kind of
+        // pickable.
+        let viewport = Vec2::new(size.width as f32, size.height as f32);
+        self.picker.update(&self.camera, viewport);
+        let hit_hover = renderer.hit_id_hover();
+        self.hovered_object = match hit_hover {
+            Some(HitTarget::Object { id, .. }) => Some(id),
+            _ => None,
+        };
+        // The picker filters internally: TerrainCell populates id_hover,
+        // anything else clears it.
+        self.picker.set_id_hover(hit_hover);
+
+        // --- Title readout -----------------------------------------------
+        //
+        // Tree hover takes precedence over terrain hover — when the user's
+        // cursor sits on a tree the cell underneath isn't what they're
+        // pointing at. Includes the tree's current age so the live-sim
+        // growth story stays visible even at rest.
+        let hover_cell = self
+            .picker
+            .hover()
+            .map(|h| TileCoord::new(h.cell.x, h.cell.y));
+        let title = match (self.hovered_object, hover_cell) {
+            (Some(id), _) => {
+                let age = zone
+                    .components()
+                    .get::<Tree>(id)
+                    .map(|t| t.age_ticks)
+                    .unwrap_or(0);
+                format!("{BASE_TITLE} — tree #{} (age {age} ticks)", id.index())
+            }
+            (None, Some(c)) => format!("{BASE_TITLE} — cell ({}, {})", c.x, c.y),
+            (None, None) => BASE_TITLE.to_string(),
+        };
+        if self.last_title.as_deref() != Some(title.as_str()) {
+            renderer.window.set_title(&title);
+            self.last_title = Some(title);
+        }
+
+        // Drive the terrain overlay only when the cursor is on the ground,
+        // not when it's parked on a tree. The Z hugs the visible floor
+        // height (looked up from sim) plus a hair, so the overlay tracks
+        // the mesh top across slopes.
+        match (self.hovered_object, hover_cell) {
+            (None, Some(coord)) => {
+                let h = zone.terrain().tile_or_default(coord).floor_height;
+                let z = h as f32 * HEIGHT_UNIT + 0.02;
+                self.highlight
+                    .set_cell(renderer, &SquareGrid, coord, z, TILE_SIZE);
+            }
+            _ => self.highlight.clear(),
+        }
+
+        // --- Render-object pass ------------------------------------------
 
         let frustum = Frustum::from_view_proj(self.camera.view_proj());
         RenderObjectPass::declare_and_cull(
@@ -312,9 +448,9 @@ impl View for Demo {
         // A single GPU hit ID per tree is reserved here (#56 PR 3) and
         // stamped onto every mesh part of that tree, so a cursor over the
         // trunk or canopy resolves to the same `WorldObjectId` through
-        // `renderer.hit_id_hover()`. The picker that consumes that hover
-        // isn't wired up in this example — the demonstration is purely
-        // that the writes happen.
+        // `renderer.hit_id_hover()` on the next-but-one frame. The
+        // hovered tree gets its per-instance tint overridden by
+        // `HOVER_TINT` so the visual feedback matches the title readout.
         self.buckets.begin_frame();
         for (parent, rid, object) in self.live_objects.iter() {
             let tree = sim
@@ -325,11 +461,13 @@ impl View for Demo {
                 .unwrap_or_default();
             let template = self.templates.get(rid).expect("declared template");
             let hit_id = renderer.reserve_object(parent.zone, parent.id);
+            let is_hovered = Some(parent.id) == self.hovered_object;
             for part in template.mesh_parts() {
-                self.buckets.push(
-                    part.mesh,
-                    extract_part(&tree, part, object.world_xform).with_hit_id(hit_id),
-                );
+                let mut attribs = extract_part(&tree, part, object.world_xform);
+                if is_hovered {
+                    attribs.tint = HOVER_TINT.to_array();
+                }
+                self.buckets.push(part.mesh, attribs.with_hit_id(hit_id));
             }
         }
         self.buckets.upload(&renderer.queue);
@@ -365,10 +503,20 @@ impl View for Demo {
             pass.draw_indexed(0..mesh.index_count, 0, 0..count);
             draws += 1;
         }
+
+        // Terrain hover outline last so it lands on top of solids; no-op
+        // when nothing is hovered.
+        self.highlight.draw(pass);
         self.last_draws = draws;
     }
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+        // Both helpers see every event. The rig consumes mouse-buttons /
+        // scroll / WASD; the picker filters to CursorMoved / CursorLeft.
+        // Each ignores what it doesn't care about, so order doesn't matter.
+        self.rig.handle_event(event);
+        self.picker.handle_event(event);
+
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };
