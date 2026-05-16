@@ -6,12 +6,14 @@
 //! walks to it; on arrival the tree is removed and the pawn becomes idle
 //! again.
 //!
-//! The job-assignment policy here is deliberately the smallest thing that
-//! exercises [`Move`] end-to-end: one pawn → one tree, no exclusion (two
-//! pawns may race for the same tree), no path-finding, no chop timer, no
-//! stump. A real [`JobBoard`] takes over when there's a second job kind to
-//! coordinate.
+//! The job-assignment policy is "idle pawn pulls the nearest unclaimed
+//! designated tree". Claim semantics live in the `Chopping` component:
+//! a tree referenced by any pawn's `Chopping` is off-limits to other
+//! idlers. A real [`JobBoard`] generalises this when there's a second job
+//! kind to coordinate. Path-finding, chop timer, and stumps are also
+//! deferred.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use currawong::glam::{Quat, Vec3};
@@ -44,11 +46,13 @@ pub struct Move {
     pub speed: f32,
 }
 
-/// Intent component naming the tree a pawn is walking to. When the pawn
-/// arrives, the tree is removed (instant chop — `ChopProgress` will replace
-/// this with a tick-counted timer). If the named tree disappears or is
-/// un-designated mid-walk, the pawn drops both [`Move`] and `Chopping` and
-/// returns to idle.
+/// Intent component naming the tree a pawn is walking to. Doubles as the
+/// claim record: an idle pawn skips any tree already referenced by another
+/// pawn's `Chopping`, so designations are taken by exactly one worker. When
+/// the pawn arrives, the tree is removed (instant chop — `ChopProgress`
+/// will replace this with a tick-counted timer). If the named tree
+/// disappears or is un-designated mid-walk, the pawn drops both [`Move`]
+/// and `Chopping` and returns to idle.
 pub struct Chopping {
     pub tree: WorldObjectId,
 }
@@ -210,9 +214,15 @@ impl Simulation for Game {
         }
 
         // Phase 4 — assign work to idle pawns. Idle = `RenderId::Pawn` with
-        // no Move and no Chopping; assignment policy is "nearest designated
-        // tree", duplicates allowed. The first arriving pawn wins the chop;
-        // Phase 0 returns the loser to idle next tick.
+        // no Move and no Chopping; assignment policy is "nearest *unclaimed*
+        // designated tree". A tree is claimed if any pawn's `Chopping`
+        // references it (either from a prior tick, or assigned earlier in
+        // this same Phase 4 pass).
+        let mut claimed: HashSet<WorldObjectId> = zone
+            .components()
+            .iter::<Chopping>()
+            .map(|(_, c)| c.tree)
+            .collect();
         let designated: Vec<(WorldObjectId, Vec3)> = zone
             .components()
             .iter::<Designated>()
@@ -231,13 +241,18 @@ impl Simulation for Game {
             .map(|(id, t)| (id, t.position))
             .collect();
         for (pawn, pawn_pos) in idle {
-            let Some(&(tree_id, tree_pos)) = designated.iter().min_by(|a, b| {
-                let da = (a.1 - pawn_pos).length_squared();
-                let db = (b.1 - pawn_pos).length_squared();
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            }) else {
+            let Some(&(tree_id, tree_pos)) = designated
+                .iter()
+                .filter(|(tree, _)| !claimed.contains(tree))
+                .min_by(|a, b| {
+                    let da = (a.1 - pawn_pos).length_squared();
+                    let db = (b.1 - pawn_pos).length_squared();
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+            else {
                 continue;
             };
+            claimed.insert(tree_id);
             zone.components_mut()
                 .insert(pawn, Chopping { tree: tree_id });
             zone.components_mut().insert(
