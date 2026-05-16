@@ -148,14 +148,22 @@ impl CellHighlight {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: renderer.surface_format(),
-                    // Alpha blend so semi-transparent outlines layer cleanly
-                    // over the terrain — most callers will want full alpha,
-                    // but the door is open for 50% selection ghosting.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: renderer.surface_format(),
+                        // Alpha blend so semi-transparent outlines layer
+                        // cleanly over the terrain — most callers will want
+                        // full alpha, but the door is open for 50% selection
+                        // ghosting.
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    // Opt out of the hit-ID attachment (#56 PR 1): overlays
+                    // are decorative and shouldn't pollute the ID buffer
+                    // with their (alpha-blended, semantically meaningless)
+                    // IDs over the terrain underneath.
+                    renderer.id_target_opt_out(),
+                ],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,

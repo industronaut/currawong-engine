@@ -408,8 +408,12 @@ impl View for Demo {
         // Particle pipeline: reads camera, expands a unit quad per particle
         // using camera right/up basis (alpha-blended, depth-test but no
         // depth-write so overlapping particles blend).
-        let particle_pipeline =
-            build_particle_pipeline(device, camera_binding.layout(), renderer.surface_format());
+        let particle_pipeline = build_particle_pipeline(
+            device,
+            camera_binding.layout(),
+            renderer.surface_format(),
+            renderer.id_format(),
+        );
         let quad_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("quad corners"),
             contents: bytemuck::cast_slice(QUAD_CORNERS),
@@ -642,6 +646,7 @@ fn build_particle_pipeline(
     device: &wgpu::Device,
     camera_layout: &wgpu::BindGroupLayout,
     surface_format: wgpu::TextureFormat,
+    id_format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("particle shader"),
@@ -698,11 +703,20 @@ fn build_particle_pipeline(
             module: &shader,
             entry_point: Some("fs_main"),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                // Opt out of the hit-ID attachment (#56 PR 1): match the
+                // format wgpu sees on the attachment but disable writes.
+                Some(wgpu::ColorTargetState {
+                    format: id_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::empty(),
+                }),
+            ],
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: Some(wgpu::DepthStencilState {

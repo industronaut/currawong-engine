@@ -291,15 +291,31 @@ fn main_pass<V: View>(
         .encoder
         .begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("currawong frame pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &frame.view_tex,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(V::CONFIG.clear_colour),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.view_tex,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(V::CONFIG.clear_colour),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                // Hit-ID attachment (#56). Cleared to 0 (no-hit sentinel);
+                // PR 1 stores the result but has no consumers — readback and
+                // per-pipeline opt-in land in later PRs. Pipelines drawn in
+                // this pass either write `R32Uint` here or declare
+                // `targets[1] = None` to leave existing IDs untouched.
+                Some(wgpu::RenderPassColorAttachment {
+                    view: renderer.id_view(),
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+            ],
             depth_stencil_attachment: depth_attachment,
             ..Default::default()
         });
