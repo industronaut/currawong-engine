@@ -48,13 +48,22 @@ pub struct Move {
 
 /// Intent component naming the tree a pawn is walking to. Doubles as the
 /// claim record: an idle pawn skips any tree already referenced by another
-/// pawn's `Chopping`, so designations are taken by exactly one worker. When
-/// the pawn arrives, the tree is removed (instant chop — `ChopProgress`
-/// will replace this with a tick-counted timer). If the named tree
+/// pawn's `Chopping`, so designations are taken by exactly one worker. On
+/// arrival the pawn drops its [`Move`] but keeps `Chopping`; the tree gets
+/// a [`ChopProgress`] that ticks down before it falls. If the named tree
 /// disappears or is un-designated mid-walk, the pawn drops both [`Move`]
 /// and `Chopping` and returns to idle.
 pub struct Chopping {
     pub tree: WorldObjectId,
+}
+
+/// Countdown on a tree currently being chopped. Inserted on the tree (not
+/// the pawn) when a pawn arrives, ticks down each sim tick, and removes the
+/// tree at zero. Lives only while a pawn is actively `Chopping` this tree —
+/// if the chopper bails (tree un-designated, pawn killed), Phase 0 clears
+/// the orphan so progress doesn't persist into a re-designation.
+pub struct ChopProgress {
+    pub ticks_remaining: u32,
 }
 
 /// Tile size in metres. One world unit per tile.
@@ -65,6 +74,9 @@ pub const HEIGHT_UNIT: f32 = 0.1;
 /// Pawn walk speed. Tuned so a cross-map walk is several seconds at 1×
 /// sim speed; numerically separate from any rendering value.
 pub const PAWN_SPEED: f32 = 2.2;
+/// Ticks of `ChopProgress` per tree at default 60 Hz — 1.5 seconds of
+/// "chopping" once a pawn reaches the tree.
+pub const CHOP_TICKS: u32 = 90;
 
 // Visual extents (used here only to compute the resting Z so the bottom of
 // each primitive sits on the ground). The view picks the same numbers when
@@ -144,8 +156,10 @@ impl Simulation for Game {
         };
 
         // Phase 0 — invalidate any Chopping whose tree is gone or no longer
-        // designated. Necessary because two idle pawns can race for the same
-        // tree, and because the user can un-designate mid-walk.
+        // designated, then clean up any ChopProgress whose chopper bailed
+        // (un-designation, removed pawn). Necessary because the user can
+        // un-designate mid-chop and we don't want stale progress carrying
+        // over into a future re-designation.
         let mut cancel: Vec<WorldObjectId> = Vec::new();
         for (pawn, chopping) in zone.components().iter::<Chopping>() {
             let tree_alive = zone.contains(chopping.tree);
@@ -157,6 +171,19 @@ impl Simulation for Game {
         for pawn in cancel {
             zone.components_mut().remove::<Chopping>(pawn);
             zone.components_mut().remove::<Move>(pawn);
+        }
+        let active_choppers: HashSet<WorldObjectId> = zone
+            .components()
+            .iter::<Chopping>()
+            .map(|(_, c)| c.tree)
+            .collect();
+        let orphan_progress: Vec<WorldObjectId> = zone
+            .components()
+            .iter::<ChopProgress>()
+            .filter_map(|(tree, _)| (!active_choppers.contains(&tree)).then_some(tree))
+            .collect();
+        for tree in orphan_progress {
+            zone.components_mut().remove::<ChopProgress>(tree);
         }
 
         // Phase 1 — refresh Move.target from the chopping tree's current
@@ -202,22 +229,47 @@ impl Simulation for Game {
             }
         }
 
-        // Phase 3 — arrival handling: drop Move; if the pawn was Chopping,
-        // fell the named tree. `Zone::remove` cascades to every component on
-        // the tree (including Designated, RenderId), so the view stops
-        // drawing the tree and its marker on the next frame.
+        // Phase 3 — arrival handling: drop Move (the pawn is now stationed
+        // at the tree) but keep Chopping (the claim) and start ChopProgress
+        // on the tree if it isn't already counting. The pawn remains "at
+        // work" — not idle — until the tree falls in Phase 4.
         for pawn in arrived {
             zone.components_mut().remove::<Move>(pawn);
-            if let Some(chopping) = zone.components_mut().remove::<Chopping>(pawn) {
-                zone.remove(chopping.tree);
+            let tree = zone.components().get::<Chopping>(pawn).map(|c| c.tree);
+            if let Some(tree) = tree
+                && zone.components().get::<ChopProgress>(tree).is_none()
+            {
+                zone.components_mut().insert(
+                    tree,
+                    ChopProgress {
+                        ticks_remaining: CHOP_TICKS,
+                    },
+                );
             }
         }
 
-        // Phase 4 — assign work to idle pawns. Idle = `RenderId::Pawn` with
+        // Phase 4 — tick down every ChopProgress; fell trees that reach
+        // zero. `Zone::remove` cascades through every component on the tree
+        // (Designated, RenderId, ChopProgress), so the view stops drawing
+        // the tree and its marker on the next frame. The pawn keeps its
+        // Chopping for one more tick, then Phase 0 invalidates it and the
+        // pawn returns to idle.
+        let mut felled: Vec<WorldObjectId> = Vec::new();
+        for (tree, progress) in zone.components_mut().iter_mut::<ChopProgress>() {
+            progress.ticks_remaining = progress.ticks_remaining.saturating_sub(1);
+            if progress.ticks_remaining == 0 {
+                felled.push(tree);
+            }
+        }
+        for tree in felled {
+            zone.remove(tree);
+        }
+
+        // Phase 5 — assign work to idle pawns. Idle = `RenderId::Pawn` with
         // no Move and no Chopping; assignment policy is "nearest *unclaimed*
         // designated tree". A tree is claimed if any pawn's `Chopping`
         // references it (either from a prior tick, or assigned earlier in
-        // this same Phase 4 pass).
+        // this same pass).
         let mut claimed: HashSet<WorldObjectId> = zone
             .components()
             .iter::<Chopping>()
