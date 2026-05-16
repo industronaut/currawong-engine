@@ -12,21 +12,21 @@
 //! cone floating above its apex.
 
 use std::collections::HashMap;
-use std::f32::consts::PI;
-use std::time::Duration;
+use std::f32::consts::{PI, TAU};
+use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, EngineCtx, FlatTopsMesher, HitTarget, InstanceBuckets,
     MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance, PbrMaterialParams,
-    PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
+    PosNormalUv, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
     TerrainMaterialInstance, TerrainRenderer, Texture, View, ViewConfig, ViewEnvironment,
     WorldObjectId, WorldObjectRef, ZoneId, wgpu, winit,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use crate::sim::{Designated, Game, HEIGHT_UNIT, RenderId, TILE_SIZE};
+use crate::sim::{Designated, Game, HEIGHT_UNIT, Move, RenderId, TILE_SIZE};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MAX_INSTANCES_PER_TEMPLATE: u32 = 64;
@@ -47,6 +47,12 @@ const TREE_HALF_HEIGHT: f32 = 1.0;
 const MARKER_GAP: f32 = 0.12;
 /// Half the marker cone's height. Matches the marker mesh built in `init`.
 const MARKER_HALF_HEIGHT: f32 = 0.175;
+/// Vertical amplitude of the idle bob applied to pawns without a Move.
+/// A few centimetres reads as breathing without looking like a glitch.
+const IDLE_BOB_AMPLITUDE: f32 = 0.035;
+/// Idle-bob frequency in Hz. Slow enough to feel like a breath rather
+/// than a hop; wall-clock driven so paused pawns still breathe.
+const IDLE_BOB_HZ: f32 = 1.4;
 
 // --- Per-template GPU resources -----------------------------------------
 
@@ -151,6 +157,11 @@ pub struct LumberCampView {
     /// snapshots only roll over when this changes, so paused frames keep
     /// `prev` and `curr` matched and the lerp pins to the sim position.
     last_seen_tick: u64,
+
+    /// Wall-clock origin used to drive view-side animation (currently the
+    /// idle-bob phase). Wall-clock — not sim time — so the bob keeps
+    /// breathing while the sim is paused.
+    started: Instant,
 }
 
 impl View for LumberCampView {
@@ -194,8 +205,10 @@ impl View for LumberCampView {
         // Primitive meshes sized for the world: capsule pawns ~1.6 m tall,
         // cone trees ~2 m tall, 1 m³ stockpile cube. Z-up: every primitive is
         // centred on the origin, and the sim positions place the centre at
-        // height/2 so the base sits on the ground.
-        let pawn_mesh = PrimitiveMesh::capsule(0.30, 1.6, 16, 3);
+        // height/2 so the base sits on the ground. The pawn carries a small
+        // "satchel" cube on its local +X side so per-instance rotation is
+        // visible on an otherwise rotationally-symmetric capsule.
+        let pawn_mesh = pawn_mesh_with_satchel();
         let tree_mesh = PrimitiveMesh::cone(0.60, 2.0, 16, true);
         let stockpile_mesh = PrimitiveMesh::cube(Vec3::ONE);
 
@@ -301,6 +314,7 @@ impl View for LumberCampView {
             pawn_prev: HashMap::new(),
             pawn_curr: HashMap::new(),
             last_seen_tick: 0,
+            started: Instant::now(),
         }
     }
 
@@ -383,8 +397,10 @@ impl View for LumberCampView {
         // attribs to the matching bucket. Hit IDs come from the engine so the
         // ID buffer resolves cursor hits back to the parent WorldObjectId.
         // Pawn positions lerp between the two most recent tick-boundary
-        // snapshots using `alpha`; other objects don't move, so they draw
-        // from the live sim transform.
+        // snapshots using `alpha`; idle pawns get a wall-clock sin-bob on
+        // top of that. Other objects don't move, so they draw from the live
+        // sim transform.
+        let bob_phase = self.started.elapsed().as_secs_f32() * IDLE_BOB_HZ * TAU;
         self.buckets.begin_frame();
         for (zone_id, zone) in sim.zones.iter() {
             for (id, transform) in zone.iter() {
@@ -402,7 +418,11 @@ impl View for LumberCampView {
                         .get(&id)
                         .copied()
                         .unwrap_or(transform.position);
-                    prev.lerp(curr, alpha)
+                    let mut pos = prev.lerp(curr, alpha);
+                    if zone.components().get::<Move>(id).is_none() {
+                        pos.z += bob_phase.sin() * IDLE_BOB_AMPLITUDE;
+                    }
+                    pos
                 } else {
                     transform.position
                 };
@@ -534,4 +554,36 @@ fn toggle_designation_under_cursor(sim: &mut Game, hovered: Option<WorldObjectRe
     } else {
         zone.components_mut().insert(id, Designated);
     }
+}
+
+/// Pawn body + a small offset cube ("satchel") on the local +X side, baked
+/// into one mesh. Same material as the body, so the satchel doesn't
+/// visually pop on its own — but the geometric protrusion catches the sun
+/// at a different angle than the capsule surface, making the pawn's facing
+/// readable as it walks around.
+///
+/// When the example outgrows single-mesh templates (or wants the satchel a
+/// different colour), the right move is to adopt `RenderTemplate` +
+/// `RenderObjectPass::for_each_alive_part`, the same multi-part / multi-
+/// material path the campfire example uses.
+fn pawn_mesh_with_satchel() -> PrimitiveMesh {
+    let mut mesh = PrimitiveMesh::capsule(0.30, 1.6, 16, 3);
+    let satchel = PrimitiveMesh::cube(Vec3::splat(0.18));
+    // Sit the cube just outside the capsule wall on +X, at upper-torso
+    // height, so it reads as a visible asymmetry from any camera angle.
+    let offset = Vec3::new(0.34, 0.0, 0.45);
+    let base = mesh.vertices.len() as u32;
+    mesh.vertices
+        .extend(satchel.vertices.iter().map(|v| PosNormalUv {
+            position: [
+                v.position[0] + offset.x,
+                v.position[1] + offset.y,
+                v.position[2] + offset.z,
+            ],
+            normal: v.normal,
+            uv: v.uv,
+        }));
+    mesh.indices
+        .extend(satchel.indices.iter().map(|&i| base + i));
+    mesh
 }

@@ -170,7 +170,13 @@ impl Simulation for Game {
             }
         }
 
-        // Phase 2 — advance every Move toward target; collect arrivals.
+        // Phase 2 — advance every Move toward target; collect arrivals. Also
+        // face the pawn along its velocity: local +X = "forward" in the
+        // pawn's frame (rotating around Z, the up axis). Capsule pawns are
+        // rotationally symmetric so this isn't visible yet, but the per-
+        // instance rotation flows through `WorldTransform.rotation` into the
+        // pawn template's model matrix end-to-end — a non-symmetric pawn
+        // mesh will reveal it without further plumbing.
         let mut arrived: Vec<WorldObjectId> = Vec::new();
         {
             let (mut objects, components) = zone.split_mut();
@@ -185,7 +191,9 @@ impl Simulation for Game {
                     transform.position = m.target;
                     arrived.push(pawn);
                 } else {
-                    transform.position += delta / dist * step;
+                    let dir = delta / dist;
+                    transform.position += dir * step;
+                    transform.rotation = Quat::from_rotation_z(dir.y.atan2(dir.x));
                 }
             }
         }
