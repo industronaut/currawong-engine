@@ -15,11 +15,12 @@
 //!
 //! Layout: this module owns the orchestration ([`LumberCampView`], the
 //! fused render walk, shared infrastructure like [`MeshTemplate`]) and
-//! per-kind state moves out into sibling submodules as it grows. [`pawn`]
-//! and [`tree`] have been extracted; stockpile state still lives inline
-//! because it doesn't carry any per-instance scratch yet.
+//! per-kind state lives in sibling submodules — [`pawn`], [`tree`],
+//! [`stockpile`]. Adding a new kind is a new sibling module + a registration
+//! line in [`init`](LumberCampView::init) + an arm in the dispatch `match`.
 
 mod pawn;
+mod stockpile;
 mod tree;
 
 use std::collections::HashMap;
@@ -185,13 +186,9 @@ impl View for LumberCampView {
             true,
         );
 
-        // Pawn and tree body templates come from their submodules (meshes
-        // + material params live alongside the rest of their per-kind code)
-        // and get registered in the central map so the bucket draw loop
-        // renders them uniformly. Stockpile still lives inline — it has
-        // no per-instance scratch to colocate yet.
-        let stockpile_mesh = PrimitiveMesh::cube(Vec3::ONE);
-
+        // Every body template comes from its per-kind submodule, registered
+        // here in the central map so the bucket draw loop renders all kinds
+        // uniformly. Adding a kind is one new line.
         let mut templates = HashMap::new();
         templates.insert(
             RenderId::Pawn,
@@ -203,19 +200,7 @@ impl View for LumberCampView {
         );
         templates.insert(
             RenderId::Stockpile,
-            MeshTemplate::new(
-                renderer,
-                &material,
-                &samplers,
-                &albedo,
-                &stockpile_mesh,
-                TemplateParams {
-                    label: "lumber-camp stockpile",
-                    albedo_factor: Vec4::new(0.55, 0.32, 0.18, 1.0), // wood brown
-                    metallic: 0.0,
-                    roughness: 0.85,
-                },
-            ),
+            stockpile::new_body_template(renderer, &material, &samplers, &albedo),
         );
 
         let mut buckets = InstanceBuckets::<RenderId, MeshInstanceAttribs>::new(
