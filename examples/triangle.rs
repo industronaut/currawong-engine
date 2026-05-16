@@ -75,11 +75,15 @@ impl View for Triangle {
                     module: &shader,
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: renderer.surface_format(),
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: renderer.surface_format(),
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        // Opt out of the hit-ID attachment (#56 PR 1).
+                        renderer.id_target_opt_out(),
+                    ],
                 }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,

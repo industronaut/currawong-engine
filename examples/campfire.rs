@@ -500,8 +500,18 @@ impl View for CampfireView {
             ..Default::default()
         });
 
-        let mesh_pipeline = build_mesh_pipeline(device, &layout, renderer.surface_format());
-        let particle_pipeline = build_particle_pipeline(device, &layout, renderer.surface_format());
+        let mesh_pipeline = build_mesh_pipeline(
+            device,
+            &layout,
+            renderer.surface_format(),
+            renderer.id_format(),
+        );
+        let particle_pipeline = build_particle_pipeline(
+            device,
+            &layout,
+            renderer.surface_format(),
+            renderer.id_format(),
+        );
 
         let mut meshes = HashMap::new();
         meshes.insert(
@@ -656,6 +666,7 @@ fn build_mesh_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     surface_format: wgpu::TextureFormat,
+    id_format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("mesh shader"),
@@ -697,11 +708,20 @@ fn build_mesh_pipeline(
             module: &shader,
             entry_point: Some("fs_main"),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                // Opt out of the hit-ID attachment (#56 PR 1): match the
+                // format wgpu sees on the attachment but disable writes.
+                Some(wgpu::ColorTargetState {
+                    format: id_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::empty(),
+                }),
+            ],
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -721,6 +741,7 @@ fn build_particle_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     surface_format: wgpu::TextureFormat,
+    id_format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("particle shader"),
@@ -770,11 +791,20 @@ fn build_particle_pipeline(
             module: &shader,
             entry_point: Some("fs_main"),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                // Opt out of the hit-ID attachment (#56 PR 1): match the
+                // format wgpu sees on the attachment but disable writes.
+                Some(wgpu::ColorTargetState {
+                    format: id_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::empty(),
+                }),
+            ],
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: Some(wgpu::DepthStencilState {

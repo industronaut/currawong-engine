@@ -230,11 +230,16 @@ impl TerrainMaterial {
                         module: &shader,
                         entry_point: Some("fs_main"),
                         compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: renderer.surface_format(),
-                            blend: Some(blend),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
+                        targets: &[
+                            Some(wgpu::ColorTargetState {
+                                format: renderer.surface_format(),
+                                blend: Some(blend),
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            // Opt out of the hit-ID attachment (#56 PR 1):
+                            // terrain becomes a writer in PR 2.
+                            renderer.id_target_opt_out(),
+                        ],
                     }),
                     primitive,
                     depth_stencil,

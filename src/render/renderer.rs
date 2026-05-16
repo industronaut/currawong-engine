@@ -44,6 +44,39 @@ impl Renderer {
         self.scene.depth_view()
     }
 
+    /// Format of the engine's hit-ID attachment. Pipelines drawn in the
+    /// opaque pass must declare a target at `targets[1]` — either writing
+    /// per-pixel hit IDs in this format, or opting out via the no-write
+    /// pattern returned by [`id_target_opt_out`](Self::id_target_opt_out).
+    /// The buffer is cleared to `0` at the start of every frame; `0` is the
+    /// no-hit sentinel. See issue #56 for the full picking design.
+    pub fn id_format(&self) -> wgpu::TextureFormat {
+        self.scene.id_format()
+    }
+
+    /// `ColorTargetState` for the hit-ID slot that declares the format but
+    /// disables writes — the right value for any pipeline drawn in the
+    /// opaque pass that doesn't participate in picking (debug overlays,
+    /// decorative geometry, transparent particles, …).
+    ///
+    /// wgpu requires `targets[i]` formats to match the render pass's
+    /// `color_attachments[i]` formats; setting the write mask to empty is
+    /// how a pipeline declares "leave whatever's there alone" so existing
+    /// IDs from earlier opaque draws survive under decorative pixels.
+    pub fn id_target_opt_out(&self) -> Option<wgpu::ColorTargetState> {
+        Some(wgpu::ColorTargetState {
+            format: self.id_format(),
+            blend: None,
+            write_mask: wgpu::ColorWrites::empty(),
+        })
+    }
+
+    /// Hit-ID texture view. Used by the engine's frame loop to attach to the
+    /// opaque pass — not normally needed by views.
+    pub(super) fn id_view(&self) -> &wgpu::TextureView {
+        self.scene.id_view()
+    }
+
     /// Bind-group layout for the engine-managed scene environment uniform.
     /// Pass to [`PipelineLayoutDescriptor`](wgpu::PipelineLayoutDescriptor)
     /// when building any pipeline that reads scene lighting (sun direction,
