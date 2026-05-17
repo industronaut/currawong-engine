@@ -22,8 +22,8 @@ use std::time::Instant;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, Components, EngineCtx, LiveRenderObject, PbrMaterial, PosNormalUv, PrimitiveMesh,
-    Renderer, SamplerRegistry, Texture, WorldObjectId, WorldObjectRef,
+    Aabb, AssetServer, Components, EngineCtx, Handle, LiveRenderObject, PbrMaterial, PosNormalUv,
+    PrimitiveMesh, Renderer, SamplerRegistry, Texture, WorldObjectId, WorldObjectRef,
 };
 
 use super::{MeshTemplate, TemplateParams};
@@ -45,12 +45,14 @@ pub fn new_body_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
-    albedo: &Texture,
+    asset_server: &AssetServer,
+    albedo: Handle<Texture>,
 ) -> MeshTemplate {
     MeshTemplate::new(
         renderer,
         material,
         samplers,
+        asset_server,
         albedo,
         &pawn_mesh_with_satchel(),
         TemplateParams {
@@ -67,12 +69,14 @@ pub fn new_log_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
-    albedo: &Texture,
+    asset_server: &AssetServer,
+    albedo: Handle<Texture>,
 ) -> MeshTemplate {
     MeshTemplate::new(
         renderer,
         material,
         samplers,
+        asset_server,
         albedo,
         &PrimitiveMesh::cylinder(0.07, 0.6, 12, true),
         TemplateParams {

@@ -30,15 +30,18 @@ mod stockpile;
 mod tree;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use currawong::data::Vfs;
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, HitTarget, InstanceBuckets,
-    LiveRenderObjects, MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance,
-    PbrMaterialParams, PrimitiveMesh, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer,
-    SamplerKind, SamplerRegistry, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer,
-    Texture, View, ViewConfig, ViewEnvironment, WorldObjectRef, ZoneId, wgpu, winit, yakui,
+    AssetServer, Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, Handle, HitTarget,
+    InstanceBuckets, LiveRenderObjects, MeshInstanceAttribs, OrbitRig, PbrMaterial,
+    PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh, RenderObjectPass, RenderRegistry,
+    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
+    TerrainMaterialInstance, TerrainRenderer, Texture, View, ViewConfig, ViewEnvironment,
+    WorldObjectRef, ZoneId, wgpu, winit, yakui,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -101,7 +104,8 @@ impl MeshTemplate {
         renderer: &Renderer,
         material: &PbrMaterial,
         samplers: &SamplerRegistry,
-        albedo: &Texture,
+        asset_server: &AssetServer,
+        albedo: Handle<Texture>,
         mesh: &PrimitiveMesh,
         params: TemplateParams,
     ) -> Self {
@@ -123,6 +127,7 @@ impl MeshTemplate {
         let material = material.create_instance(
             renderer,
             samplers,
+            asset_server,
             PbrMaterialParams {
                 albedo,
                 sampler: SamplerKind::LinearClamp,
@@ -220,9 +225,11 @@ impl View for LumberCampView {
         let material = PbrMaterial::new(renderer, camera_binding.layout());
 
         // 1×1 white sRGB texture — albedo is driven entirely by the per-part
-        // `albedo_factor`. Swapping in real textures later means only changing
-        // the texture handed to each `MeshTemplate`.
-        let albedo = Texture::from_rgba8(
+        // `albedo_factor`. Wrapped in a ready `Handle` so it flows through
+        // the same material API the streaming path uses; PR 4 swaps the
+        // eager Texture for real PNG assets and gets the streaming
+        // behaviour for free.
+        let albedo_tex = Texture::from_rgba8(
             renderer,
             "lumber-camp white",
             1,
@@ -230,6 +237,8 @@ impl View for LumberCampView {
             &[255, 255, 255, 255],
             true,
         );
+        let asset_server = AssetServer::new(renderer, Arc::new(Vfs::new()));
+        let albedo: Handle<Texture> = Handle::ready(albedo_tex);
 
         // GPU resources per drawable part. Each `PartKey` resolves to one
         // `MeshTemplate` here; multiple `MeshPart`s in different render
@@ -238,23 +247,47 @@ impl View for LumberCampView {
         let mut mesh_templates = HashMap::new();
         mesh_templates.insert(
             PartKey::PawnBody,
-            pawn::new_body_template(renderer, &material, &samplers, &albedo),
+            pawn::new_body_template(
+                renderer,
+                &material,
+                &samplers,
+                &asset_server,
+                albedo.clone(),
+            ),
         );
         mesh_templates.insert(
             PartKey::Log,
-            pawn::new_log_template(renderer, &material, &samplers, &albedo),
+            pawn::new_log_template(
+                renderer,
+                &material,
+                &samplers,
+                &asset_server,
+                albedo.clone(),
+            ),
         );
         mesh_templates.insert(
             PartKey::TreeBody,
-            tree::new_body_template(renderer, &material, &samplers, &albedo),
+            tree::new_body_template(
+                renderer,
+                &material,
+                &samplers,
+                &asset_server,
+                albedo.clone(),
+            ),
         );
         mesh_templates.insert(
             PartKey::Marker,
-            tree::new_marker_template(renderer, &material, &samplers, &albedo),
+            tree::new_marker_template(
+                renderer,
+                &material,
+                &samplers,
+                &asset_server,
+                albedo.clone(),
+            ),
         );
         mesh_templates.insert(
             PartKey::Stockpile,
-            stockpile::new_body_template(renderer, &material, &samplers, &albedo),
+            stockpile::new_body_template(renderer, &material, &samplers, &asset_server, albedo),
         );
 
         // Engine render templates: which parts make up each `RenderId`,

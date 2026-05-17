@@ -45,6 +45,8 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
 
+use super::asset_server::{AssetServer, TextureSource};
+use super::handle::Handle;
 use super::material::{MeshInstanceAttribs, MeshMaterial};
 use super::renderer::Renderer;
 use super::texture::{SamplerKind, SamplerRegistry, Texture};
@@ -214,8 +216,16 @@ pub struct PbrMaterial {
 }
 
 /// Parameters for [`PbrMaterial::create_instance`].
-pub struct PbrMaterialParams<'a> {
-    pub albedo: &'a Texture,
+///
+/// `albedo` is a [`Handle<Texture>`] rather than a borrow because material
+/// instances live longer than a single frame and have to survive the
+/// fallback path: while the handle is `Loading` or `Failed` the bind group
+/// is built against the [`AssetServer`]'s magenta fallback, and rebound to
+/// the real texture on the frame the handle transitions to `Ready`. Pass
+/// [`Handle::ready`] if you already have the texture in hand and want a
+/// non-streaming wiring.
+pub struct PbrMaterialParams {
+    pub albedo: Handle<Texture>,
     pub sampler: SamplerKind,
     /// Multiplied with `albedo` texture sample. Use `Vec4::ONE` to pass the
     /// texture through unchanged. `albedo.a` doubles as opacity.
@@ -345,11 +355,24 @@ impl PbrMaterial {
         &self.pipeline
     }
 
+    pub(super) fn instance_bgl(&self) -> &wgpu::BindGroupLayout {
+        &self.instance_bgl
+    }
+
+    /// Build a material instance bound to an albedo [`Handle<Texture>`].
+    ///
+    /// The initial bind group is built against whatever the asset server
+    /// currently resolves the handle to — the magenta fallback if it's
+    /// still `Loading`, the real texture if it's already `Ready` (e.g.
+    /// when the caller used [`Handle::ready`]). Subsequent
+    /// [`PbrMaterialInstance::refresh`] calls swap the bind group over as
+    /// the handle state changes.
     pub fn create_instance(
         &self,
         renderer: &Renderer,
         samplers: &SamplerRegistry,
-        params: PbrMaterialParams<'_>,
+        asset_server: &AssetServer,
+        params: PbrMaterialParams,
     ) -> PbrMaterialInstance {
         let data = PbrMaterialUniform {
             albedo: params.albedo_factor.to_array(),
@@ -367,28 +390,56 @@ impl PbrMaterial {
         renderer
             .queue
             .write_buffer(&buffer, 0, bytemuck::bytes_of(&data));
-        let bind_group = renderer
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Pbr instance bind group"),
-                layout: &self.instance_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&params.albedo.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(samplers.get(params.sampler)),
-                    },
-                ],
-            });
-        PbrMaterialInstance { buffer, bind_group }
+        let PbrMaterialParams {
+            albedo, sampler, ..
+        } = params;
+        let resolved = asset_server.resolve_texture(&albedo);
+        let bind_group = build_instance_bind_group(
+            &renderer.device,
+            &self.instance_bgl,
+            &buffer,
+            resolved.view,
+            samplers.get(sampler),
+        );
+        let last_source = resolved.source;
+        PbrMaterialInstance {
+            buffer,
+            handle: albedo,
+            sampler_kind: sampler,
+            bind_group,
+            last_source,
+        }
     }
+}
+
+/// Build the per-instance bind group. Shared between
+/// [`PbrMaterial::create_instance`] and the refresh path so the layout +
+/// entry order live in one place.
+fn build_instance_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    albedo_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Pbr instance bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(albedo_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 impl MeshMaterial for PbrMaterial {
@@ -402,14 +453,60 @@ impl MeshMaterial for PbrMaterial {
 /// A live PBR material instance — uniform buffer (factors) + bind group
 /// holding the albedo texture, sampler, and uniform. Bind as `@group(2)`
 /// when drawing through the material's pipeline.
+///
+/// The bound albedo flexes with the underlying [`Handle<Texture>`]:
+/// [`refresh`](Self::refresh) checks the handle each frame and rebuilds
+/// the bind group iff the resolved [`TextureSource`] changed (real ↔
+/// fallback ↔ forced-fallback). Refreshing is cheap when nothing changes;
+/// the rebuild only fires on the transition frame.
 pub struct PbrMaterialInstance {
     buffer: wgpu::Buffer,
+    handle: Handle<Texture>,
+    sampler_kind: SamplerKind,
     bind_group: wgpu::BindGroup,
+    /// Which view the cached `bind_group` is currently built against — used
+    /// by [`refresh`](Self::refresh) to decide whether a rebuild is needed.
+    last_source: TextureSource,
 }
 
 impl PbrMaterialInstance {
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+
+    /// The albedo handle this instance is bound to. Cheap to clone — share
+    /// the same handle across many instances (e.g. five PBR variants on
+    /// one wood-grain texture).
+    pub fn handle(&self) -> &Handle<Texture> {
+        &self.handle
+    }
+
+    /// Reconcile the cached bind group with the current handle state. Cheap
+    /// when nothing changed; on a state transition (handle finishes loading,
+    /// or the debug [`set_force_loading`](super::AssetServer::set_force_loading)
+    /// toggle flips) the bind group is rebuilt against the new view.
+    ///
+    /// Call once per frame for each instance you intend to draw, before
+    /// `pass.set_bind_group(2, instance.bind_group(), ..)`.
+    pub fn refresh(
+        &mut self,
+        renderer: &Renderer,
+        material: &PbrMaterial,
+        samplers: &SamplerRegistry,
+        asset_server: &AssetServer,
+    ) {
+        let resolved = asset_server.resolve_texture(&self.handle);
+        if resolved.source == self.last_source {
+            return;
+        }
+        self.bind_group = build_instance_bind_group(
+            &renderer.device,
+            material.instance_bgl(),
+            &self.buffer,
+            resolved.view,
+            samplers.get(self.sampler_kind),
+        );
+        self.last_source = resolved.source;
     }
 
     /// Re-upload the factor uniform without rebuilding the bind group.

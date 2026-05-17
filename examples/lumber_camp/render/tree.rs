@@ -14,8 +14,8 @@ use std::f32::consts::PI;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, Components, LiveRenderObject, PbrMaterial, PrimitiveMesh, Renderer, SamplerRegistry,
-    Texture, WorldObjectRef,
+    Aabb, AssetServer, Components, Handle, LiveRenderObject, PbrMaterial, PrimitiveMesh, Renderer,
+    SamplerRegistry, Texture, WorldObjectRef,
 };
 
 use super::{MeshTemplate, TemplateParams};
@@ -38,12 +38,14 @@ pub fn new_body_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
-    albedo: &Texture,
+    asset_server: &AssetServer,
+    albedo: Handle<Texture>,
 ) -> MeshTemplate {
     MeshTemplate::new(
         renderer,
         material,
         samplers,
+        asset_server,
         albedo,
         &PrimitiveMesh::cone(0.60, 2.0, 16, true),
         TemplateParams {
@@ -61,12 +63,14 @@ pub fn new_marker_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
-    albedo: &Texture,
+    asset_server: &AssetServer,
+    albedo: Handle<Texture>,
 ) -> MeshTemplate {
     MeshTemplate::new(
         renderer,
         material,
         samplers,
+        asset_server,
         albedo,
         &PrimitiveMesh::cone(0.18, 0.35, 12, true),
         TemplateParams {

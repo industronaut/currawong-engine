@@ -13,11 +13,19 @@
 //!   [`SamplerKind`]. Build once at `View::init` and share across
 //!   materials.
 //!
+//! ## Constructor surface
+//!
+//! Each upload path comes in two flavours. The `_with_device` variants take
+//! `&wgpu::Device` + `&wgpu::Queue` directly so background loaders running
+//! on a worker thread can upload without touching `Renderer` (which is
+//! single-owner and lives on the main thread). The `Renderer`-flavoured
+//! constructors are the convenience wrappers user code reaches for.
+//!
 //! ## What's not here yet
 //!
 //! - glTF / asset-manager plumbing. [`Texture::from_path`] reads PNG/JPEG
-//!   from disk, but there's no handle system, no async streaming, and no
-//!   texture compression yet.
+//!   from disk synchronously; streaming flows through
+//!   [`AssetServer`](super::AssetServer) and `from_png_bytes_with_device`.
 //! - Linear-space mipmap downsampling for sRGB. We average in raw 8-bit
 //!   sRGB space, which is slightly wrong but invisible at the quality
 //!   level we render at. Worth revisiting before shipping.
@@ -40,6 +48,28 @@ pub struct Texture {
 }
 
 impl Texture {
+    /// Upload a 2D texture from RGBA8 byte data via the caller's
+    /// `Renderer`. Convenience wrapper over
+    /// [`Self::from_rgba8_with_device`].
+    pub fn from_rgba8(
+        renderer: &Renderer,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        srgb: bool,
+    ) -> Self {
+        Self::from_rgba8_with_device(
+            &renderer.device,
+            &renderer.queue,
+            label,
+            width,
+            height,
+            rgba,
+            srgb,
+        )
+    }
+
     /// Upload a 2D texture from RGBA8 byte data (`width * height * 4`
     /// bytes, row-major, no padding) and generate a full mip chain.
     ///
@@ -47,8 +77,15 @@ impl Texture {
     /// data the shader expects in linear space (the GPU decodes sRGB →
     /// linear on sample). Use `srgb = false` for normal maps,
     /// metallic-roughness packs, and other "data" textures.
-    pub fn from_rgba8(
-        renderer: &Renderer,
+    ///
+    /// Takes `&wgpu::Device` + `&wgpu::Queue` directly rather than a
+    /// `Renderer` because [`AssetServer`](super::AssetServer) background
+    /// loaders run on a worker thread and clone the device/queue handles
+    /// into their task — `Renderer` is single-owner and lives on the main
+    /// thread.
+    pub fn from_rgba8_with_device(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         label: &str,
         width: u32,
         height: u32,
@@ -69,7 +106,7 @@ impl Texture {
         };
         let mip_levels = mip_level_count(width, height);
 
-        let texture = renderer.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
                 width,
@@ -90,7 +127,7 @@ impl Texture {
         let mut level_h = height;
         let mut level_data: Vec<u8> = rgba.to_vec();
         for level in 0..mip_levels {
-            renderer.queue.write_texture(
+            queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
                     mip_level: level,
@@ -145,7 +182,9 @@ impl Texture {
     /// callers commit to the correct interpretation here.
     ///
     /// Synchronous file read; large textures will block the caller.
-    /// Suitable for example-scale assets.
+    /// Suitable for example-scale assets. Streaming through
+    /// [`AssetServer`](super::AssetServer) is the right path for shipping
+    /// content; this constructor is the eager-load escape hatch.
     pub fn from_path(
         renderer: &Renderer,
         path: impl AsRef<Path>,
@@ -166,13 +205,39 @@ impl Texture {
             color_space == TextureColorSpace::Srgb,
         ))
     }
+
+    /// Decode an in-memory PNG/JPEG byte buffer and upload it. Used by
+    /// [`AssetServer`](super::AssetServer) loader tasks after a successful
+    /// [`Vfs::read`](crate::data::Vfs::read).
+    ///
+    /// Same `color_space` semantics as [`Self::from_path`] — the caller
+    /// commits to sRGB-vs-linear interpretation here, not inferring from
+    /// extension or magic bytes.
+    pub fn from_png_bytes_with_device(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &str,
+        bytes: &[u8],
+        color_space: TextureColorSpace,
+    ) -> Result<Self, TextureLoadError> {
+        let (width, height, rgba) = decode_rgba8_from_bytes(bytes)?;
+        Ok(Self::from_rgba8_with_device(
+            device,
+            queue,
+            label,
+            width,
+            height,
+            &rgba,
+            color_space == TextureColorSpace::Srgb,
+        ))
+    }
 }
 
 /// How the GPU should interpret a texture's pixel data on sample.
 ///
 /// Required by [`Texture::from_path`] — no default, no inference from
 /// filename. The wrong choice silently darkens or brightens output.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TextureColorSpace {
     /// Albedo / colour maps. Selects `Rgba8UnormSrgb`; samples decode
     /// sRGB → linear automatically.
