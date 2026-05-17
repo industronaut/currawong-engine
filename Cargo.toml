@@ -9,7 +9,7 @@ readme = "README.md"
 [features]
 default = ["render"]
 # Render side: window, GPU, View, run(). Disable for headless sim-only builds.
-render = ["dep:bytemuck", "dep:image", "dep:pollster", "dep:wgpu", "dep:winit", "glam/bytemuck"]
+render = ["dep:bytemuck", "dep:gltf", "dep:image", "dep:pollster", "dep:wgpu", "dep:winit", "glam/bytemuck"]
 # egui-based debug UI overlay. Implies `render`. Adds `View::ui` opt-in hook.
 egui = ["render", "dep:egui", "dep:egui-winit", "dep:egui-wgpu"]
 # yakui-based game UI. Implies `render`. Adds `View::game_ui` opt-in hook.
@@ -24,6 +24,12 @@ glam = "0.32.1"
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"
 bytemuck = { version = "1", optional = true }
+# glTF 2.0 loader for static-mesh streaming. `utils` gives us the
+# `Reader::read_positions` / `read_normals` / `read_tex_coords` /
+# `read_indices` helpers; we deliberately skip `import` (and its `base64` /
+# `image` deps) because we load bytes through our own `Vfs` and reach the
+# parser via `Gltf::from_slice` — no disk paths, no embedded textures.
+gltf = { version = "1.4", default-features = false, features = ["utils"], optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 pollster = { version = "0.4.0", optional = true }
 wgpu = { version = "29.0.3", optional = true }
@@ -77,3 +83,11 @@ required-features = ["yakui"]
 
 [[example]]
 name = "headless"
+
+# One-shot tool that materialises `assets/test/cube.glb`, the unit-cube
+# glTF the `assets` example streams and the mesh decoder's tests read via
+# `include_bytes!`. Run once; commit the output. Re-run when the encoder
+# itself changes (or someone needs to regenerate the file from scratch).
+[[bin]]
+name = "gen_test_assets"
+required-features = ["render"]

@@ -1,53 +1,59 @@
 //! Streaming asset loading, demonstrated.
 //!
-//! A single PBR cube whose albedo is streamed from the VFS through the
-//! [`AssetServer`]. On startup the cube renders magenta (the asset server's
-//! resident fallback) while the background loader thread is in flight,
-//! then snaps to the real texture once the load lands. The transition is
-//! logged to stdout so it's observable even when the natural streaming
-//! window is shorter than a frame.
+//! Two PBR cubes side by side, both wired through the [`AssetServer`].
+//! The left cube's *mesh* is built in code (the existing
+//! [`PrimitiveMesh::cube`] generator) — only its *albedo texture* streams
+//! through the VFS. The right cube's mesh streams too, from a tiny
+//! checked-in `assets/test/cube.glb`; both cubes share the same texture
+//! handle, so on a cold start you watch the right cube transition from
+//! the asset server's magenta unit-cube fallback (sized to the template's
+//! declared visual AABB) to the real glTF geometry.
 //!
 //! ## Controls
 //!
 //! - `F` (hold) — force every handle to *look* `Loading` to consumers.
-//!   The cube rebinds to the magenta fallback for as long as the key is
-//!   held; release it to see the real texture rebind. This is the debug
-//!   toggle on [`AssetServer::set_force_loading`] — exists so the fallback
-//!   path renders on demand during normal dev, not just during real I/O
-//!   hiccups.
+//!   Both cubes rebind to their respective fallbacks (texture for the
+//!   left, mesh for the right; the right also loses the texture).
 //! - `Esc` — quit.
 //!
 //! ## What this proves
 //!
 //! - `Handle::peek` returns `Loading` until the background thread
-//!   publishes, then `Ready` for the rest of the run. The cube's bind
-//!   group rebuilds exactly once across that transition (the
-//!   [`PbrMaterialInstance::refresh`] cache check).
-//! - The fallback is bindable any time the handle isn't `Ready`, including
-//!   the synthetic "forced loading" state. The render path never has
-//!   "nothing" to bind.
+//!   publishes, then `Ready` for the rest of the run — separately for
+//!   each asset type, so the texture can land before the mesh or
+//!   vice versa.
+//! - [`AssetServer::resolve_mesh`] returns the unit-cube fallback buffers
+//!   plus a translate+scale matrix sized to the template's visual AABB.
+//!   Compose it into the per-instance model and the placeholder
+//!   occupies the same volume the real mesh will.
+//! - The PR-2 debug toggle now exercises *both* fallback paths in one
+//!   keybind: holding `F` flips the asset server into forced-fallback
+//!   mode, which `resolve_texture` *and* `resolve_mesh` both honour.
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use currawong::data::{FsSource, Vfs, VfsPath};
-use currawong::glam::{Mat4, Quat, Vec3, Vec4};
+use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    AssetServer, Camera, CameraBinding, EngineCtx, Handle, HandleState, InstanceBuckets,
-    MaterialInstanceRegistry, MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance,
-    PbrMaterialParams, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, Simulation, Texture,
-    TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldTransform, Zone, ZoneId, Zones,
-    sun_direction_for, wgpu, winit,
+    Aabb, AssetServer, Camera, CameraBinding, EngineCtx, Handle, HandleState, Mesh,
+    MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
+    Renderer, SamplerKind, SamplerRegistry, Simulation, Texture, TextureColorSpace, View,
+    ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 // --- Sim ----------------------------------------------------------------
 
-/// Minimal sim: one object at origin, plus a `SimEnvironment` so the sun
-/// has a direction.
+/// Minimal sim: a `time_of_day` advancing the sun direction, plus one
+/// empty zone so `View::active_zone` has something to point at. This
+/// example is deliberately view-centric — the asset pipeline is a
+/// view-side concern; sim-driven object iteration is the lumber camp
+/// example's job.
 struct Game {
+    #[allow(dead_code)]
     zones: Zones,
     zone: ZoneId,
     time_of_day: f32,
@@ -57,16 +63,9 @@ impl Game {
     fn new() -> Self {
         let mut zones = Zones::new();
         let zone_id = zones.insert(Zone::new());
-        let zone = zones.get_mut(zone_id).expect("just inserted");
-        zone.insert(WorldTransform {
-            position: Vec3::new(0.0, 0.0, 0.5),
-            rotation: Quat::IDENTITY,
-        });
         Self {
             zones,
             zone: zone_id,
-            // Mid-morning sun — bright enough to read both the magenta
-            // fallback and the checker texture clearly.
             time_of_day: 0.30,
         }
     }
@@ -74,8 +73,6 @@ impl Game {
 
 impl Simulation for Game {
     fn tick(&mut self, dt: Duration) {
-        // Sun drifts slowly across the sky; visible motion not required
-        // for this example, but keeps the lighting alive.
         let day_seconds = 90.0;
         self.time_of_day = (self.time_of_day + dt.as_secs_f32() / day_seconds).rem_euclid(1.0);
     }
@@ -84,12 +81,6 @@ impl Simulation for Game {
 // --- View ---------------------------------------------------------------
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const MAX_INSTANCES: u32 = 4;
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum MatId {
-    Cube,
-}
 
 struct AssetsView {
     camera: Camera,
@@ -97,19 +88,41 @@ struct AssetsView {
     material: PbrMaterial,
     samplers: SamplerRegistry,
     asset_server: AssetServer,
-    instances: MaterialInstanceRegistry<PbrMaterialInstance, MatId>,
-    cube_vertices: wgpu::Buffer,
-    cube_indices: wgpu::Buffer,
-    cube_index_count: u32,
-    buckets: InstanceBuckets<MatId, MeshInstanceAttribs>,
-    /// Snapshot of last frame's handle state — used to log transitions
-    /// without spamming stdout every frame.
-    last_logged_state: LoggedState,
-    /// Cube's albedo handle — kept here so we can peek it from `update`
-    /// for the transition log.
-    albedo: Handle<Texture>,
-    /// Whether we logged the "press F" hint yet.
+    /// Both cubes share one material instance — same texture handle, same
+    /// sampler, same factors. Only the geometry binding differs per draw.
+    cube_material: PbrMaterialInstance,
+    inline_cube: InlineCube,
+    gltf_cube: GltfCube,
+    last_texture_state: LoggedState,
+    last_mesh_state: LoggedState,
     hint_logged: bool,
+}
+
+/// Left-hand cube — vertex/index buffers built once at init from the
+/// in-code [`PrimitiveMesh::cube`] generator. Drawn unconditionally.
+struct InlineCube {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    /// Per-instance attribute buffer rewritten each frame so the cube can
+    /// drift / rotate / change tint without rebuilding pipelines.
+    instance_buffer: wgpu::Buffer,
+    position: Vec3,
+}
+
+/// Right-hand cube — mesh streamed through the asset server. The handle
+/// starts in `Loading` and the per-frame [`AssetServer::resolve_mesh`]
+/// call substitutes the unit-cube fallback (scaled to `visual_bounds`)
+/// until the real mesh lands.
+struct GltfCube {
+    handle: Handle<Mesh>,
+    instance_buffer: wgpu::Buffer,
+    position: Vec3,
+    /// What [`AssetServer::resolve_mesh`] uses to size the fallback
+    /// placeholder. Same shape as a [`RenderTemplate`](currawong::RenderTemplate)'s
+    /// declared visual AABB — kept here so this example doesn't need the
+    /// full templating machinery just to demonstrate the resolve API.
+    visual_bounds: Aabb,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -138,7 +151,7 @@ impl View for AssetsView {
 
         let device = &renderer.device;
         let camera = Camera {
-            position: Vec3::new(2.5, -3.5, 2.5),
+            position: Vec3::new(3.5, -4.5, 3.5),
             target: Vec3::new(0.0, 0.0, 0.5),
             ..Camera::default()
         };
@@ -146,24 +159,19 @@ impl View for AssetsView {
         let samplers = SamplerRegistry::new(device);
         let material = PbrMaterial::new(renderer, camera_binding.layout());
 
-        // Mount the project's `assets/` directory as the VFS base layer.
-        // Real games would mount a sealed archive in ship builds and the
-        // loose directory in dev; both paths produce a `Vfs` the asset
-        // server doesn't have to distinguish.
         let assets_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
         let mut vfs = Vfs::new();
         vfs.mount(FsSource::new(assets_root));
         let asset_server = AssetServer::new(renderer, Arc::new(vfs));
 
-        // Spawn the streaming load. Returns immediately; the handle starts
-        // `Loading` and transitions to `Ready` (or `Failed`) once the
-        // background thread finishes the VFS read + PNG decode + upload.
+        // Streamed texture — bound by the shared material instance. Both
+        // cubes will sample it once the load lands.
         let albedo: Handle<Texture> = asset_server.texture(
             VfsPath::new("checker_albedo.png").expect("valid VFS path"),
             TextureColorSpace::Srgb,
         );
 
-        let cube_instance = material.create_instance(
+        let cube_material = material.create_instance(
             renderer,
             &samplers,
             &asset_server,
@@ -175,26 +183,39 @@ impl View for AssetsView {
                 roughness: 0.5,
             },
         );
-        let mut instances = MaterialInstanceRegistry::new();
-        instances.register(MatId::Cube, cube_instance);
 
-        let mesh = PrimitiveMesh::cube(Vec3::ONE);
-        let cube_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("assets cube vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
+        // --- Inline cube --------------------------------------------------
+        let inline_mesh = PrimitiveMesh::cube(Vec3::ONE);
+        let inline_vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("inline cube vertices"),
+            contents: bytemuck::cast_slice(&inline_mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let cube_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("assets cube indices"),
-            contents: bytemuck::cast_slice(&mesh.indices),
+        let inline_index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("inline cube indices"),
+            contents: bytemuck::cast_slice(&inline_mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
+        let inline_cube = InlineCube {
+            vertex_buffer: inline_vertex,
+            index_buffer: inline_index,
+            index_count: inline_mesh.index_count(),
+            instance_buffer: create_one_instance_buffer(device, "inline cube instance"),
+            position: Vec3::new(-1.0, 0.0, 0.5),
+        };
 
-        let mut buckets = InstanceBuckets::<MatId, MeshInstanceAttribs>::new(
-            "assets instance attribs",
-            MAX_INSTANCES,
-        );
-        buckets.register(device, MatId::Cube);
+        // --- glTF cube ----------------------------------------------------
+        let gltf_handle = asset_server.mesh(VfsPath::new("test/cube.glb").expect("valid VFS path"));
+        let gltf_cube = GltfCube {
+            handle: gltf_handle,
+            instance_buffer: create_one_instance_buffer(device, "gltf cube instance"),
+            position: Vec3::new(1.0, 0.0, 0.5),
+            // Declare the visual AABB *we know* the glTF cube has so the
+            // fallback placeholder is sized to match. The asset server
+            // can't infer this from a Loading handle — that's the whole
+            // reason `resolve_mesh` takes bounds as a parameter.
+            visual_bounds: Aabb::cube(0.5),
+        };
 
         Self {
             camera,
@@ -202,13 +223,11 @@ impl View for AssetsView {
             material,
             samplers,
             asset_server,
-            instances,
-            cube_vertices,
-            cube_indices,
-            cube_index_count: mesh.index_count(),
-            buckets,
-            last_logged_state: LoggedState::Loading,
-            albedo,
+            cube_material,
+            inline_cube,
+            gltf_cube,
+            last_texture_state: LoggedState::Loading,
+            last_mesh_state: LoggedState::Loading,
             hint_logged: false,
         }
     }
@@ -232,31 +251,49 @@ impl View for AssetsView {
             println!("assets demo: hold F to force the magenta fallback, Esc to quit");
             self.hint_logged = true;
         }
-        let now = match self.albedo.peek() {
+
+        // Log texture-handle state transitions (PR-2 behaviour).
+        let texture_state = match self.cube_material.handle().peek() {
             HandleState::Loading => LoggedState::Loading,
             HandleState::Ready(_) => LoggedState::Ready,
             HandleState::Failed(e) => {
-                if self.last_logged_state != LoggedState::Failed {
+                if self.last_texture_state != LoggedState::Failed {
                     eprintln!("assets demo: albedo load failed: {e}");
                 }
                 LoggedState::Failed
             }
         };
-        if now != self.last_logged_state {
-            match now {
-                LoggedState::Loading => {} // start state; not surprising
-                LoggedState::Ready => {
-                    println!("assets demo: albedo loaded — cube rebinds to real texture")
-                }
-                LoggedState::Failed => {} // already printed above
+        if texture_state != self.last_texture_state {
+            if texture_state == LoggedState::Ready {
+                println!("assets demo: albedo loaded — cubes rebind to real texture");
             }
-            self.last_logged_state = now;
+            self.last_texture_state = texture_state;
+        }
+
+        // Log mesh-handle state transitions (PR-3 addition).
+        let mesh_state = match self.gltf_cube.handle.peek() {
+            HandleState::Loading => LoggedState::Loading,
+            HandleState::Ready(_) => LoggedState::Ready,
+            HandleState::Failed(e) => {
+                if self.last_mesh_state != LoggedState::Failed {
+                    eprintln!("assets demo: glTF mesh load failed: {e}");
+                }
+                LoggedState::Failed
+            }
+        };
+        if mesh_state != self.last_mesh_state {
+            if mesh_state == LoggedState::Ready {
+                println!(
+                    "assets demo: glTF mesh loaded — right cube swaps from placeholder to real geometry"
+                );
+            }
+            self.last_mesh_state = mesh_state;
         }
     }
 
     fn render(
         &mut self,
-        sim: &Game,
+        _sim: &Game,
         _alpha: f32,
         renderer: &Renderer,
         pass: &mut wgpu::RenderPass<'_>,
@@ -267,40 +304,53 @@ impl View for AssetsView {
         }
         self.camera_binding.write(&renderer.queue, &self.camera);
 
-        self.buckets.begin_frame();
-        for (zone_id, zone) in sim.zones.iter() {
-            for (id, obj) in zone.iter() {
-                let model = Mat4::from_rotation_translation(obj.rotation, obj.position);
-                let hit_id = renderer.reserve_object(zone_id, id);
-                self.buckets.push(
-                    MatId::Cube,
-                    MeshInstanceAttribs::new(model, Vec4::ONE).with_hit_id(hit_id),
-                );
-            }
-        }
-        self.buckets.upload(&renderer.queue);
-
-        // Reconcile the material instance with its handle's current state.
-        // Cheap when nothing changed; fires the bind-group rebuild on the
-        // frame the load transitions to `Ready` (or when the user
-        // press/releases F to flip the force-loading toggle).
-        if let Some(instance) = self.instances.get_mut(MatId::Cube) {
-            instance.refresh(renderer, &self.material, &self.samplers, &self.asset_server);
-        }
+        // Reconcile the shared material instance with its handle's current
+        // state. Cheap when nothing changed; fires the bind-group rebuild
+        // on the frame the texture transitions to `Ready` (or when the
+        // user press/releases F to flip the force-loading toggle).
+        self.cube_material
+            .refresh(renderer, &self.material, &self.samplers, &self.asset_server);
 
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        pass.set_vertex_buffer(0, self.cube_vertices.slice(..));
-        pass.set_index_buffer(self.cube_indices.slice(..), wgpu::IndexFormat::Uint32);
-        for (mat, instance_buffer, count) in self.buckets.iter_filled() {
-            let Some(instance) = self.instances.get(mat) else {
-                continue;
-            };
-            pass.set_bind_group(2, instance.bind_group(), &[]);
-            pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            pass.draw_indexed(0..self.cube_index_count, 0, 0..count);
-        }
+        pass.set_bind_group(2, self.cube_material.bind_group(), &[]);
+
+        // Inline cube: a single instance at its position. Picking IDs left
+        // at the 0 default — neither cube is clickable in this demo.
+        let inline_model = Mat4::from_translation(self.inline_cube.position);
+        let inline_attribs = MeshInstanceAttribs::new(inline_model, Vec4::ONE);
+        renderer.queue.write_buffer(
+            &self.inline_cube.instance_buffer,
+            0,
+            bytemuck::bytes_of(&inline_attribs),
+        );
+        pass.set_vertex_buffer(0, self.inline_cube.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, self.inline_cube.instance_buffer.slice(..));
+        pass.set_index_buffer(
+            self.inline_cube.index_buffer.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        pass.draw_indexed(0..self.inline_cube.index_count, 0, 0..1);
+
+        // glTF cube: resolve the handle, compose the fallback adjustment
+        // inside the per-instance model, draw with whichever buffers
+        // resolve_mesh handed back.
+        let resolved = self
+            .asset_server
+            .resolve_mesh(&self.gltf_cube.handle, Some(self.gltf_cube.visual_bounds));
+        let gltf_model =
+            Mat4::from_translation(self.gltf_cube.position) * resolved.fallback_adjustment;
+        let gltf_attribs = MeshInstanceAttribs::new(gltf_model, Vec4::ONE);
+        renderer.queue.write_buffer(
+            &self.gltf_cube.instance_buffer,
+            0,
+            bytemuck::bytes_of(&gltf_attribs),
+        );
+        pass.set_vertex_buffer(0, resolved.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, self.gltf_cube.instance_buffer.slice(..));
+        pass.set_index_buffer(resolved.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..resolved.index_count, 0, 0..1);
     }
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
@@ -317,6 +367,19 @@ impl View for AssetsView {
             _ => {}
         }
     }
+}
+
+/// Allocate a `wgpu::Buffer` sized for one [`MeshInstanceAttribs`], with
+/// `COPY_DST` so we can rewrite it each frame. The shared shape across
+/// both cubes — one instance buffer per cube means consecutive
+/// `queue.write_buffer` calls don't clobber each other within a frame.
+fn create_one_instance_buffer(device: &wgpu::Device, label: &'static str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: std::mem::size_of::<MeshInstanceAttribs>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn main() {
