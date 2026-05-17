@@ -22,16 +22,16 @@ use std::time::Instant;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, EngineCtx, PbrMaterial, PosNormalUv, PrimitiveMesh, Renderer, SamplerRegistry, Texture,
-    WorldObjectId,
+    Aabb, Components, EngineCtx, LiveRenderObject, PbrMaterial, PosNormalUv, PrimitiveMesh,
+    Renderer, SamplerRegistry, Texture, WorldObjectId, WorldObjectRef,
 };
 
 use super::{MeshTemplate, TemplateParams};
-use crate::sim::{Game, RenderId};
+use crate::sim::{Carrying, Game, Move, RenderId};
 
 /// Index of the carried-log mesh part in the pawn render template. Stable
-/// because parts keep their declaration order on [`RenderTemplate`].
-pub const LOG_PART: usize = 1;
+/// because parts keep their declaration order on the template builder.
+const LOG_PART: usize = 1;
 
 /// Vertical amplitude of the idle bob applied to pawns without a [`Move`](crate::sim::Move).
 /// A few centimetres reads as breathing without looking like a glitch.
@@ -182,6 +182,29 @@ impl PawnRenderer {
         }
         pos
     }
+}
+
+/// Per-instance update for a live pawn proxy. Called by the dispatcher
+/// in [`super`] from inside
+/// [`RenderObjectPass::update_instances`](currawong::RenderObjectPass::update_instances).
+///
+/// Owns *every* sim→view decision for pawns:
+/// - overwrites `instance.world_xform` with the interpolated + idle-bobbed
+///   pose (engine then composes the carried log's local transform on top
+///   for free — the log inherits the interpolated pose automatically);
+/// - gates the carried-log part's visibility on the [`Carrying`] component.
+pub fn update_instance(
+    parent: WorldObjectRef,
+    components: &Components,
+    instance: &mut LiveRenderObject,
+    alpha: f32,
+    state: &PawnRenderer,
+) {
+    let live_position = instance.world_xform.w_axis.truncate();
+    let has_move = components.get::<Move>(parent.id).is_some();
+    let pos = state.interp_position(parent.id, live_position, alpha, has_move);
+    instance.world_xform.w_axis = Vec4::new(pos.x, pos.y, pos.z, 1.0);
+    instance.mesh_parts[LOG_PART].visible = components.get::<Carrying>(parent.id).is_some();
 }
 
 /// Pawn body + a small offset cube ("satchel") on the local +X side, baked

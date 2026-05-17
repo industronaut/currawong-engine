@@ -45,10 +45,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 
 use pawn::PawnRenderer;
 
-use crate::sim::{
-    Carrying, Designated, Game, GameState, HEIGHT_UNIT, Move, RenderId, TILE_SIZE, TIME_LIMIT_SECS,
-    WOOD_GOAL,
-};
+use crate::sim::{Game, GameState, HEIGHT_UNIT, RenderId, TILE_SIZE, TIME_LIMIT_SECS, WOOD_GOAL};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MAX_INSTANCES_PER_PART: u32 = 64;
@@ -398,8 +395,10 @@ impl View for LumberCampView {
             &frustum,
         );
 
-        // Phase 1.5: the single sim→view translation seam. Reads typed
-        // sim components and writes view-side state on each alive proxy.
+        // Phase 1.5: the single sim→view translation seam. Each
+        // RenderId's update logic lives in its own kind module — this
+        // match is just the dispatch shape, so adding a new kind is
+        // one arm here plus a function in the new submodule.
         // Disjoint-borrows `self.pawn` (read-only) and `self.live_objects`
         // (mutable through the engine call) by binding each before the
         // closure.
@@ -409,27 +408,10 @@ impl View for LumberCampView {
             &self.templates,
             &mut self.live_objects,
             |parent, rid, _slots, components, instance| match rid {
-                RenderId::Pawn => {
-                    // Override world_xform with the interpolated +
-                    // idle-bobbed pose. Engine composes
-                    // `world_xform * log.local_transform` for the log
-                    // part, so the log inherits this pose automatically.
-                    let live_position = instance.world_xform.w_axis.truncate();
-                    let has_move = components.get::<Move>(parent.id).is_some();
-                    let pos = pawn.interp_position(parent.id, live_position, alpha, has_move);
-                    instance.world_xform.w_axis = Vec4::new(pos.x, pos.y, pos.z, 1.0);
-                    // Carried log: visible iff the pawn has a Carrying.
-                    instance.mesh_parts[pawn::LOG_PART].visible =
-                        components.get::<Carrying>(parent.id).is_some();
-                }
-                RenderId::Tree => {
-                    // Designation marker: visible iff the tree has Designated.
-                    instance.mesh_parts[tree::MARKER_PART].visible =
-                        components.get::<Designated>(parent.id).is_some();
-                }
-                RenderId::Stockpile => {
-                    // No view-side decisions — defaults (all visible) stand.
-                }
+                RenderId::Pawn => pawn::update_instance(parent, components, instance, alpha, pawn),
+                RenderId::Tree => tree::update_instance(parent, components, instance),
+                // Stockpile: no view-side decisions — defaults (all visible) stand.
+                RenderId::Stockpile => {}
             },
         );
 

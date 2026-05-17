@@ -14,14 +14,15 @@ use std::f32::consts::PI;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, PbrMaterial, PrimitiveMesh, Renderer, SamplerRegistry, Texture, WorldObjectRef,
+    Aabb, Components, LiveRenderObject, PbrMaterial, PrimitiveMesh, Renderer, SamplerRegistry,
+    Texture, WorldObjectRef,
 };
 
 use super::{MeshTemplate, TemplateParams};
 use crate::sim::{Designated, Game, RenderId};
 
 /// Index of the designation-marker mesh part in the tree render template.
-pub const MARKER_PART: usize = 1;
+const MARKER_PART: usize = 1;
 
 /// Half the tree cone's height — used to position the marker above the
 /// canopy in the *local* frame.
@@ -94,6 +95,20 @@ pub fn marker_local_transform() -> Mat4 {
 /// designated — cheaper than dynamic bounds, and grazing-edge correct.
 pub fn visual_bounds() -> Aabb {
     Aabb::new(Vec3::new(-0.65, -0.65, -1.05), Vec3::new(0.65, 0.65, 1.50))
+}
+
+/// Per-instance update for a live tree proxy. Called by the dispatcher
+/// in [`super`] from inside
+/// [`RenderObjectPass::update_instances`](currawong::RenderObjectPass::update_instances).
+///
+/// Owns every sim→view decision for trees: gates the designation marker
+/// on the [`Designated`] component.
+pub fn update_instance(
+    parent: WorldObjectRef,
+    components: &Components,
+    instance: &mut LiveRenderObject,
+) {
+    instance.mesh_parts[MARKER_PART].visible = components.get::<Designated>(parent.id).is_some();
 }
 
 /// Toggle a [`Designated`] component on whichever sim object is currently
