@@ -1,0 +1,15 @@
+// Lumberjack — the worker pawn that chops trees and hauls logs.
+// Sim consumes `walk_speed`; view consumes `render`.
+(
+    id: "currawong:lumberjack",
+    walk_speed: 2.2,
+    render: (
+        shape: "pawn",
+        mesh: "models/pawns/lumberjack.glb",
+        albedo: "textures/pawns/lumberjack.png",
+        metallic: 0.0,
+        roughness: 0.70,
+        bounds_min: (-0.40, -0.40, 0.0),
+        bounds_max: (0.70, 0.40, 1.70),
+    ),
+)

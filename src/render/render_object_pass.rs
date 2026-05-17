@@ -50,12 +50,12 @@ impl RenderObjectPass {
         live_objects: &mut LiveRenderObjects<R>,
         frustum: &Frustum,
     ) where
-        R: Copy + Eq + Hash + 'static,
+        R: Clone + Eq + Hash + 'static,
     {
         live_objects.begin_frame();
         for (zone_id, zone) in zones.iter() {
             for (id, obj) in zone.iter() {
-                let Some(&rid) = zone.components().get::<R>(id) else {
+                let Some(rid) = zone.components().get::<R>(id) else {
                     continue;
                 };
                 let Some(template) = templates.get(rid) else {
@@ -67,7 +67,7 @@ impl RenderObjectPass {
                     .map(|local| local.transformed(object_xform));
                 live_objects.declare(
                     WorldObjectRef { zone: zone_id, id },
-                    rid,
+                    rid.clone(),
                     object_xform,
                     world_aabb,
                     template.mesh_parts().len(),
@@ -101,9 +101,9 @@ impl RenderObjectPass {
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
         live_objects: &mut LiveRenderObjects<R>,
-        mut on_instance: impl FnMut(WorldObjectRef, R, &SlotValues, &Components, &mut LiveRenderObject),
+        mut on_instance: impl FnMut(WorldObjectRef, &R, &SlotValues, &Components, &mut LiveRenderObject),
     ) where
-        R: Copy + Eq + Hash + 'static,
+        R: Clone + Eq + Hash + 'static,
     {
         let empty = SlotValues::new();
         for (parent, rid, obj) in live_objects.iter_mut() {
@@ -138,9 +138,9 @@ impl RenderObjectPass {
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
         live_objects: &LiveRenderObjects<R>,
-        on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues),
+        on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4, &SlotValues),
     ) where
-        R: Copy + Eq + Hash + 'static,
+        R: Clone + Eq + Hash + 'static,
     {
         Self::for_each_alive(zones, templates, live_objects, on_part, |_, _, _, _, _| {});
     }
@@ -166,10 +166,10 @@ impl RenderObjectPass {
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
         live_objects: &LiveRenderObjects<R>,
-        mut on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues),
-        mut on_emitter: impl FnMut(WorldObjectRef, R, &EmitterPart<E, S>, Mat4, &SlotValues),
+        mut on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4, &SlotValues),
+        mut on_emitter: impl FnMut(WorldObjectRef, &R, &EmitterPart<E, S>, Mat4, &SlotValues),
     ) where
-        R: Copy + Eq + Hash + 'static,
+        R: Clone + Eq + Hash + 'static,
     {
         let empty = SlotValues::new();
         for (parent, rid, object) in live_objects.iter() {
@@ -225,10 +225,10 @@ impl RenderObjectPass {
         templates: &RenderRegistry<R, M, MK, E, S>,
         live_objects: &LiveRenderObjects<R>,
         renderer: &Renderer,
-        on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues, u32),
-        on_emitter: impl FnMut(WorldObjectRef, R, &EmitterPart<E, S>, Mat4, &SlotValues, u32),
+        on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4, &SlotValues, u32),
+        on_emitter: impl FnMut(WorldObjectRef, &R, &EmitterPart<E, S>, Mat4, &SlotValues, u32),
     ) where
-        R: Copy + Eq + Hash + 'static,
+        R: Clone + Eq + Hash + 'static,
     {
         for_each_alive_reserving(
             zones,
@@ -247,9 +247,9 @@ impl RenderObjectPass {
         templates: &RenderRegistry<R, M, MK, E, S>,
         live_objects: &LiveRenderObjects<R>,
         renderer: &Renderer,
-        on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues, u32),
+        on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4, &SlotValues, u32),
     ) where
-        R: Copy + Eq + Hash + 'static,
+        R: Clone + Eq + Hash + 'static,
     {
         Self::for_each_alive_with_hit_id(
             zones,
@@ -271,10 +271,10 @@ fn for_each_alive_reserving<R, M, MK, E, S>(
     templates: &RenderRegistry<R, M, MK, E, S>,
     live_objects: &LiveRenderObjects<R>,
     mut reserve: impl FnMut(WorldObjectRef) -> u32,
-    mut on_part: impl FnMut(WorldObjectRef, R, &MeshPart<M, MK>, Mat4, &SlotValues, u32),
-    mut on_emitter: impl FnMut(WorldObjectRef, R, &EmitterPart<E, S>, Mat4, &SlotValues, u32),
+    mut on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4, &SlotValues, u32),
+    mut on_emitter: impl FnMut(WorldObjectRef, &R, &EmitterPart<E, S>, Mat4, &SlotValues, u32),
 ) where
-    R: Copy + Eq + Hash + 'static,
+    R: Clone + Eq + Hash + 'static,
 {
     let empty = SlotValues::new();
     for (parent, rid, object) in live_objects.iter() {

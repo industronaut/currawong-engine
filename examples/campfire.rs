@@ -619,7 +619,7 @@ impl View for CampfireView {
         pass.set_pipeline(&self.mesh_pipeline);
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         for (mesh_id, instance_buffer, count) in self.mesh_instances.iter_filled() {
-            let mesh = &self.meshes[&mesh_id];
+            let mesh = &self.meshes[mesh_id];
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
             pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);

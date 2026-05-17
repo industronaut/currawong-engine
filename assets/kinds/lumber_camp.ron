@@ -1,0 +1,15 @@
+// The lumber camp building — wood deposit target for hauling pawns.
+// "Stockpile" semantics live in the sim (the camp is the deposit point);
+// the kind itself is the building.
+(
+    id: "currawong:lumber_camp",
+    render: (
+        shape: "building",
+        mesh: "models/buildings/lumber_camp.glb",
+        albedo: "textures/buildings/wood_planks.png",
+        metallic: 0.0,
+        roughness: 0.85,
+        bounds_min: (-0.85, -0.85, 0.0),
+        bounds_max: (0.85, 0.85, 1.25),
+    ),
+)

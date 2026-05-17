@@ -375,14 +375,14 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
 /// callers that haven't yet committed to the corresponding part kind.
 pub struct RenderRegistry<R, M = (), MK = (), E = (), S = ()>
 where
-    R: Copy + Eq + Hash,
+    R: Clone + Eq + Hash,
 {
     templates: HashMap<R, RenderTemplate<M, MK, E, S>>,
 }
 
 impl<R, M, MK, E, S> RenderRegistry<R, M, MK, E, S>
 where
-    R: Copy + Eq + Hash,
+    R: Clone + Eq + Hash,
 {
     pub fn new() -> Self {
         Self {
@@ -397,9 +397,11 @@ where
         self.templates.insert(id, template);
     }
 
-    /// Look up the template registered under `id`, if any.
-    pub fn get(&self, id: R) -> Option<&RenderTemplate<M, MK, E, S>> {
-        self.templates.get(&id)
+    /// Look up the template registered under `id`, if any. Takes `&R` so
+    /// non-`Copy` keys (e.g. [`KindId`](crate::data::KindId)) can be looked
+    /// up without consuming an owned copy.
+    pub fn get(&self, id: &R) -> Option<&RenderTemplate<M, MK, E, S>> {
+        self.templates.get(id)
     }
 
     /// Number of registered templates.
@@ -415,7 +417,7 @@ where
 
 impl<R, M, MK, E, S> Default for RenderRegistry<R, M, MK, E, S>
 where
-    R: Copy + Eq + Hash,
+    R: Clone + Eq + Hash,
 {
     fn default() -> Self {
         Self::new()
@@ -437,7 +439,7 @@ mod tests {
         let reg: RenderRegistry<RenderId> = RenderRegistry::new();
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
-        assert!(reg.get(RenderId::TreeOak).is_none());
+        assert!(reg.get(&RenderId::TreeOak).is_none());
     }
 
     #[test]
@@ -447,10 +449,10 @@ mod tests {
 
         assert_eq!(reg.len(), 1);
         assert_eq!(
-            reg.get(RenderId::TreeOak).map(|t| t.label.as_str()),
+            reg.get(&RenderId::TreeOak).map(|t| t.label.as_str()),
             Some("tree_oak")
         );
-        assert!(reg.get(RenderId::Campfire).is_none());
+        assert!(reg.get(&RenderId::Campfire).is_none());
     }
 
     #[test]
@@ -461,7 +463,7 @@ mod tests {
 
         assert_eq!(reg.len(), 1);
         assert_eq!(
-            reg.get(RenderId::TreeOak).map(|t| t.label.as_str()),
+            reg.get(&RenderId::TreeOak).map(|t| t.label.as_str()),
             Some("second")
         );
     }
@@ -624,7 +626,7 @@ mod tests {
                 ),
         );
 
-        let template = reg.get(RId::Campfire).expect("registered");
+        let template = reg.get(&RId::Campfire).expect("registered");
         assert_eq!(template.label, "campfire");
         assert_eq!(template.mesh_parts().len(), 2);
     }

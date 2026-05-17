@@ -321,7 +321,7 @@ impl View for TexturedPbr {
         pass.set_vertex_buffer(0, self.cube_vertices.slice(..));
         pass.set_index_buffer(self.cube_indices.slice(..), wgpu::IndexFormat::Uint32);
         for (mat, instance_buffer, count) in self.buckets.iter_filled() {
-            let Some(instance) = self.instances.get(mat) else {
+            let Some(instance) = self.instances.get(*mat) else {
                 continue;
             };
             pass.set_bind_group(2, instance.bind_group(), &[]);

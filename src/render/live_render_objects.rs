@@ -109,12 +109,17 @@ impl LiveRenderObject {
 
 /// Live proxies of render-object templates, keyed by
 /// `(WorldObjectRef, R)`. Generic over the render-id type `R`.
-pub struct LiveRenderObjects<R: Copy + Eq + Hash> {
+///
+/// `R` is `Clone + Eq + Hash` rather than `Copy + Eq + Hash` so the lumber
+/// camp's namespaced [`KindId`](crate::data::KindId) (a `String` newtype)
+/// can flow through unchanged. Iteration yields `&R` so the per-frame walk
+/// pays no clone cost; callers that need an owned `R` clone it explicitly.
+pub struct LiveRenderObjects<R: Clone + Eq + Hash> {
     objects: HashMap<(WorldObjectRef, R), LiveRenderObject>,
     hysteresis_frames: u32,
 }
 
-impl<R: Copy + Eq + Hash> LiveRenderObjects<R> {
+impl<R: Clone + Eq + Hash> LiveRenderObjects<R> {
     /// Create an empty reconciler. `hysteresis_frames` is the number of
     /// frames a proxy is kept alive after it leaves the frustum;
     /// CLAUDE.md commits to ~30 as a starting point.
@@ -221,24 +226,27 @@ impl<R: Copy + Eq + Hash> LiveRenderObjects<R> {
         });
     }
 
-    /// Iterate alive proxies as `(parent, render_id, &object)`.
+    /// Iterate alive proxies as `(parent, &render_id, &object)`.
     /// Alive means: declared this frame AND currently inside the frustum
-    /// or within the hysteresis window.
-    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectRef, R, &LiveRenderObject)> + '_ {
+    /// or within the hysteresis window. Yields `&R` rather than `R` so
+    /// non-`Copy` render ids (e.g. [`KindId`](crate::data::KindId)) don't
+    /// pay a clone per iteration.
+    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectRef, &R, &LiveRenderObject)> + '_ {
         self.objects
             .iter()
-            .map(|((parent, rid), obj)| (*parent, *rid, obj))
+            .map(|((parent, rid), obj)| (*parent, rid, obj))
     }
 
     /// Mutable variant of [`Self::iter`], for the per-instance update
     /// pass. Used by `RenderObjectPass::update_instances` to invoke the
-    /// template's `update` hook with `&mut LiveRenderObject`.
+    /// template's `update` hook with `&mut LiveRenderObject`. Same
+    /// `&R`-yielding shape as [`Self::iter`].
     pub fn iter_mut(
         &mut self,
-    ) -> impl Iterator<Item = (WorldObjectRef, R, &mut LiveRenderObject)> + '_ {
+    ) -> impl Iterator<Item = (WorldObjectRef, &R, &mut LiveRenderObject)> + '_ {
         self.objects
             .iter_mut()
-            .map(|((parent, rid), obj)| (*parent, *rid, obj))
+            .map(|((parent, rid), obj)| (*parent, rid, obj))
     }
 }
 

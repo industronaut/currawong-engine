@@ -41,7 +41,7 @@ struct Bucket<I> {
 
 impl<K, I> InstanceBuckets<K, I>
 where
-    K: Copy + Eq + Hash,
+    K: Clone + Eq + Hash,
     I: Pod,
 {
     /// Create an empty bucket group. Buckets are allocated lazily by
@@ -113,13 +113,15 @@ where
         }
     }
 
-    /// Iterate non-empty buckets as `(key, instance buffer, instance count)`.
+    /// Iterate non-empty buckets as `(&key, instance buffer, instance count)`.
     /// Bind the buffer as a vertex slot and issue an instanced draw against
-    /// the mesh associated with `key`.
-    pub fn iter_filled(&self) -> impl Iterator<Item = (K, &wgpu::Buffer, u32)> + '_ {
+    /// the mesh associated with `key`. Yields `&K` so non-`Copy` keys (e.g.
+    /// keys built around [`KindId`](crate::data::KindId)) don't allocate
+    /// per filled bucket per frame.
+    pub fn iter_filled(&self) -> impl Iterator<Item = (&K, &wgpu::Buffer, u32)> + '_ {
         self.buckets.iter().filter_map(|(k, b)| {
             let count = b.scratch.len() as u32;
-            (count > 0).then_some((*k, &b.buffer, count))
+            (count > 0).then_some((k, &b.buffer, count))
         })
     }
 }
