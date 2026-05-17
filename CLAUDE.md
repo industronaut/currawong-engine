@@ -16,14 +16,15 @@ cargo test --no-default-features         # sim tests only — proves sim layer h
 cargo clippy --all-targets
 cargo clippy --no-default-features --all-targets
 
-cargo run --example clear                # window with cleared background
-cargo run --example triangle             # static colored triangle
-cargo run --example input                # input demo + sim speed controls
-cargo run --example camera               # interactive orbit rig (RMB-drag, WASD, scroll) over a sim
-cargo run --example terrain              # tile-grid terrain meshing + liquids
+cargo run --example lumber_camp          # end-to-end game loop: pawns chop trees, haul logs to a stockpile
 cargo run --example trees                # ~200 trees growing under live sim mutation
 cargo run --example textured_pbr         # PBR cubes lit by a sim-driven sun
 cargo run --example textured_pbr --features egui   # same, with debug overlay
+cargo run --example campfire             # mesh + particle emitters with lit-state lifecycle
+cargo run --example materials            # material template / instance / per-instance attrib pattern
+cargo run --example multi_zone           # two zones + stair trigger; coordinate-isolated rendering
+cargo run --example hex_terrain          # hex topology through the same flat-tops mesher
+cargo run --example slope_terrain        # sloped mesher with height-aware GPU picking
 cargo run --example headless             # sim ticking without any window
 cargo run --example headless --no-default-features   # proves headless excludes wgpu/winit at compile time
 ```
@@ -161,7 +162,7 @@ The codebase pins to wgpu 29.0.3 and winit 0.30.13. Recent API changes that have
 - `DepthStencilState::depth_write_enabled` is `Option<bool>` (not `bool`) and `depth_compare` is `Option<CompareFunction>` (not `CompareFunction`). Wrap both in `Some(...)`.
 - winit 0.30 uses `ApplicationHandler` trait pattern (`run_app(&mut handler)`), not the old closure-based `run`.
 
-When adding render code, copy from `examples/camera.rs` (instance buffer + uniforms) or `examples/triangle.rs` (no buffers) rather than referring to older wgpu tutorials.
+When adding render code, copy from `examples/lumber_camp/` (full pipeline + instance buffers + camera/scene bindings + picking) or `examples/materials.rs` (minimal unlit pipeline + per-instance attribs) rather than referring to older wgpu tutorials.
 
 ## Conventions
 

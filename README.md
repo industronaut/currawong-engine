@@ -28,14 +28,14 @@ cargo clippy --all-targets
 ## Examples
 
 ```bash
-cargo run --example clear                # window with cleared background
-cargo run --example triangle             # static colored triangle
-cargo run --example input                # input demo + sim speed controls
-cargo run --example camera               # sim/view extract + camera demo
-cargo run --example instances            # instanced draws
+cargo run --example lumber_camp          # end-to-end game loop: pawns chop trees, haul logs
+cargo run --example trees                # slot-driven growth animation + dual-kind picking
+cargo run --example textured_pbr         # PBR cubes lit by a sim-driven sun
 cargo run --example campfire             # emitter reconciliation
-cargo run --example materials            # material instances
-cargo run --example render_objects       # render-object templates
+cargo run --example materials            # material template / instance / per-instance attribs
+cargo run --example multi_zone           # two zones + stair trigger
+cargo run --example hex_terrain          # hex topology through the same mesher
+cargo run --example slope_terrain        # sloped mesher with GPU height-aware picking
 cargo run --example headless             # sim ticking without any window
 cargo run --example headless --no-default-features   # proves headless excludes wgpu/winit at compile time
 ```
