@@ -76,7 +76,7 @@ pub use cell_highlight::CellHighlight;
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
 pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
 pub use instance::{InstanceBuckets, mat4_instance_attributes, u32_id_instance_attribute};
-pub use live_render_objects::{LiveRenderObject, LiveRenderObjects};
+pub use live_render_objects::{LiveRenderObject, LiveRenderObjects, RenderPartState};
 pub use material::{
     MaterialInstanceRegistry, MeshInstanceAttribs, MeshMaterial, UnlitColoredInstance,
     UnlitColoredMaterial,
@@ -87,7 +87,7 @@ pub use picking::{Hover, Ray, TerrainPicker};
 pub use picking_buffer::{FrameIdTable, HitTarget};
 pub use render_object::{
     EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotRouting,
-    SlotValue, SlotValues, VISIBLE_SLOT,
+    SlotValue, SlotValues,
 };
 pub use render_object_pass::{RenderObjectPass, validate_slot_values};
 pub use renderer::Renderer;
