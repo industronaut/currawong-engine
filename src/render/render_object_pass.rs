@@ -14,42 +14,24 @@
 //! object. Views that need a different storage shape can build the loop
 //! themselves — `RenderObjectPass` is the convenient default.
 //!
-//! Visibility is honoured natively here, orthogonal to frustum culling:
-//! the reserved [`VISIBLE_SLOT`] gates the whole instance (no mesh / emitter
-//! callbacks, no hit-ID reservation), and each [`MeshPart::visibility_slot`]
-//! independently gates its own callback. Missing slot values are visible
-//! by default, so templates and instances without opinions on visibility
-//! are unaffected.
+//! Visibility is **view-side state** on [`LiveRenderObject`], set by the
+//! template's update closure via [`RenderObjectPass::update_instances`]
+//! and read by the extract walk. `root_visible` gates the whole instance
+//! (no mesh / emitter callbacks, no hit-ID reservation); per-part
+//! `mesh_parts[i].visible` / `emitter_parts[i].visible` gate individual
+//! callbacks. Defaults are all `true` — templates and instances without
+//! opinions on visibility are unaffected.
 
 use std::hash::Hash;
 
 use glam::Mat4;
 
-use crate::sim::{WorldObjectRef, Zones};
+use crate::sim::{Components, WorldObjectRef, Zones};
 
-use super::live_render_objects::LiveRenderObjects;
-use super::render_object::{
-    EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotValue, SlotValues, VISIBLE_SLOT,
-};
+use super::live_render_objects::{LiveRenderObject, LiveRenderObjects};
+use super::render_object::{EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotValues};
 use super::renderer::Renderer;
 use super::visibility::Frustum;
-
-/// True unless `slots` carries `(VISIBLE_SLOT, Bool(false))`. Missing slot
-/// or wrong-kind value → visible (the latter is caught by
-/// [`validate_slot_values`] in debug builds).
-fn root_visible(slots: &SlotValues) -> bool {
-    !matches!(slots.get(VISIBLE_SLOT), Some(SlotValue::Bool(false)))
-}
-
-/// True unless `part`'s gating slot is bound and the parent's [`SlotValues`]
-/// carries `Bool(false)` for it. Unbound parts and missing slot values are
-/// both visible.
-fn part_visible<M, MK>(part: &MeshPart<M, MK>, slots: &SlotValues) -> bool {
-    match part.visibility_slot {
-        None => true,
-        Some(name) => !matches!(slots.get(name), Some(SlotValue::Bool(false))),
-    }
-}
 
 /// Engine helper that drives the per-frame render-object walk. Stateless;
 /// the associated functions take all dependencies as arguments.
@@ -89,10 +71,56 @@ impl RenderObjectPass {
                     rid,
                     object_xform,
                     world_aabb,
+                    template.mesh_parts().len(),
+                    template.emitter_parts().len(),
                 );
             }
         }
         live_objects.cull(frustum);
+    }
+
+    /// Phase 1.5: per-instance update. Iterate alive proxies, validate
+    /// each parent's `SlotValues` against the template schema, then
+    /// invoke `on_instance` so the user can read slots / components and
+    /// mutate the view-side [`LiveRenderObject`] — typically
+    /// `instance.root_visible`, `instance.mesh_parts[i].visible`,
+    /// `instance.emitter_parts[i].visible`, plus any future cached
+    /// view-state on the instance.
+    ///
+    /// Call this between [`Self::declare_and_cull`] and
+    /// [`Self::for_each_alive_part`] / [`Self::for_each_alive`]. The
+    /// extract pass reads only `LiveRenderObject` state, so all sim →
+    /// view-state translation must land here.
+    ///
+    /// CLAUDE.md invariants this enforces:
+    /// - Sim → view translation lives in **one** place per frame.
+    /// - Extract is a pure GPU-attrib write step.
+    /// - Slot names are sim-vocabulary; view-side decisions
+    ///   (`mesh_parts[i].visible`, etc.) are derived here, not published
+    ///   by the sim.
+    pub fn update_instances<R, M, MK, E, S>(
+        zones: &Zones,
+        templates: &RenderRegistry<R, M, MK, E, S>,
+        live_objects: &mut LiveRenderObjects<R>,
+        mut on_instance: impl FnMut(WorldObjectRef, R, &SlotValues, &Components, &mut LiveRenderObject),
+    ) where
+        R: Copy + Eq + Hash + 'static,
+    {
+        let empty = SlotValues::new();
+        for (parent, rid, obj) in live_objects.iter_mut() {
+            let Some(template) = templates.get(rid) else {
+                continue;
+            };
+            let zone = zones
+                .get(parent.zone)
+                .expect("zone alive while proxy lives");
+            let slots = zone
+                .components()
+                .get::<SlotValues>(parent.id)
+                .unwrap_or(&empty);
+            validate_slot_values(template, slots);
+            on_instance(parent, rid, slots, zone.components(), obj);
+        }
     }
 
     /// Phase 2 (mesh-only): iterate alive proxies, validate each parent's
@@ -124,6 +152,13 @@ impl RenderObjectPass {
     /// [`EmitterPart`]. Slot validation happens once per alive proxy;
     /// both callbacks see the same `&SlotValues`.
     ///
+    /// Visibility is **view-side state** read from the
+    /// [`LiveRenderObject`]: instances with `root_visible == false`
+    /// are skipped entirely, and per-part `mesh_parts[i].visible` /
+    /// `emitter_parts[i].visible` gate individual callbacks. These
+    /// fields are set by the user's update closure passed to
+    /// [`Self::update_instances`].
+    ///
     /// Use this when a template carries [`EmitterPart`]s — the demo at
     /// [`examples/render_objects.rs`](../../examples/render_objects.rs)
     /// does. Pure-mesh views can call [`Self::for_each_alive_part`] for the
@@ -139,6 +174,9 @@ impl RenderObjectPass {
     {
         let empty = SlotValues::new();
         for (parent, rid, object) in live_objects.iter() {
+            if !object.root_visible {
+                continue;
+            }
             let Some(template) = templates.get(rid) else {
                 continue;
             };
@@ -151,18 +189,17 @@ impl RenderObjectPass {
                 .unwrap_or(&empty);
             validate_slot_values(template, slots);
 
-            if !root_visible(slots) {
-                continue;
-            }
-
-            for part in template.mesh_parts() {
-                if !part_visible(part, slots) {
+            for (i, part) in template.mesh_parts().iter().enumerate() {
+                if !object.mesh_parts[i].visible {
                     continue;
                 }
                 let world = object.world_xform * part.local_transform;
                 on_part(parent, rid, part, world, slots);
             }
-            for part in template.emitter_parts() {
+            for (i, part) in template.emitter_parts().iter().enumerate() {
+                if !object.emitter_parts[i].visible {
+                    continue;
+                }
                 let world = object.world_xform * part.local_transform;
                 on_emitter(parent, rid, part, world, slots);
             }
@@ -242,6 +279,9 @@ fn for_each_alive_reserving<R, M, MK, E, S>(
 {
     let empty = SlotValues::new();
     for (parent, rid, object) in live_objects.iter() {
+        if !object.root_visible {
+            continue;
+        }
         let Some(template) = templates.get(rid) else {
             continue;
         };
@@ -254,20 +294,19 @@ fn for_each_alive_reserving<R, M, MK, E, S>(
             .unwrap_or(&empty);
         validate_slot_values(template, slots);
 
-        if !root_visible(slots) {
-            continue;
-        }
-
         let hit_id = reserve(parent);
 
-        for part in template.mesh_parts() {
-            if !part_visible(part, slots) {
+        for (i, part) in template.mesh_parts().iter().enumerate() {
+            if !object.mesh_parts[i].visible {
                 continue;
             }
             let world = object.world_xform * part.local_transform;
             on_part(parent, rid, part, world, slots, hit_id);
         }
-        for part in template.emitter_parts() {
+        for (i, part) in template.emitter_parts().iter().enumerate() {
+            if !object.emitter_parts[i].visible {
+                continue;
+            }
             let world = object.world_xform * part.local_transform;
             on_emitter(parent, rid, part, world, slots, hit_id);
         }
@@ -496,10 +535,9 @@ mod tests {
     }
 
     #[test]
-    fn root_invisible_skips_all_parts() {
+    fn update_setting_root_invisible_skips_all_parts() {
         let (mut zones, zid) = seed_zone();
-        let slots = SlotValues::new().with(VISIBLE_SLOT, SlotValue::Bool(false));
-        insert_tree(&mut zones, zid, Vec3::ZERO, Some(slots));
+        insert_tree(&mut zones, zid, Vec3::ZERO, None);
 
         let mut templates: RenderRegistry<Rid, u32, u32> = RenderRegistry::new();
         templates.register(
@@ -511,57 +549,48 @@ mod tests {
 
         let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        // Translation step: hide the whole instance.
+        RenderObjectPass::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, _, instance| {
+                instance.root_visible = false;
+            },
+        );
 
         let mut visits = 0usize;
         RenderObjectPass::for_each_alive_part(&zones, &templates, &live, |_, _, _, _, _| {
             visits += 1;
         });
 
-        assert_eq!(visits, 0, "root invisible must skip every part");
+        assert_eq!(visits, 0, "root_invisible must skip every part");
     }
 
     #[test]
-    fn root_missing_visible_slot_is_visible() {
+    fn update_can_hide_individual_mesh_parts() {
         let (mut zones, zid) = seed_zone();
-        // No SlotValues component at all → empty slots → visible.
         insert_tree(&mut zones, zid, Vec3::ZERO, None);
 
         let mut templates: RenderRegistry<Rid, u32, u32> = RenderRegistry::new();
         templates.register(
             Rid::Tree,
-            RenderTemplate::<u32, u32>::new("tree").with_mesh_part(0, 0, Mat4::IDENTITY),
-        );
-
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
-
-        let mut visits = 0usize;
-        RenderObjectPass::for_each_alive_part(&zones, &templates, &live, |_, _, _, _, _| {
-            visits += 1;
-        });
-        assert_eq!(visits, 1);
-    }
-
-    #[test]
-    fn per_part_visibility_slot_hides_only_that_part() {
-        let (mut zones, zid) = seed_zone();
-        let slots = SlotValues::new()
-            .with("show_a", SlotValue::Bool(true))
-            .with("show_b", SlotValue::Bool(false));
-        insert_tree(&mut zones, zid, Vec3::ZERO, Some(slots));
-
-        let mut templates: RenderRegistry<Rid, u32, u32> = RenderRegistry::new();
-        templates.register(
-            Rid::Tree,
             RenderTemplate::<u32, u32>::new("tree")
-                .with_slot("show_a", SlotKind::Bool)
-                .with_slot("show_b", SlotKind::Bool)
-                .with_mesh_part_gated(0, 0, Mat4::IDENTITY, "show_a")
-                .with_mesh_part_gated(1, 1, Mat4::IDENTITY, "show_b"),
+                .with_mesh_part(0, 0, Mat4::IDENTITY)
+                .with_mesh_part(1, 1, Mat4::IDENTITY),
         );
 
         let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        RenderObjectPass::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, _, instance| {
+                // Hide the second mesh part only.
+                instance.mesh_parts[1].visible = false;
+            },
+        );
 
         let mut visited: Vec<u32> = Vec::new();
         RenderObjectPass::for_each_alive_part(&zones, &templates, &live, |_, _, part, _, _| {
@@ -570,46 +599,56 @@ mod tests {
         assert_eq!(
             visited,
             vec![0],
-            "only the part bound to a true slot should be visited",
+            "only the part left visible by update should be visited",
         );
     }
 
     #[test]
-    fn per_part_missing_slot_value_is_visible() {
+    fn update_can_hide_individual_emitter_parts() {
         let (mut zones, zid) = seed_zone();
-        // SlotValues present but missing the gating slot → visible default.
-        let slots = SlotValues::new();
-        insert_tree(&mut zones, zid, Vec3::ZERO, Some(slots));
+        insert_tree(&mut zones, zid, Vec3::ZERO, None);
 
-        let mut templates: RenderRegistry<Rid, u32, u32> = RenderRegistry::new();
+        let mut templates: RenderRegistry<Rid, u32, u32, u32, u32> = RenderRegistry::new();
         templates.register(
             Rid::Tree,
-            RenderTemplate::<u32, u32>::new("tree")
-                .with_slot("show", SlotKind::Bool)
-                .with_mesh_part_gated(0, 0, Mat4::IDENTITY, "show"),
+            RenderTemplate::<u32, u32, u32, u32>::new("tree")
+                .with_emitter_part(0, 0, Mat4::IDENTITY)
+                .with_emitter_part(1, 1, Mat4::IDENTITY),
         );
 
         let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        RenderObjectPass::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, _, instance| {
+                instance.emitter_parts[0].visible = false;
+            },
+        );
 
-        let mut visits = 0usize;
-        RenderObjectPass::for_each_alive_part(&zones, &templates, &live, |_, _, _, _, _| {
-            visits += 1;
-        });
-        assert_eq!(visits, 1, "missing gating slot value defaults to visible");
+        let mut visited: Vec<u32> = Vec::new();
+        RenderObjectPass::for_each_alive(
+            &zones,
+            &templates,
+            &live,
+            |_, _, _, _, _| {},
+            |_, _, part, _, _| visited.push(part.template),
+        );
+        assert_eq!(
+            visited,
+            vec![1],
+            "only the emitter left visible by update should be visited",
+        );
     }
 
     #[test]
-    fn root_invisible_skips_hit_id_reservation() {
+    fn update_setting_root_invisible_skips_hit_id_reservation() {
         let (mut zones, zid) = seed_zone();
-        // Two trees: one visible, one invisible.
+        // Two trees: one stays visible, one is hidden by update.
         insert_tree(&mut zones, zid, Vec3::ZERO, None);
-        insert_tree(
-            &mut zones,
-            zid,
-            Vec3::new(2.0, 0.0, 0.0),
-            Some(SlotValues::new().with(VISIBLE_SLOT, SlotValue::Bool(false))),
-        );
+        let hidden_position = Vec3::new(2.0, 0.0, 0.0);
+        insert_tree(&mut zones, zid, hidden_position, None);
 
         let mut templates: RenderRegistry<Rid, u32, u32> = RenderRegistry::new();
         templates.register(
@@ -619,6 +658,16 @@ mod tests {
 
         let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        RenderObjectPass::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, _, instance| {
+                if (instance.world_xform.w_axis.truncate() - hidden_position).length() < 0.01 {
+                    instance.root_visible = false;
+                }
+            },
+        );
 
         let mut reservations = 0u32;
         let mut next_id = 1u32;
@@ -642,10 +691,9 @@ mod tests {
     }
 
     #[test]
-    fn for_each_alive_skips_emitter_parts_when_root_invisible() {
+    fn root_invisible_skips_emitter_parts() {
         let (mut zones, zid) = seed_zone();
-        let slots = SlotValues::new().with(VISIBLE_SLOT, SlotValue::Bool(false));
-        insert_tree(&mut zones, zid, Vec3::ZERO, Some(slots));
+        insert_tree(&mut zones, zid, Vec3::ZERO, None);
 
         let mut templates: RenderRegistry<Rid, u32, u32, u32, u32> = RenderRegistry::new();
         templates.register(
@@ -657,6 +705,14 @@ mod tests {
 
         let mut live = LiveRenderObjects::<Rid>::new(30);
         RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        RenderObjectPass::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, _, instance| {
+                instance.root_visible = false;
+            },
+        );
 
         let mut mesh_visits = 0usize;
         let mut emitter_visits = 0usize;
