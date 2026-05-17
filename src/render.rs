@@ -24,6 +24,9 @@
 //! - [`render_object`] — render-object templates + registry (slot schema + parts).
 //! - [`render_object_pass`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
+//! - [`handle`] — streaming-asset reference type (`Handle<T>` + states).
+//! - [`asset_server`] — view-side asset gateway; spawns background loads,
+//!   serves the magenta fallback, carries the debug "force loading" toggle.
 //! - [`mesh_primitives`] — CPU-side mesh generators (cube, plane, sphere,
 //!   cylinder, cone) in the canonical [`vertex`] layout.
 //! - [`pbr`] — metallic-roughness PBR material; reads scene env + camera.
@@ -41,6 +44,7 @@
 //! Submodules are private; their public types are re-exported here so callers
 //! see a flat `currawong::*` surface.
 
+mod asset_server;
 mod camera;
 mod camera_rig;
 mod cell_highlight;
@@ -50,6 +54,7 @@ mod emitter;
 mod environment;
 #[cfg(feature = "yakui")]
 mod game_ui;
+mod handle;
 mod instance;
 mod live_render_objects;
 mod material;
@@ -70,11 +75,13 @@ mod vertex;
 mod view;
 mod visibility;
 
+pub use asset_server::{AssetServer, ResolvedTexture, TextureSource};
 pub use camera::{Camera, CameraBinding, CameraUniformData};
 pub use camera_rig::{OrbitRig, OrbitRigConfig};
 pub use cell_highlight::CellHighlight;
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
 pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
+pub use handle::{Handle, HandleError, HandleState};
 pub use instance::{InstanceBuckets, mat4_instance_attributes, u32_id_instance_attribute};
 pub use live_render_objects::{LiveRenderObject, LiveRenderObjects, RenderPartState};
 pub use material::{

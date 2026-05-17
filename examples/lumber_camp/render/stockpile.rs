@@ -13,7 +13,9 @@
 //! kind's footprint in [`super`] stays one registration line.
 
 use currawong::glam::{Vec3, Vec4};
-use currawong::{Aabb, PbrMaterial, PrimitiveMesh, Renderer, SamplerRegistry, Texture};
+use currawong::{
+    Aabb, AssetServer, Handle, PbrMaterial, PrimitiveMesh, Renderer, SamplerRegistry, Texture,
+};
 
 use super::{MeshTemplate, TemplateParams};
 
@@ -22,12 +24,14 @@ pub fn new_body_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
-    albedo: &Texture,
+    asset_server: &AssetServer,
+    albedo: Handle<Texture>,
 ) -> MeshTemplate {
     MeshTemplate::new(
         renderer,
         material,
         samplers,
+        asset_server,
         albedo,
         &PrimitiveMesh::cube(Vec3::ONE),
         TemplateParams {

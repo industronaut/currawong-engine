@@ -23,18 +23,20 @@
 
 #[cfg(feature = "egui")]
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use currawong::data::Vfs;
 #[cfg(feature = "egui")]
 use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
-    MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
-    Renderer, SamplerKind, SamplerRegistry, SimEnvironment, Simulation, Texture, TextureColorSpace,
-    View, ViewConfig, ViewEnvironment, WorldTransform, Zone, ZoneId, Zones, sun_direction_for,
-    wgpu, winit,
+    AssetServer, Camera, CameraBinding, EngineCtx, Handle, InstanceBuckets,
+    MaterialInstanceRegistry, MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance,
+    PbrMaterialParams, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, SimEnvironment,
+    Simulation, Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldTransform,
+    Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -111,6 +113,8 @@ struct TexturedPbr {
     camera_binding: CameraBinding,
     material: PbrMaterial,
     instances: MaterialInstanceRegistry<PbrMaterialInstance, MaterialId>,
+    samplers: SamplerRegistry,
+    asset_server: AssetServer,
     cube_vertices: wgpu::Buffer,
     cube_indices: wgpu::Buffer,
     cube_index_count: u32,
@@ -151,19 +155,27 @@ impl View for TexturedPbr {
         let samplers = SamplerRegistry::new(device);
         let material = PbrMaterial::new(renderer, camera_binding.layout());
 
-        // One albedo texture shared by all five instances. Resolved
-        // relative to the crate root so the example runs from any cwd.
+        // Eager-load path: load the PNG synchronously, then wrap it in an
+        // already-`Ready` `Handle<Texture>` so it flows through the same
+        // material API the streaming path (see `examples/assets.rs`) uses.
+        // The empty VFS is fine — `Handle::ready` sidesteps the asset
+        // server's loader thread, and the server is only consulted for the
+        // magenta fallback (which never needs to bind because every handle
+        // here starts already `Ready`).
         let albedo_path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/checker_albedo.png");
-        let albedo = Texture::from_path(renderer, &albedo_path, TextureColorSpace::Srgb)
+        let albedo_tex = Texture::from_path(renderer, &albedo_path, TextureColorSpace::Srgb)
             .expect("load assets/checker_albedo.png");
+        let asset_server = AssetServer::new(renderer, Arc::new(Vfs::new()));
+        let albedo: Handle<Texture> = Handle::ready(albedo_tex);
 
         let make = |metallic: f32, roughness: f32| {
             material.create_instance(
                 renderer,
                 &samplers,
+                &asset_server,
                 PbrMaterialParams {
-                    albedo: &albedo,
+                    albedo: albedo.clone(),
                     sampler: SamplerKind::LinearRepeat,
                     albedo_factor: Vec4::ONE,
                     metallic,
@@ -203,6 +215,8 @@ impl View for TexturedPbr {
             camera_binding,
             material,
             instances,
+            samplers,
+            asset_server,
             cube_vertices,
             cube_indices,
             cube_index_count: mesh.index_count(),
@@ -289,6 +303,17 @@ impl View for TexturedPbr {
             }
         }
         self.buckets.upload(&renderer.queue);
+
+        // Reconcile every material instance with its handle's current state.
+        // No-op here (the cubes were built with `Handle::ready`, so the
+        // initial bind group is already against the real texture), but
+        // mirrors the canonical streaming-aware draw shape used by
+        // `examples/assets.rs`.
+        for &mat in ALL_MATERIALS.iter() {
+            if let Some(instance) = self.instances.get_mut(mat) {
+                instance.refresh(renderer, &self.material, &self.samplers, &self.asset_server);
+            }
+        }
 
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);

@@ -75,6 +75,13 @@ where
         self.instances.get(&id)
     }
 
+    /// Mutable variant of [`get`](Self::get). Needed for instances that
+    /// expose a per-frame `refresh` method (e.g. `PbrMaterialInstance` —
+    /// the bind group has to be rebuilt when its handle transitions).
+    pub fn get_mut(&mut self, id: K) -> Option<&mut I> {
+        self.instances.get_mut(&id)
+    }
+
     pub fn len(&self) -> usize {
         self.instances.len()
     }

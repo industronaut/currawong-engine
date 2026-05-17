@@ -40,6 +40,10 @@ yakui-wgpu = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a2727
 yakui-winit = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a27275f86c4723dbbc86ade075c98512aea1b", optional = true }
 
 [[example]]
+name = "assets"
+required-features = ["render"]
+
+[[example]]
 name = "campfire"
 required-features = ["render"]
 
