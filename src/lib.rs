@@ -8,6 +8,10 @@
 //!   anything is being rendered. It does not depend on `wgpu` or `winit`.
 //! - [`View`] is a separate concern that reads simulation state to draw
 //!   frames and route input.
+//! - [`data`] is the third top-level module: the virtual filesystem and
+//!   definitions pipeline. Sim depends on [`data::Definitions`]; the view
+//!   pulls assets through the same VFS. Always compiled, no
+//!   `wgpu`/`winit` dependencies.
 //!
 //! Headless tick — running the simulation without a window — is a
 //! first-class mode. The render-side machinery ([`Renderer`], [`View`],
@@ -19,6 +23,8 @@ pub use glam;
 
 mod sim;
 pub use sim::*;
+
+pub mod data;
 
 #[cfg(feature = "render")]
 pub use wgpu;
