@@ -35,26 +35,6 @@ yakui-wgpu = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a2727
 yakui-winit = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a27275f86c4723dbbc86ade075c98512aea1b", optional = true }
 
 [[example]]
-name = "clear"
-required-features = ["render"]
-
-[[example]]
-name = "triangle"
-required-features = ["render"]
-
-[[example]]
-name = "input"
-required-features = ["render"]
-
-[[example]]
-name = "camera"
-required-features = ["render"]
-
-[[example]]
-name = "instances"
-required-features = ["render"]
-
-[[example]]
 name = "campfire"
 required-features = ["render"]
 
@@ -63,24 +43,8 @@ name = "materials"
 required-features = ["render"]
 
 [[example]]
-name = "render_objects"
-required-features = ["render"]
-
-[[example]]
-name = "terrain"
-required-features = ["render"]
-
-[[example]]
 name = "trees"
 required-features = ["render"]
-
-[[example]]
-name = "egui_debug"
-required-features = ["egui"]
-
-[[example]]
-name = "yakui_hud"
-required-features = ["yakui"]
 
 [[example]]
 name = "textured_pbr"

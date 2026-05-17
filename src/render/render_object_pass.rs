@@ -1,7 +1,6 @@
 //! Engine-driven render-object pass.
 //!
-//! Owns the per-frame walk that the [`render_objects`](../../examples/render_objects.rs)
-//! example used to do by hand: sim → [`RenderId`] → [`RenderTemplate`] →
+//! Owns the per-frame walk: sim → [`RenderId`] → [`RenderTemplate`] →
 //! declared proxy → frustum cull with hysteresis → fan-out per part.
 //! View code supplies a per-part callback (and optionally a per-emitter
 //! callback) that does the actual draw-attrib push; the engine owns the
@@ -159,10 +158,10 @@ impl RenderObjectPass {
     /// fields are set by the user's update closure passed to
     /// [`Self::update_instances`].
     ///
-    /// Use this when a template carries [`EmitterPart`]s — the demo at
-    /// [`examples/render_objects.rs`](../../examples/render_objects.rs)
-    /// does. Pure-mesh views can call [`Self::for_each_alive_part`] for the
-    /// same walk without the empty emitter closure.
+    /// Use this when a template carries [`EmitterPart`]s (see
+    /// `examples/campfire.rs`). Pure-mesh views can call
+    /// [`Self::for_each_alive_part`] for the same walk without the empty
+    /// emitter closure.
     pub fn for_each_alive<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
