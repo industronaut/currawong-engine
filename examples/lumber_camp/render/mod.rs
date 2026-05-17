@@ -1,23 +1,29 @@
 //! View-side rendering for the lumber camp.
 //!
-//! Three [`RenderId`] templates (pawn capsule, tree cone, stockpile cube)
-//! drawn through one PBR pipeline against a fixed afternoon sun. Each template
-//! owns its own mesh buffers + a PBR material instance (albedo factor +
-//! metallic/roughness) so the draw loop is just one indexed-instanced call
-//! per template.
+//! Three engine [`RenderTemplate`]s — pawn (body + carried log), tree
+//! (body + designation marker), stockpile (body only) — drawn through one
+//! PBR pipeline against a fixed afternoon sun. Each `MeshPart` on those
+//! templates resolves to a per-part [`MeshTemplate`] (mesh buffers + PBR
+//! material instance) keyed by [`PartKey`]; the draw loop is one
+//! indexed-instanced call per `PartKey` bucket.
 //!
-//! Per-instance hit IDs feed [`Renderer::hit_id_hover`]: the hovered object
-//! gets a warm-gold tint, and left-clicking a tree toggles a [`Designated`]
-//! component on it. Every designated tree gets a small red downward-pointing
-//! cone floating above its apex; every [`Carrying`](crate::sim::Carrying)
-//! pawn gets a brown log riding on their shoulders (handled inside
-//! [`pawn::PawnRenderer`]).
+//! Per-frame the engine drives the walk: [`RenderObjectPass::declare_and_cull`]
+//! emits one live proxy per sim object carrying a [`RenderId`], culls
+//! against the camera frustum (with hysteresis), then
+//! [`RenderObjectPass::update_instances`] runs once per alive proxy as
+//! the *single sim→view translation seam*. That closure reads typed sim
+//! components (`Carrying`, `Move`, `Designated`) and writes view-side
+//! per-instance state on the proxy:
+//! - `instance.mesh_parts[LOG_PART].visible` for carried logs,
+//! - `instance.mesh_parts[MARKER_PART].visible` for designation markers,
+//! - `instance.world_xform` overwritten with the pawn's interpolated +
+//!   idle-bobbed pose, which cascades into the log part automatically
+//!   via the engine's `world_xform * part.local_transform` compose.
 //!
-//! Layout: this module owns the orchestration ([`LumberCampView`], the
-//! fused render walk, shared infrastructure like [`MeshTemplate`]) and
-//! per-kind state lives in sibling submodules — [`pawn`], [`tree`],
-//! [`stockpile`]. Adding a new kind is a new sibling module + a registration
-//! line in [`init`](LumberCampView::init) + an arm in the dispatch `match`.
+//! [`RenderObjectPass::for_each_alive_part_with_hit_id`] then does the
+//! actual draw-attrib push, reserving one hit ID per parent so clicking
+//! either the body or an ancillary part (carried log, designation
+//! marker) resolves back to the same sim object.
 
 mod pawn;
 mod stockpile;
@@ -28,22 +34,24 @@ use std::time::Duration;
 
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, HitTarget, InstanceBuckets,
-    MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance, PbrMaterialParams,
-    PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
-    TerrainMaterialInstance, TerrainRenderer, Texture, View, ViewConfig, ViewEnvironment,
-    WorldObjectRef, ZoneId, wgpu, winit, yakui,
+    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, HitTarget, InstanceBuckets,
+    LiveRenderObjects, MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance,
+    PbrMaterialParams, PrimitiveMesh, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer,
+    SamplerKind, SamplerRegistry, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer,
+    Texture, View, ViewConfig, ViewEnvironment, WorldObjectRef, ZoneId, wgpu, winit, yakui,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 use pawn::PawnRenderer;
-use tree::TreeRenderer;
 
 use crate::sim::{Game, GameState, HEIGHT_UNIT, RenderId, TILE_SIZE, TIME_LIMIT_SECS, WOOD_GOAL};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const MAX_INSTANCES_PER_TEMPLATE: u32 = 64;
+const MAX_INSTANCES_PER_PART: u32 = 64;
+/// 30 frames matches CLAUDE.md's hysteresis recommendation — enough to
+/// hide pop-out at grazing camera angles around the orbit rig.
+const CULL_HYSTERESIS_FRAMES: u32 = 30;
 const TERRAIN_TINT: Vec4 = Vec4::new(0.55, 0.65, 0.42, 1.0); // grass green
 /// Per-instance multiplier applied to the hovered object's albedo. Boosted
 /// above one so the highlight overdrives the lit colour, warm-gold biased
@@ -51,15 +59,35 @@ const TERRAIN_TINT: Vec4 = Vec4::new(0.55, 0.65, 0.42, 1.0); // grass green
 pub(crate) const HOVER_TINT: Vec4 = Vec4::new(1.8, 1.6, 0.8, 1.0);
 
 // --- Per-template GPU resources ----------------------------------------
-//
-// Shared infrastructure: every per-kind submodule builds at least one
-// `MeshTemplate`, and most also push into the shared `InstanceBuckets`
-// keyed by `RenderId`. Kept `pub(super)`-flavoured (just `pub` here since
-// the binary crate has no external API) so the submodules can construct
-// templates without re-exporting builders.
+
+/// Names one drawable part across every render template. Both the *mesh*
+/// and *material* of a [`MeshPart`] in this example resolve to the same
+/// `MeshTemplate` (mesh buffers + PBR material instance bundled), so one
+/// enum serves both roles in [`RenderTemplate<RenderId, PartKey, PartKey>`].
+/// Adding a new visual part is a new variant + a [`MeshTemplate`] entry
+/// in `mesh_templates`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PartKey {
+    PawnBody,
+    Log,
+    TreeBody,
+    Marker,
+    Stockpile,
+}
+
+impl PartKey {
+    /// Whether this part receives the per-frame hover tint. Body parts
+    /// do (the readable "I'm hovering this object" signal sits on the
+    /// silhouette people read first); ancillary parts (carried log,
+    /// designation marker) keep their own constant albedo so the marker
+    /// stays red and the log stays brown.
+    fn is_body(self) -> bool {
+        matches!(self, Self::PawnBody | Self::TreeBody | Self::Stockpile)
+    }
+}
 
 /// Mesh buffers + the PBR material instance to draw them with. One per
-/// [`RenderId`] kind; bound together because the draw loop always swaps
+/// [`PartKey`]; bound together because the draw loop always swaps
 /// both at once.
 pub struct MeshTemplate {
     pub vertices: wgpu::Buffer,
@@ -119,6 +147,10 @@ pub struct TemplateParams {
     pub roughness: f32,
 }
 
+/// `RenderRegistry` generics for this view — pinned once to keep the
+/// `LumberCampView` field readable.
+type Templates = RenderRegistry<RenderId, PartKey, PartKey>;
+
 // --- View ---------------------------------------------------------------
 
 pub struct LumberCampView {
@@ -127,8 +159,21 @@ pub struct LumberCampView {
     rig: OrbitRig,
 
     material: PbrMaterial,
-    templates: HashMap<RenderId, MeshTemplate>,
-    buckets: InstanceBuckets<RenderId, MeshInstanceAttribs>,
+    /// GPU bundle per drawable part. Looked up by the draw loop after the
+    /// per-part bucket has been filled by the engine walk.
+    mesh_templates: HashMap<PartKey, MeshTemplate>,
+    /// Engine-side render-object registry: maps each [`RenderId`] to a
+    /// [`RenderTemplate`] describing which parts make it up and where
+    /// each part sits relative to the object's world transform.
+    templates: Templates,
+    /// Live render-object proxies with cull hysteresis. Owns the
+    /// view-side per-instance state (`world_xform`, per-part visibility)
+    /// that the per-instance update closure writes each frame.
+    live_objects: LiveRenderObjects<RenderId>,
+    /// Per-part instance-attrib buckets. The extract closure pushes one
+    /// [`MeshInstanceAttribs`] per visible part; the draw loop iterates
+    /// non-empty buckets and issues one indexed-instanced call each.
+    buckets: InstanceBuckets<PartKey, MeshInstanceAttribs>,
 
     terrain: TerrainRenderer,
     terrain_material: TerrainMaterial,
@@ -136,16 +181,16 @@ pub struct LumberCampView {
 
     /// Object currently under the cursor, resolved from the GPU hit-ID
     /// readback (1–3 frame lag is invisible at hover-highlight latency).
-    /// The render walk only compares this for equality, so a stale id
-    /// after an object removal just produces a one-frame no-highlight.
+    /// Stored as `WorldObjectRef` so it lines up with the parent that
+    /// the engine walk receives in callbacks.
     hovered: Option<WorldObjectRef>,
 
-    /// Per-kind submodule for pawns: owns the carried-log template,
-    /// tick-boundary interpolation snapshots, and the idle-bob clock.
+    /// Per-kind view-state for pawns: interpolation snapshots + idle-bob
+    /// clock. Read by the per-instance update closure to overwrite
+    /// `instance.world_xform`. Kept as a side-table on the view (rather
+    /// than on `LiveRenderObject`) because there's no view-extensible
+    /// state slot on the engine proxy yet — see #65 Open Question 2.
     pawn: PawnRenderer,
-    /// Per-kind submodule for trees: owns the designation-marker template
-    /// and its per-frame scratch.
-    tree: TreeRenderer,
 }
 
 impl View for LumberCampView {
@@ -174,9 +219,9 @@ impl View for LumberCampView {
         let samplers = SamplerRegistry::new(&renderer.device);
         let material = PbrMaterial::new(renderer, camera_binding.layout());
 
-        // 1×1 white sRGB texture — albedo is driven entirely by the per-template
+        // 1×1 white sRGB texture — albedo is driven entirely by the per-part
         // `albedo_factor`. Swapping in real textures later means only changing
-        // the texture handed to each template.
+        // the texture handed to each `MeshTemplate`.
         let albedo = Texture::from_rgba8(
             renderer,
             "lumber-camp white",
@@ -186,50 +231,95 @@ impl View for LumberCampView {
             true,
         );
 
-        // Every body template comes from its per-kind submodule, registered
-        // here in the central map so the bucket draw loop renders all kinds
-        // uniformly. Adding a kind is one new line.
-        let mut templates = HashMap::new();
-        templates.insert(
-            RenderId::Pawn,
+        // GPU resources per drawable part. Each `PartKey` resolves to one
+        // `MeshTemplate` here; multiple `MeshPart`s in different render
+        // templates may reference the same `PartKey` (none do today, but
+        // the indirection is cheap).
+        let mut mesh_templates = HashMap::new();
+        mesh_templates.insert(
+            PartKey::PawnBody,
             pawn::new_body_template(renderer, &material, &samplers, &albedo),
         );
-        templates.insert(
-            RenderId::Tree,
+        mesh_templates.insert(
+            PartKey::Log,
+            pawn::new_log_template(renderer, &material, &samplers, &albedo),
+        );
+        mesh_templates.insert(
+            PartKey::TreeBody,
             tree::new_body_template(renderer, &material, &samplers, &albedo),
         );
-        templates.insert(
-            RenderId::Stockpile,
+        mesh_templates.insert(
+            PartKey::Marker,
+            tree::new_marker_template(renderer, &material, &samplers, &albedo),
+        );
+        mesh_templates.insert(
+            PartKey::Stockpile,
             stockpile::new_body_template(renderer, &material, &samplers, &albedo),
         );
 
-        let mut buckets = InstanceBuckets::<RenderId, MeshInstanceAttribs>::new(
-            "lumber-camp instances",
-            MAX_INSTANCES_PER_TEMPLATE,
+        // Engine render templates: which parts make up each `RenderId`,
+        // where each part sits, and the visual AABB used for frustum
+        // culling. Both the `mesh` and `material` of each `MeshPart`
+        // resolve to the same `PartKey` for this example.
+        let mut templates: Templates = RenderRegistry::new();
+        templates.register(
+            RenderId::Pawn,
+            RenderTemplate::new("pawn")
+                .with_mesh_part(PartKey::PawnBody, PartKey::PawnBody, Mat4::IDENTITY)
+                .with_mesh_part(PartKey::Log, PartKey::Log, pawn::log_local_transform())
+                .with_visual_bounds(pawn::visual_bounds()),
         );
-        for &kind in &[RenderId::Pawn, RenderId::Tree, RenderId::Stockpile] {
-            buckets.register(&renderer.device, kind);
+        templates.register(
+            RenderId::Tree,
+            RenderTemplate::new("tree")
+                .with_mesh_part(PartKey::TreeBody, PartKey::TreeBody, Mat4::IDENTITY)
+                .with_mesh_part(
+                    PartKey::Marker,
+                    PartKey::Marker,
+                    tree::marker_local_transform(),
+                )
+                .with_visual_bounds(tree::visual_bounds()),
+        );
+        templates.register(
+            RenderId::Stockpile,
+            RenderTemplate::new("stockpile")
+                .with_mesh_part(PartKey::Stockpile, PartKey::Stockpile, Mat4::IDENTITY)
+                .with_visual_bounds(stockpile::visual_bounds()),
+        );
+
+        let live_objects = LiveRenderObjects::<RenderId>::new(CULL_HYSTERESIS_FRAMES);
+
+        let mut buckets = InstanceBuckets::<PartKey, MeshInstanceAttribs>::new(
+            "lumber-camp instances",
+            MAX_INSTANCES_PER_PART,
+        );
+        for &key in &[
+            PartKey::PawnBody,
+            PartKey::Log,
+            PartKey::TreeBody,
+            PartKey::Marker,
+            PartKey::Stockpile,
+        ] {
+            buckets.register(&renderer.device, key);
         }
 
         let terrain_material = TerrainMaterial::new(renderer, camera_binding.layout());
         let terrain_solid = terrain_material.create_instance(renderer, TERRAIN_TINT);
-
-        let pawn_renderer = PawnRenderer::new(renderer, &material, &samplers, &albedo);
-        let tree_renderer = TreeRenderer::new(renderer, &material, &samplers, &albedo);
 
         Self {
             camera,
             camera_binding,
             rig,
             material,
+            mesh_templates,
             templates,
+            live_objects,
             buckets,
             terrain: TerrainRenderer::new(),
             terrain_material,
             terrain_solid,
             hovered: None,
-            pawn: pawn_renderer,
-            tree: tree_renderer,
+            pawn: PawnRenderer::new(),
         }
     }
 
@@ -292,45 +382,65 @@ impl View for LumberCampView {
             _ => None,
         };
 
-        // Single fused walk over every sim object with a RenderId, pushing
-        // one per-instance attribs to the matching bucket. Per-kind details
-        // (pawn interpolation + idle bob + log emission) are delegated to
-        // the kind's submodule but invoked inline so we keep a single pass
-        // over the zone — see the cache/i-cache rationale in pawn.rs.
-        self.buckets.begin_frame();
         self.pawn.begin_frame();
-        self.tree.begin_frame();
-        for (zone_id, zone) in sim.zones.iter() {
-            for (id, transform) in zone.iter() {
-                let Some(&render_id) = zone.components().get::<RenderId>(id) else {
-                    continue;
-                };
-                let position = if render_id == RenderId::Pawn {
-                    self.pawn.position_for(zone, id, transform.position, alpha)
-                } else {
-                    transform.position
-                };
-                let model = Mat4::from_rotation_translation(transform.rotation, position);
-                let hit_id = renderer.reserve_object(zone_id, id);
-                let tint = if self.hovered == Some(WorldObjectRef { zone: zone_id, id }) {
+        self.buckets.begin_frame();
+
+        // Phase 1: engine-driven walk + declare + cull. One proxy per sim
+        // object carrying a `RenderId`, frustum-culled with hysteresis.
+        let frustum = Frustum::from_view_proj(self.camera.view_proj());
+        RenderObjectPass::declare_and_cull(
+            &sim.zones,
+            &self.templates,
+            &mut self.live_objects,
+            &frustum,
+        );
+
+        // Phase 1.5: the single sim→view translation seam. Each
+        // RenderId's update logic lives in its own kind module — this
+        // match is just the dispatch shape, so adding a new kind is
+        // one arm here plus a function in the new submodule.
+        // Disjoint-borrows `self.pawn` (read-only) and `self.live_objects`
+        // (mutable through the engine call) by binding each before the
+        // closure.
+        let pawn = &self.pawn;
+        RenderObjectPass::update_instances(
+            &sim.zones,
+            &self.templates,
+            &mut self.live_objects,
+            |parent, rid, _slots, components, instance| match rid {
+                RenderId::Pawn => pawn::update_instance(parent, components, instance, alpha, pawn),
+                RenderId::Tree => tree::update_instance(parent, components, instance),
+                // Stockpile: no view-side decisions — defaults (all visible) stand.
+                RenderId::Stockpile => {}
+            },
+        );
+
+        // Phase 2: engine-driven extract. The hit-ID-aware variant reserves
+        // one ID per parent so clicking the log resolves back to the pawn,
+        // and clicking the marker resolves back to the tree (#56 PR 3).
+        // Hover tint stays on body parts; the carried log and designation
+        // marker keep their own constant albedo for legibility.
+        let buckets = &mut self.buckets;
+        let hovered = self.hovered;
+        RenderObjectPass::for_each_alive_part_with_hit_id(
+            &sim.zones,
+            &self.templates,
+            &self.live_objects,
+            renderer,
+            |parent, _rid, part, world, _slots, hit_id| {
+                let tint = if hovered == Some(parent) && part.material.is_body() {
                     HOVER_TINT
                 } else {
                     Vec4::ONE
                 };
-                self.buckets.push(
-                    render_id,
-                    MeshInstanceAttribs::new(model, tint).with_hit_id(hit_id),
+                buckets.push(
+                    part.mesh,
+                    MeshInstanceAttribs::new(world, tint).with_hit_id(hit_id),
                 );
-                match render_id {
-                    RenderId::Pawn => self.pawn.push_log_if_carrying(zone, id, model),
-                    RenderId::Tree => self.tree.push_marker_if_designated(zone, id, transform),
-                    RenderId::Stockpile => {}
-                }
-            }
-        }
+            },
+        );
+
         self.buckets.upload(&renderer.queue);
-        self.pawn.upload_logs(&renderer.queue);
-        self.tree.upload_markers(&renderer.queue);
 
         // Terrain first so opaque ground is in the depth buffer before meshes
         // draw on top of it. Same camera + scene env bindings serve both.
@@ -341,13 +451,13 @@ impl View for LumberCampView {
         self.terrain
             .draw_solid(pass, renderer, sim.zone, &self.terrain_solid);
 
-        // Mesh objects: one indexed-instanced call per template, swapping
-        // material bind group + vertex/index buffers each time.
+        // Mesh parts: one indexed-instanced call per non-empty bucket,
+        // swapping material bind group + vertex/index buffers each time.
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        for (render_id, instance_buffer, count) in self.buckets.iter_filled() {
-            let Some(template) = self.templates.get(&render_id) else {
+        for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
+            let Some(template) = self.mesh_templates.get(&part_key) else {
                 continue;
             };
             pass.set_bind_group(2, template.material.bind_group(), &[]);
@@ -356,12 +466,6 @@ impl View for LumberCampView {
             pass.set_index_buffer(template.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..template.index_count, 0, 0..count);
         }
-
-        // Per-kind ancillary draws — same pipeline as the main meshes;
-        // each submodule binds its own template + scratch buffer and
-        // issues the indexed-instanced draw.
-        self.tree.draw_markers(pass);
-        self.pawn.draw_logs(pass);
     }
 
     fn input(&mut self, sim: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
