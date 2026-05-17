@@ -87,7 +87,7 @@ pub use picking::{Hover, Ray, TerrainPicker};
 pub use picking_buffer::{FrameIdTable, HitTarget};
 pub use render_object::{
     EmitterPart, MeshPart, RenderRegistry, RenderTemplate, SlotDescriptor, SlotKind, SlotRouting,
-    SlotValue, SlotValues,
+    SlotValue, SlotValues, VISIBLE_SLOT,
 };
 pub use render_object_pass::{RenderObjectPass, validate_slot_values};
 pub use renderer::Renderer;

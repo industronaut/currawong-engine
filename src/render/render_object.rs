@@ -30,6 +30,17 @@ use glam::{Mat4, Vec2, Vec3, Vec4};
 
 use super::visibility::Aabb;
 
+/// Reserved slot name for instance-root visibility. Every template
+/// implicitly honours this: if a parent object's [`SlotValues`] has
+/// `(VISIBLE_SLOT, SlotValue::Bool(false))`, the engine's render-object
+/// walk skips the entire instance — no mesh parts, no emitter parts, no
+/// hit-ID reservation. Missing slot = visible. See the [`render_object_pass`](super::render_object_pass)
+/// helpers for the gating logic.
+///
+/// Templates declaring a slot with this name and a non-[`SlotKind::Bool`]
+/// kind panic at template-build time (see [`RenderTemplate::with_routed_slot`]).
+pub const VISIBLE_SLOT: &str = "visible";
+
 /// Type of a parameter slot on a [`RenderTemplate`]. Each variant pairs with
 /// a [`SlotValue`] of the same name. The set is deliberately closed: adding
 /// a kind requires a code change, not a string tag, which keeps slots strongly
@@ -187,6 +198,16 @@ pub struct MeshPart<M, MK> {
     /// World transform of a drawn instance is
     /// `world_xform_of_object * local_transform`.
     pub local_transform: Mat4,
+    /// Optional binding to a `SlotKind::Bool` slot on the parent template.
+    /// When set, the engine's render-object walk skips this part if the
+    /// parent's [`SlotValues`] has `(name, SlotValue::Bool(false))`. Missing
+    /// slot = visible (same convention as [`VISIBLE_SLOT`]).
+    ///
+    /// Construct via [`RenderTemplate::with_mesh_part_gated`] so the
+    /// template-build-time check that the named slot exists and is `Bool`
+    /// runs; bypassing that builder shifts the failure mode to a
+    /// debug-build slot-validation panic when the part is first walked.
+    pub visibility_slot: Option<&'static str>,
 }
 
 impl<M, MK> MeshPart<M, MK> {
@@ -195,6 +216,7 @@ impl<M, MK> MeshPart<M, MK> {
             mesh,
             material,
             local_transform,
+            visibility_slot: None,
         }
     }
 }
@@ -295,6 +317,14 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
             name,
         );
         assert!(
+            !(name == VISIBLE_SLOT && kind != SlotKind::Bool),
+            "RenderTemplate '{}' declared reserved slot '{}' with kind {:?}; \
+             VISIBLE_SLOT is reserved for instance-root visibility and must be SlotKind::Bool.",
+            self.label,
+            name,
+            kind,
+        );
+        assert!(
             !self.slots.iter().any(|s| s.name == name),
             "RenderTemplate '{}' already has a slot named '{}'",
             self.label,
@@ -314,6 +344,46 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     pub fn with_mesh_part(mut self, mesh: M, material: MK, local_transform: Mat4) -> Self {
         self.mesh_parts
             .push(MeshPart::new(mesh, material, local_transform));
+        self
+    }
+
+    /// Add a [`MeshPart`] gated on a `SlotKind::Bool` slot. The engine
+    /// skips this part when the parent's [`SlotValues`] has
+    /// `(visibility_slot, SlotValue::Bool(false))`. Missing slot = visible.
+    ///
+    /// The named slot must already be declared on this template with
+    /// [`SlotKind::Bool`] — typically via [`Self::with_slot`] earlier in
+    /// the builder chain — or this call panics. [`VISIBLE_SLOT`] is
+    /// accepted without an explicit declaration since it's reserved
+    /// engine-wide, though gating a part on it is redundant with root
+    /// visibility (which already short-circuits the entire instance).
+    pub fn with_mesh_part_gated(
+        mut self,
+        mesh: M,
+        material: MK,
+        local_transform: Mat4,
+        visibility_slot: &'static str,
+    ) -> Self {
+        if visibility_slot != VISIBLE_SLOT {
+            let slot = self.slot(visibility_slot).unwrap_or_else(|| {
+                panic!(
+                    "RenderTemplate '{}' gated mesh part on slot '{}', \
+                     but no such slot is declared — call with_slot('{}', SlotKind::Bool) first.",
+                    self.label, visibility_slot, visibility_slot,
+                )
+            });
+            assert!(
+                slot.kind == SlotKind::Bool,
+                "RenderTemplate '{}' gated mesh part on slot '{}' of kind {:?}; \
+                 per-part visibility slots must be SlotKind::Bool.",
+                self.label,
+                visibility_slot,
+                slot.kind,
+            );
+        }
+        let mut part = MeshPart::new(mesh, material, local_transform);
+        part.visibility_slot = Some(visibility_slot);
+        self.mesh_parts.push(part);
         self
     }
 
@@ -728,6 +798,59 @@ mod tests {
 
         assert_eq!(sv.len(), 1, "set must overwrite, not append");
         assert_eq!(sv.get("intensity"), Some(SlotValue::F32(0.9)));
+    }
+
+    #[test]
+    fn mesh_part_visibility_slot_defaults_to_none() {
+        let part: MeshPart<TestMesh, TestMat> =
+            MeshPart::new(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY);
+        assert!(part.visibility_slot.is_none());
+    }
+
+    #[test]
+    fn with_mesh_part_gated_records_visibility_slot() {
+        let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("pawn")
+            .with_slot("carrying", SlotKind::Bool)
+            .with_mesh_part_gated(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY, "carrying");
+
+        let parts = t.mesh_parts();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].visibility_slot, Some("carrying"));
+    }
+
+    #[test]
+    fn with_mesh_part_gated_accepts_visible_slot_without_declaration() {
+        let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("rune")
+            .with_mesh_part_gated(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY, VISIBLE_SLOT);
+
+        assert_eq!(t.mesh_parts()[0].visibility_slot, Some(VISIBLE_SLOT));
+    }
+
+    #[test]
+    #[should_panic(expected = "no such slot is declared")]
+    fn with_mesh_part_gated_panics_when_slot_missing() {
+        let _: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("pawn")
+            .with_mesh_part_gated(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY, "carrying");
+    }
+
+    #[test]
+    #[should_panic(expected = "per-part visibility slots must be SlotKind::Bool")]
+    fn with_mesh_part_gated_panics_on_non_bool_slot() {
+        let _: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("pawn")
+            .with_slot("intensity", SlotKind::F32)
+            .with_mesh_part_gated(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY, "intensity");
+    }
+
+    #[test]
+    #[should_panic(expected = "VISIBLE_SLOT is reserved")]
+    fn declaring_visible_slot_with_non_bool_kind_panics() {
+        let _: RenderTemplate = RenderTemplate::new("bad").with_slot(VISIBLE_SLOT, SlotKind::F32);
+    }
+
+    #[test]
+    fn declaring_visible_slot_with_bool_kind_is_allowed() {
+        let t: RenderTemplate = RenderTemplate::new("ok").with_slot(VISIBLE_SLOT, SlotKind::Bool);
+        assert_eq!(t.slot(VISIBLE_SLOT).map(|s| s.kind), Some(SlotKind::Bool));
     }
 
     #[test]
