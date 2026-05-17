@@ -27,6 +27,7 @@
 //! - [`handle`] — streaming-asset reference type (`Handle<T>` + states).
 //! - [`asset_server`] — view-side asset gateway; spawns background loads,
 //!   serves the magenta fallback, carries the debug "force loading" toggle.
+//! - [`mesh`] — streamable static-mesh asset (`Mesh`) + glTF 2.0 loader.
 //! - [`mesh_primitives`] — CPU-side mesh generators (cube, plane, sphere,
 //!   cylinder, cone) in the canonical [`vertex`] layout.
 //! - [`pbr`] — metallic-roughness PBR material; reads scene env + camera.
@@ -58,6 +59,7 @@ mod handle;
 mod instance;
 mod live_render_objects;
 mod material;
+mod mesh;
 mod mesh_primitives;
 mod pbr;
 mod picking;
@@ -75,7 +77,7 @@ mod vertex;
 mod view;
 mod visibility;
 
-pub use asset_server::{AssetServer, ResolvedTexture, TextureSource};
+pub use asset_server::{AssetServer, MeshSource, ResolvedMesh, ResolvedTexture, TextureSource};
 pub use camera::{Camera, CameraBinding, CameraUniformData};
 pub use camera_rig::{OrbitRig, OrbitRigConfig};
 pub use cell_highlight::CellHighlight;
@@ -88,6 +90,7 @@ pub use material::{
     MaterialInstanceRegistry, MeshInstanceAttribs, MeshMaterial, UnlitColoredInstance,
     UnlitColoredMaterial,
 };
+pub use mesh::{DecodedMesh, Mesh, MeshLoadError, decode_gltf_mesh};
 pub use mesh_primitives::PrimitiveMesh;
 pub use pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use picking::{Hover, Ray, TerrainPicker};
