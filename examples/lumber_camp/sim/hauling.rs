@@ -8,7 +8,7 @@
 use currawong::glam::Vec3;
 use currawong::{WorldObjectId, Zone};
 
-use super::{GameStats, Move};
+use super::{GameStats, Idle, Move};
 
 /// Marker on a pawn that finished a chop and is hauling a single log back
 /// to the stockpile. Zero-sized today; carrying capacity grows when the
@@ -53,6 +53,7 @@ pub fn on_arrival(zone: &mut Zone, arrived: &[WorldObjectId]) {
         };
         zone.components_mut().remove::<Hauling>(pawn);
         zone.components_mut().remove::<Carrying>(pawn);
+        zone.components_mut().insert(pawn, Idle { seconds: 0.0 });
         if let Some(store) = zone.components_mut().get_mut::<WoodStored>(stockpile) {
             store.count += 1;
         }

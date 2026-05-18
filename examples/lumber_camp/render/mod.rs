@@ -523,7 +523,6 @@ impl View for LumberCampView {
             _ => None,
         };
 
-        self.pawn.begin_frame();
         self.buckets.begin_frame();
 
         // Phase 1: engine-driven walk + declare + cull. One proxy per sim

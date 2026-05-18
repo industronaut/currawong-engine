@@ -12,7 +12,7 @@ use currawong::data::KindId;
 use currawong::glam::Vec3;
 use currawong::{WorldObjectId, Zone};
 
-use super::{Carrying, GameStats, Move};
+use super::{Carrying, GameStats, Idle, Move};
 
 /// Marker on a tree the player has flagged for chopping. Carries no data
 /// today; the planned `JobBoard` slice will grow this into `Designated { job:
@@ -55,6 +55,7 @@ pub fn validate(zone: &mut Zone) {
     for pawn in cancel {
         zone.components_mut().remove::<Chopping>(pawn);
         zone.components_mut().remove::<Move>(pawn);
+        zone.components_mut().insert(pawn, Idle { seconds: 0.0 });
     }
     let active_choppers: HashSet<WorldObjectId> = zone
         .components()
@@ -191,6 +192,7 @@ pub fn dispatch_idle(zone: &mut Zone, stats: &GameStats) {
             continue;
         };
         claimed.insert(tree_id);
+        zone.components_mut().remove::<Idle>(pawn);
         zone.components_mut()
             .insert(pawn, Chopping { tree: tree_id });
         zone.components_mut().insert(
