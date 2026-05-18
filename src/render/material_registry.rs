@@ -40,6 +40,13 @@
 //! the magenta fallback already designed in #67 — a primitive with an
 //! unregistered material name draws through a magenta-flavoured material
 //! instance the application chose to register as the fallback.
+//!
+//! Bare glb material names with no `:` (the default when authors don't
+//! rename Blender's material slots — `"Lumber"`, `"Wood.001"`) are
+//! defaulted to the `gltf:` namespace and lowercased, so registering
+//! `gltf:lumber` is enough to catch a slot named `"Lumber"` straight out
+//! of Blender. Authors who want to overlay or override an engine material
+//! still spell the full `currawong:mat_foo` form inside the .blend.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -178,10 +185,23 @@ impl<I> MaterialRegistry<I> {
 
     /// Look up the instance for a raw glb-style material slot name.
     /// Returns `None` if either the name fails [`MaterialId`] validation
-    /// (e.g. a Blender slot named "Lumber" without the `namespace:name`
-    /// prefix) or no instance is registered under the parsed id.
+    /// or no instance is registered under the parsed id.
+    ///
+    /// Bare names with no `:` (typical of unmodified Blender material
+    /// slots — `"Lumber"`, `"Wood"`) are defaulted to the `gltf:`
+    /// namespace and lowercased, so `"Lumber"` resolves to `gltf:lumber`.
+    /// Authors who want a different namespace prefix their material name
+    /// in Blender (e.g. `currawong:mat_oak`) and the explicit form passes
+    /// through unchanged.
     pub fn get_by_name(&self, raw: &str) -> Option<&I> {
-        let id = MaterialId::new(raw).ok()?;
+        let normalized;
+        let id_input: &str = if raw.contains(':') {
+            raw
+        } else {
+            normalized = format!("gltf:{}", raw.to_lowercase());
+            &normalized
+        };
+        let id = MaterialId::new(id_input).ok()?;
         self.instances.get(&id)
     }
 
@@ -310,10 +330,36 @@ mod tests {
         let mut reg = MaterialRegistry::new();
         let id = MaterialId::new("currawong:mat_bark").unwrap();
         reg.register(id, 1u32);
-        // Raw glb material slot "Lumber" doesn't satisfy the grammar — and
-        // even if it did, nothing's registered. Either way: miss → caller
-        // falls back.
+        // "Lumber" is defaulted to "gltf:lumber" — still a miss because
+        // nothing's registered under that id. Explicit `currawong:` lookup
+        // for an unregistered name also misses.
         assert!(reg.get_by_name("Lumber").is_none());
         assert!(reg.get_by_name("currawong:mat_unregistered").is_none());
+    }
+
+    #[test]
+    fn get_by_name_defaults_bare_to_gltf_namespace() {
+        let mut reg = MaterialRegistry::new();
+        let id = MaterialId::new("gltf:lumber").unwrap();
+        reg.register(id, 42u32);
+        // Blender's default slot name lands here lowercased + namespaced.
+        assert_eq!(reg.get_by_name("Lumber"), Some(&42));
+        assert_eq!(reg.get_by_name("LUMBER"), Some(&42));
+        assert_eq!(reg.get_by_name("lumber"), Some(&42));
+        // Explicit form passes through unchanged.
+        assert_eq!(reg.get_by_name("gltf:lumber"), Some(&42));
+        // Authors who hand-spell a different namespace get exact-match.
+        assert!(reg.get_by_name("currawong:lumber").is_none());
+    }
+
+    #[test]
+    fn get_by_name_bare_with_invalid_chars_misses() {
+        let mut reg = MaterialRegistry::new();
+        let id = MaterialId::new("gltf:lumber").unwrap();
+        reg.register(id, 1u32);
+        // Defaulting lowercases but doesn't munge the rest — a space or
+        // leading digit still fails grammar validation.
+        assert!(reg.get_by_name("Lumber Camp").is_none());
+        assert!(reg.get_by_name("3wood").is_none());
     }
 }
