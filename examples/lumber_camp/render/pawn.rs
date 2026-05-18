@@ -11,15 +11,16 @@
 //! [`Carrying`] component.
 //!
 //! View-side pawn state lives on [`PawnRenderer`]: tick-boundary position
-//! snapshots for sub-tick interpolation, and the wall-clock idle-bob
-//! phase. Both are read by the per-instance update closure in [`super`],
-//! which overwrites `instance.world_xform` with the interpolated +
-//! bobbed pose; the engine then composes `world_xform *
+//! snapshots for sub-tick interpolation. The idle-bob phase is per-pawn,
+//! driven by the sim's [`Idle::seconds`](crate::sim::Idle) counter, so each
+//! pawn breathes out of phase with the others (and the bob freezes on
+//! pause along with the sim). Read by the per-instance update closure in
+//! [`super`], which overwrites `instance.world_xform` with the
+//! interpolated + bobbed pose; the engine then composes `world_xform *
 //! log_local_transform` for the log part automatically.
 
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
-use std::time::Instant;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
@@ -28,7 +29,7 @@ use currawong::{
 };
 
 use super::{InlineTemplate, MeshTemplate, new_inline_template};
-use crate::sim::{Carrying, Game, Move};
+use crate::sim::{Carrying, Game, Idle};
 
 /// Index of the carried-log mesh part in every pawn's render template —
 /// second part after the body. Stable because
@@ -36,12 +37,12 @@ use crate::sim::{Carrying, Game, Move};
 /// order and only the pawn shape adds the log.
 const LOG_PART: usize = 1;
 
-/// Vertical amplitude of the idle bob applied to pawns without a
-/// [`Move`](crate::sim::Move). A few centimetres reads as breathing
-/// without looking like a glitch.
+/// Vertical amplitude of the idle bob applied to pawns carrying an
+/// [`Idle`](crate::sim::Idle) component. A few centimetres reads as
+/// breathing without looking like a glitch.
 const IDLE_BOB_AMPLITUDE: f32 = 0.035;
 /// Idle-bob frequency in Hz. Slow enough to feel like a breath rather
-/// than a hop; wall-clock driven so paused pawns still breathe.
+/// than a hop.
 const IDLE_BOB_HZ: f32 = 1.4;
 
 /// Build the shared carried-log template — a wood-brown horizontal
@@ -122,8 +123,9 @@ pub fn extended_bounds(body_bounds: &Aabb) -> Aabb {
 }
 
 /// Per-frame pawn-only view state: tick-boundary position snapshots for
-/// sub-tick interpolation, and the wall-clock idle-bob phase shared by
-/// every pawn drawn this frame.
+/// sub-tick interpolation. Each pawn's idle-bob phase is read per-call
+/// from its sim [`Idle`](crate::sim::Idle) counter, so there is no
+/// shared per-frame phase state to keep here.
 pub struct PawnRenderer {
     /// Pawn positions at the previous tick boundary. With
     /// [`pawn_curr`](Self::pawn_curr) and the current tick's `alpha`,
@@ -135,13 +137,6 @@ pub struct PawnRenderer {
     /// snapshots only roll over when this changes, so paused / between-tick
     /// frames keep `prev` and `curr` matched and the lerp pins to live.
     last_seen_tick: u64,
-
-    /// Wall-clock origin for the idle-bob phase (Instant so it ignores sim
-    /// speed and pause — the bob keeps breathing while the sim is frozen).
-    started: Instant,
-    /// Cached bob offset for this frame, recomputed once in `begin_frame`
-    /// so multiple pawns drawn in the same frame share one phase.
-    frame_bob_offset: f32,
 }
 
 impl PawnRenderer {
@@ -150,8 +145,6 @@ impl PawnRenderer {
             pawn_prev: HashMap::new(),
             pawn_curr: HashMap::new(),
             last_seen_tick: 0,
-            started: Instant::now(),
-            frame_bob_offset: 0.0,
         }
     }
 
@@ -176,30 +169,25 @@ impl PawnRenderer {
         self.last_seen_tick = now_tick;
     }
 
-    /// Recompute the per-frame idle-bob offset. Called once by the
-    /// top-level view at the start of each render.
-    pub fn begin_frame(&mut self) {
-        let phase = self.started.elapsed().as_secs_f32() * IDLE_BOB_HZ * TAU;
-        self.frame_bob_offset = phase.sin() * IDLE_BOB_AMPLITUDE;
-    }
-
     /// Interpolated world-space position for one pawn this frame: lerp
-    /// the two most recent tick-boundary snapshots, then add the idle-bob
-    /// offset when the pawn currently has no [`Move`](crate::sim::Move).
-    /// The fallback `live_position` covers pawns that haven't been
-    /// snapshotted yet (first frame after spawn).
+    /// the two most recent tick-boundary snapshots, then add an idle-bob
+    /// offset whose phase comes from `idle_seconds` (the pawn's sim-side
+    /// [`Idle`](crate::sim::Idle) counter). `None` means the pawn has a
+    /// job and shouldn't bob. The fallback `live_position` covers pawns
+    /// that haven't been snapshotted yet (first frame after spawn).
     pub fn interp_position(
         &self,
         id: WorldObjectId,
         live_position: Vec3,
         alpha: f32,
-        has_move: bool,
+        idle_seconds: Option<f32>,
     ) -> Vec3 {
         let prev = self.pawn_prev.get(&id).copied().unwrap_or(live_position);
         let curr = self.pawn_curr.get(&id).copied().unwrap_or(live_position);
         let mut pos = prev.lerp(curr, alpha);
-        if !has_move {
-            pos.z += self.frame_bob_offset;
+        if let Some(seconds) = idle_seconds {
+            let phase = seconds * IDLE_BOB_HZ * TAU;
+            pos.z += phase.sin() * IDLE_BOB_AMPLITUDE;
         }
         pos
     }
@@ -222,8 +210,8 @@ pub fn update_instance(
     state: &PawnRenderer,
 ) {
     let live_position = instance.world_xform.w_axis.truncate();
-    let has_move = components.get::<Move>(parent.id).is_some();
-    let pos = state.interp_position(parent.id, live_position, alpha, has_move);
+    let idle_seconds = components.get::<Idle>(parent.id).map(|i| i.seconds);
+    let pos = state.interp_position(parent.id, live_position, alpha, idle_seconds);
     instance.world_xform.w_axis = Vec4::new(pos.x, pos.y, pos.z, 1.0);
     instance.mesh_parts[LOG_PART].visible = components.get::<Carrying>(parent.id).is_some();
 }

@@ -23,6 +23,7 @@
 
 pub mod chopping;
 pub mod hauling;
+pub mod idle;
 pub mod motion;
 
 use std::time::Duration;
@@ -37,6 +38,7 @@ use serde::Deserialize;
 // automatic.
 pub use chopping::Designated;
 pub use hauling::{Carrying, WoodStored};
+pub use idle::Idle;
 pub use motion::Move;
 
 /// Overall game state. The sim ticks gameplay only while `Playing`; on
@@ -224,6 +226,7 @@ impl Game {
             });
             zone.components_mut()
                 .insert(pawn, stats.kinds.lumberjack.clone());
+            zone.components_mut().insert(pawn, Idle { seconds: 0.0 });
         }
 
         // Three oaks + two pines scattered across the -X / -Y half of the
@@ -296,6 +299,7 @@ impl Simulation for Game {
         chopping::tick_progress(zone);
         hauling::dispatch_carrying(zone, stockpile, stats);
         chopping::dispatch_idle(zone, stats);
+        idle::tick(zone, dt);
 
         // Win has priority: if a delivery during this same tick crossed
         // the goal, that beats the timer expiring on the same tick. The
