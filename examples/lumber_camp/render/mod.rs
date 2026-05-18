@@ -250,7 +250,7 @@ pub struct LumberCampView {
     atlas_material: PbrAtlasMaterial,
     /// Registry of atlas-material instances keyed by glb material name.
     /// Today only `gltf:lumber` is populated (from `assets/lumber/`'s
-    /// gradient + MRE atlases); add a new entry per stylized atlas pair.
+    /// albedo + MRE atlases); add a new entry per stylized atlas pair.
     atlas_materials: MaterialRegistry<PbrAtlasMaterialInstance>,
     samplers: SamplerRegistry,
     asset_server: AssetServer,
@@ -331,10 +331,10 @@ impl View for LumberCampView {
         // as `gltf:lumber` (the default-namespace mapping the registry
         // applies to bare names from glb). Both atlases stream through
         // the AssetServer like every other texture in this example —
-        // magenta-fallback while loading, real view on transition. gradient
+        // magenta-fallback while loading, real view on transition. albedo
         // is sRGB (colour data); mre is linear (R=metallic, G=roughness,
         // B=emission mask).
-        let gradient_handle = asset_server.texture(
+        let albedo_handle = asset_server.texture(
             VfsPath::new("lumber/gradient_atlas.png").expect("valid path"),
             TextureColorSpace::Srgb,
         );
@@ -347,7 +347,7 @@ impl View for LumberCampView {
             &samplers,
             &asset_server,
             PbrAtlasMaterialParams {
-                gradient: gradient_handle,
+                albedo: albedo_handle,
                 mre: mre_handle,
                 // Nearest + clamp — low-poly stylization reads the atlas
                 // as discrete colour bands, so trilinear blending would
