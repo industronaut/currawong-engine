@@ -22,6 +22,8 @@ cargo run --example textured_pbr         # PBR cubes lit by a sim-driven sun
 cargo run --example textured_pbr --features egui   # same, with debug overlay
 cargo run --example campfire             # mesh + particle emitters with lit-state lifecycle
 cargo run --example materials            # material template / instance / per-instance attrib pattern
+cargo run --example assets               # streaming asset pipeline; async mesh + texture loads through AssetServer
+cargo run --example blender_import       # glTF 2.0 mesh + material import authored in Blender
 cargo run --example multi_zone           # two zones + stair trigger; coordinate-isolated rendering
 cargo run --example hex_terrain          # hex topology through the same flat-tops mesher
 cargo run --example slope_terrain        # sloped mesher with height-aware GPU picking
@@ -43,13 +45,14 @@ This wires up `.githooks/pre-commit`, which runs `cargo fmt --check` and blocks 
 
 ## Architecture
 
-The central commitment is **sim/view separation**, modelled on UE-style proxy extraction rather than Unity/Godot scene-graph integration. The codebase splits into two modules with a build-system-enforced boundary:
+The central commitment is **sim/view separation**, modelled on UE-style proxy extraction rather than Unity/Godot scene-graph integration. The codebase splits into three top-level modules:
 
-- `src/sim.rs` + `src/sim/` (submodules `slot_map`, `zone`, `components`, `clock`, `terrain`, `environment`) — sim layer. `sim.rs` is a thin parent that owns the `Simulation` trait and re-exports the submodules' public types so callers see a flat surface. Always compiled. Depends only on `glam` and `std`. Never imports `wgpu` or `winit`.
-- `src/render.rs` — view layer. Compiled only with the `render` feature (default on). Owns all GPU + windowing.
+- `src/sim.rs` + `src/sim/` (submodules `slot_map`, `grid`, `zone`, `components`, `clock`, `terrain`, `environment`) — sim layer. `sim.rs` is a thin parent that owns the `Simulation` trait and re-exports the submodules' public types so callers see a flat surface. Always compiled. Depends only on `glam` and `std`. Never imports `wgpu` or `winit`.
+- `src/data.rs` + `src/data/` (submodules `path`, `source`, `fs_source`, `memory_source`, `vfs`, `definitions`) — data layer. The virtual filesystem (`Vfs` over a stack of `AssetSource` layers) and the RON-backed `Definitions` registry of namespaced kinds. Sim consumes `Definitions`; the view streams assets through the same VFS. Always compiled, no `wgpu`/`winit` dependencies; the I/O surface is shaped so a WASM port swaps the bottom layer rather than rewriting.
+- `src/render.rs` + `src/render/` — view layer. Compiled only with the `render` feature (default on). Owns all GPU + windowing.
 - `src/lib.rs` — re-exporter. Conditionally exposes the render layer behind `#[cfg(feature = "render")]`.
 
-The `render` Cargo feature gates `pollster`, `wgpu`, `winit`, `bytemuck`, and `glam/bytemuck`. Render-side examples declare `required-features = ["render"]` in `Cargo.toml`, so `cargo build --no-default-features` skips them and refuses to compile if requested explicitly.
+The build-system-enforced sim/view boundary is the `render` Cargo feature, which gates `pollster`, `wgpu`, `winit`, `bytemuck`, `gltf`, `image`, and `glam/bytemuck`. Render-side examples declare `required-features = ["render"]` (or `["yakui"]`) in `Cargo.toml`, so `cargo build --no-default-features` skips them and refuses to compile if requested explicitly.
 
 ### Sim hierarchy
 
@@ -73,6 +76,7 @@ The user implements the `View` trait with an associated `Sim: Simulation`:
 - `input(&mut self, &mut Sim, &mut EngineCtx, &WindowEvent)` — sim-mutating user actions go through here.
 - `update(&mut self, &Sim, &mut EngineCtx, dt: Duration)` — per-frame view-side update. The engine calls it once per frame, *after* sim ticking and *before* `extract_environment` / `render`. `dt` is **wall-clock**, not sim time — view animation keeps running at sim speed 0 or 3×. `&Sim` is read-only by signature, mirroring `render`. This is where held-key WASD pan, camera-rig integration, UI tweens, and view-side particle stepping live. Default no-op.
 - `ui(&mut self, &mut Sim, &mut EngineCtx, &egui::Context)` — behind the `egui` feature; build the per-frame debug overlay. May mutate sim and engine context just like `input`.
+- `game_ui(&mut self, &mut Sim, &mut EngineCtx)` — behind the `yakui` feature; build the per-frame shipped game UI (HUDs, menus, panels). Widget calls (`yakui::label`, `yakui::button`, …) attach to the engine's `Yakui` state via yakui's thread-local context. Independent of `ui` — both features can be enabled together. Defaults to no-op.
 - `active_zone(&self, &Sim) -> Option<ZoneId>` — which zone the camera is in. Default `None` is right for UI/2D views; world-space views typically return `self.camera.zone`. The engine uses this to drive `extract_environment` and (later) per-zone culling and streaming.
 - `extract_environment(&self, &Sim, ZoneId) -> ViewEnvironment` — per-frame sim → GPU-friendly environment extraction. Engine calls it before `render`, writes the result into `Renderer::scene_bind_group`, and pipelines that declare `Renderer::scene_layout` read it automatically. Default returns `ViewEnvironment::neutral`. This is the same shape as visual extraction: sim owns facts (time of day), view owns appearance (sun direction + colour), engine drives the seam.
 - `Camera` is a helper struct; the View opts in by holding one (UI/2D views don't need cameras). `Camera::zone: Option<ZoneId>` is the conventional place to stash the active zone so `active_zone` is a one-liner. The engine-standard `CameraUniformData` carries `view_proj` + `right`/`up` basis (for billboards) + `position` (so lit materials can compute view direction per fragment); the `CameraBinding` bgl is `VERTEX_FRAGMENT`-visible.
@@ -86,7 +90,7 @@ Fixed-tick (default 60 Hz) with an accumulator. The simulation always sees a con
 
 ### Render objects
 
-Mostly landed: `RenderTemplate`, `RenderRegistry`, `SlotKind`/`SlotValue`/`SlotRouting`, `MeshPart`, `EmitterPart`, visual-bounds AABBs, hysteresis-culled `LiveRenderObjects`, and the engine-driven `RenderObjectPass` helper exist. The per-instance update hook + persistent view-side `RenderInstance` state are **in progress** — they replace the current `VISIBLE_SLOT` / per-part visibility-slot machinery, which was a view-vocabulary decision masquerading as a sim slot. Uniform-routed slot packing, nested templates, structural-override rules, and visual scripting are still on the design page below.
+Landed: `RenderTemplate`, `RenderRegistry`, `SlotKind`/`SlotValue`/`SlotRouting`, `MeshPart`, `EmitterPart`, visual-bounds AABBs, hysteresis-culled `LiveRenderObjects`, the engine-driven `RenderObjectPass` helper, and the per-instance update hook + persistent view-side `RenderInstance` state (`LiveRenderObject` with `RenderPartState` per mesh/emitter part, holding `visible: bool` plus room for cached attribs and animation phase). Uniform-routed slot packing, nested templates, and visual scripting are deferred — see **Future directions** below.
 
 Drawable content is organised view-side into **render objects** — templates analogous to Unity prefabs or Godot sub-scenes, each owning a hierarchy of meshes, emitters, materials, and view-side resources. Templates are identified by `RenderId` and registered when the camera enters a zone. Sim objects carry a `RenderId` naming which template renders them; many sim objects share one template (every oak tree → `tree_oak`). Per-instance variation lives in transforms and **slots**. This is closer to UE's `PrimitiveSceneProxy` model than to per-frame extraction — sim hands the view an identity + state, the view holds the structure.
 
@@ -94,32 +98,41 @@ Drawable content is organised view-side into **render objects** — templates an
 
 **Slots** are the sim→view publishing contract: the sim writes typed primitive values to named slots in **sim vocabulary** (e.g. `growth = 0.7`, `active_action = HAULING`). Slot names describe sim facts, never view decisions — `is_visible`, `tint_color`, or `mesh_part_3_on` would be view-vocabulary leaking into the contract and are forbidden by construction. The schema is a closed `SlotKind` enum (`F32`, `Vec2`, `Vec3`, `Vec4`, `Color`, `Bool`, `I32`, `U32`) — explicitly primitives that ultimately reach the GPU as `Pod`, not a `Variant` / `Box<dyn Any>` bag. Rich semantic types (custom enums like `ActiveAction = Moving | Hauling | Idle`, structs, anything non-primitive) live as **typed sim components** in `Components`; the view update reads slots and components side-by-side. Sim attaches per-object `SlotValues` as a sim component keyed by the parent `WorldObjectId`; the view reads them via the per-instance update hook (below). Each slot also declares a `SlotRouting` (`Instance` or `Uniform`) at template-build time so the engine picks the right packing strategy without runtime inference. `with_slot(name, kind)` defaults to `SlotRouting::Instance`; `with_routed_slot(name, kind, routing)` is the explicit form.
 
-**`Uniform` routing is a doc-only reservation for now.** The variant survives in the enum so adding the packing path later doesn't break the API, but `RenderTemplate::with_routed_slot` panics if asked for `SlotRouting::Uniform` — the failure surfaces at the template-builder site, not as a draw-time trap. Implement the packing path when the first consumer needs it; the current default of indexing a uniform array by `instance_index` in the shader is the v1 plan when that happens.
+`Instance` is the only `SlotRouting` implemented today; `Uniform` is reserved in the enum but `with_routed_slot` panics on it — see **Future directions** below.
 
-**View per-instance state and update.** Each live `(SimId, RenderId)` pair has a persistent **render instance** on the view side, holding per-part state (`visible: bool` today; future cached attribs, animation phase, etc.). The template declares an `update(&SlotValues, &Components, &mut RenderInstance)` hook that runs once per frame per instance, *before* extract. This is the single seam where sim→view translation lives — e.g. `instance.parts[CRATE].visible = slots.get_i32("active_action") == Some(HAULING)`, or read an `ActiveAction` component directly. Visibility is **view-side state**, not a sim-published slot; the sim only publishes the semantic fact (`active_action = HAULING`) and the template decides which parts that lights up. Pull every frame: dirty tracking on slot values has been considered and deliberately deferred until a profile justifies the bookkeeping cost.
+**View per-instance state and update.** Each live `(SimId, RenderId)` pair has a persistent **render instance** on the view side (`LiveRenderObject`), holding per-part state (`RenderPartState { visible: bool }` for each mesh and emitter part; future cached attribs, animation phase, etc.). The template declares an `update(&SlotValues, &Components, &mut LiveRenderObject)` hook that runs once per frame per instance, *before* extract. This is the single seam where sim→view translation lives — e.g. `instance.mesh_parts[CRATE].visible = slots.get_i32("active_action") == Some(HAULING)`, or read an `ActiveAction` component directly. Visibility is **view-side state**, not a sim-published slot; the sim only publishes the semantic fact (`active_action = HAULING`) and the template decides which parts that lights up. Pull every frame: dirty tracking on slot values has been considered and deliberately deferred until a profile justifies the bookkeeping cost.
 
-**Engine pass.** `RenderObjectPass` owns the per-frame walk: `declare_and_cull` walks zones, declares one live render-instance per sim object carrying a `RenderId` component, and culls against a frustum; the engine then invokes each template's `update` hook with the parent's `SlotValues` + `Components` + the persistent render-instance; finally `for_each_alive_part` / `for_each_alive` iterate alive instances and invoke user extract closures that read render-instance state only (no sim access during extract). View code supplies a per-part extract callback that does the actual draw-attrib push — the engine owns the traversal, not the bucketing. "Skip this part" is "did extract produce attribs?", driven by `instance.parts[i].visible`, not a special-cased slot. Adding a slot or a part to a template requires touching only the template declaration + update + extract closures, never the per-frame plumbing.
-
-**Nested templates** are allowed, with rules:
-- Nested children are live references to other templates, not embedded snapshots — template edits propagate.
-- Instance overrides are slot values only. **Structural overrides are forbidden** (no "this instance has one extra child"); make a new template instead. This is the source of most of Unity's prefab pain — avoid it by construction.
-- Child slots are not auto-exposed up the tree — parents re-export deliberately, never automatically.
-
-**Visual scripting** lives in Rust as `RenderBehavior`-style traits declared by templates. No scripting language, node graphs, or hot-reload — deliberately deferred until the engine ships. Visual scripts may only mutate view state.
+**Engine pass.** `RenderObjectPass` owns the per-frame walk: `declare_and_cull` walks zones, declares one `LiveRenderObject` per sim object carrying a `RenderId` component, and culls against a frustum; the engine then invokes each template's `update` hook with the parent's `SlotValues` + `Components` + the persistent `LiveRenderObject`; finally `for_each_alive_part` / `for_each_alive` iterate alive instances and invoke user extract closures that read instance state only (no sim access during extract). View code supplies per-part extract callbacks that do the actual draw-attrib push — the engine owns the traversal, not the bucketing. Parts are gated by `instance.mesh_parts[i].visible` / `instance.emitter_parts[i].visible` (and the whole instance by `root_visible`), not by a special-cased slot. Adding a slot or a part to a template requires touching only the template declaration + update + extract closures, never the per-frame plumbing.
 
 **Material model** is three-tier:
 - *Material template* — pipeline + bind-group layout + slot schema, registered once.
 - *Material instance* — a bind group + uniform buffer bound to a template, cached or per-frame.
 - *Per-instance attributes* — model matrix, tint, anything varying per drawn copy, packed into the instance buffer (the existing `mat4_instance_attributes` helper is the right shape).
 
-Two materials exist today: `UnlitColoredMaterial` (position-only vertex, no lighting) and `PbrMaterial` (metallic-roughness, single directional light, albedo texture + scalar metallic/roughness; Cook-Torrance specular + Lambertian diffuse). There is **no `Material` trait yet** — the two share a structural pattern (template / instance / per-instance attribs) but not an interface. Add one when a third material kind makes the duplication painful, not before. Materials are not subclassed by what they draw (no `SpriteMaterial`/`MeshMaterial`); the contract with geometry is the instance-attribute layout.
+Four materials exist today, with a thin shared `MeshMaterial` trait (associated `Instance` type + `pipeline()` accessor; one accessor only, generic draw helpers land when a call site needs them):
+
+- `UnlitColoredMaterial` — position-only vertex, no lighting; the minimal template/instance/per-instance-attrib reference.
+- `PbrMaterial` — metallic-roughness, single directional light, albedo texture + scalar metallic/roughness; Cook-Torrance specular + Lambertian diffuse.
+- `PbrAtlasMaterial` — stylized PBR variant that reads albedo + metallic/roughness/emissive from two shared atlas textures and resolves a per-instance atlas tile from a glb material slot; paired with `MaterialRegistry` (name-keyed `MaterialId` lookup, `namespace:name` grammar matching `KindId`, magenta-style fallback on miss).
+- `TerrainMaterial` — opaque + transparent terrain pipelines over the canonical `TerrainVertex`. Not a `MeshMaterial` impl because it doesn't take the standard mesh-instance attribute layout.
+
+Materials are not subclassed by what they draw beyond that mesh/terrain split — the contract with mesh geometry is the `MeshInstanceAttribs` layout, declared once and shared.
+
+`MaterialInstanceRegistry<I, K>` (in `material.rs`) is the older enum-keyed shape — fine when the call site enumerates its materials at compile time. `MaterialRegistry` (in `material_registry.rs`) is the newer string-keyed shape needed once glb files started naming material slots as `currawong:mat_bark` — same role as `KindId` for sim kinds. Both live; pick by whether the lookup key is closed (enum) or open (glb-authored string).
 
 **Vertex layouts are a closed set.** Same architectural move as `SlotKind`: a small enumerable list of canonical per-vertex structs (currently `PosNormalUv`; `TerrainVertex` is owned by the terrain mesher), declared as `Pod` structs with `attributes(start_location)` helpers. Materials statically demand one layout — no runtime attribute negotiation, no string keys. Adding a layout is a deliberate code change.
 
 **Textures and samplers** live on the view side too:
 - `Texture::from_rgba8` uploads RGBA8 bytes with a CPU-generated mip chain (box-filter downsampling — naive sRGB averaging; revisit when it bites). sRGB vs linear is a constructor flag.
+- `Texture::from_png_bytes_with_device` decodes PNG/JPEG (via the `image` crate) and uploads the same way. Loaded through the `AssetServer`.
 - `SamplerKind` is a closed enum (`LinearRepeat`, `LinearClamp`, `NearestClamp`), holding a live `wgpu::Sampler` per variant in `SamplerRegistry`. Materials reference samplers by kind, not by raw handle.
-- Loading from disk (image files, glTF) doesn't exist yet — `from_rgba8` is the only path; the example uses a procedural checkerboard.
+
+**Streaming and assets.** Loading from disk goes through three cooperating pieces:
+- `Vfs` (in `src/data/`) is the ordered stack of `AssetSource` layers — `FsSource` for native disk, `MemorySource` for tests / the future WASM `include_bytes!` archive. `VfsPath` is a normalised forward-slash newtype that rejects `..`, drive letters, backslashes, absolute paths; the grammar is enforced at the type level so mod-loaded layers can't escape the sandbox.
+- `Mesh::from_gltf_bytes_with_device` / `decode_gltf_mesh` decode glTF 2.0 via the `gltf` crate, skipping `import`/`base64`/`image` features because bytes arrive through the VFS. Multi-primitive glb is supported; each primitive carries a material slot string that resolves through `MaterialRegistry`.
+- `AssetServer` is the view-side gateway: hands out `Handle<T>` for typed asset paths (per-type, per-colour-space cache), spawns a `std::thread::spawn` background load per request that decodes and uploads directly to the GPU (wgpu 29 `Device`/`Queue` are `Send + Sync + Clone`), and serves a magenta-flavoured fallback (4×4 magenta texture + unit-cube placeholder mesh) for `Loading`/`Failed` handles. Carries a debug toggle (`set_force_loading`) that pins every handle to `Loading` so the fallback path is exercised in normal dev instead of rotting silently.
+
+`Handle<T>` compares by identity, not contents — two loads of the same PNG are distinct assets from the caller's perspective. The slot is `OnceLock`-backed so the read path is lock-free after the loader writes.
 
 **Environment** — directional lights, sky dome, weather, fog — lives outside the sim's object/zone world but is **sim-derived facts → view-derived appearance**:
 - `SimEnvironment` (sim) owns the *facts*: `time_of_day`, `day`, `seconds_per_day`. Held by the user's `Simulation` impl, advanced in `tick`. Opt-in helper struct, same status as `Camera`. Provides `sun_direction_for(time_of_day) -> Vec3` as a trivial Z-up sun model.
@@ -127,7 +140,14 @@ Two materials exist today: `UnlitColoredMaterial` (position-only vertex, no ligh
 - `View::extract_environment(&sim, zone)` runs once per frame per active zone, producing a `ViewEnvironment`. The engine writes it into `Renderer::scene_bind_group` (a `SceneEnvironmentBinding` the `Renderer` owns); any pipeline that declared `Renderer::scene_layout` reads it automatically. This is engine-driven, not user-driven like `CameraBinding`, because every input the extract needs lives in the sim — the View just declares the mapping.
 - Weather, sky domes, IBL probes, and multiple lights are all later additions to `ViewEnvironment`'s shape and the scene uniform.
 
-**Pass-awareness is deferred.** Single forward pass for now; shadow/depth-prepass would introduce material × pass → pipeline (Unreal's Material Domain). Don't build the permutation matrix until a second pass actually exists.
+### Future directions
+
+Designed-but-not-implemented pieces. Each is the planned shape for when a real consumer needs it — not in code today, so don't treat them as available APIs.
+
+- **Uniform-routed slots.** The `SlotRouting::Uniform` enum variant exists so adding the packing path doesn't break the API, but `RenderTemplate::with_routed_slot` panics if asked for it — the failure surfaces at the template-builder site, not as a draw-time trap. v1 plan when implemented is to index a uniform array by `instance_index` in the shader.
+- **Nested templates.** Templates will be allowed to reference other templates as children, with rules: nested children are live references (template edits propagate), instance overrides are *slot values only* (structural overrides are forbidden — make a new template instead), and child slots are never auto-exposed up the tree (parents re-export deliberately). The structural-override rule is the source of most of Unity's prefab pain; avoiding it by construction is the whole point.
+- **Visual scripting.** Per-template `RenderBehavior`-style traits, in Rust — no scripting language, node graphs, or hot-reload. Visual scripts may only mutate view state.
+- **Pass-awareness.** Single forward pass for now; shadow / depth-prepass / forward-plus would introduce material × pass → pipeline (Unreal's Material Domain). Don't build the permutation matrix until a second pass actually exists.
 
 ## Architectural invariants
 
