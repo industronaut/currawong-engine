@@ -44,7 +44,7 @@
 //! - [`texture`] — `Texture` asset (RGBA8 + CPU mip generation) + canonical samplers.
 //! - [`vertex`] — closed set of canonical per-vertex layouts.
 //! - [`visibility`] — AABB + view-frustum culling primitives.
-//! - [`render_instances`] — live render-object instance reconciler with cull hysteresis.
+//! - [`live_render_objects`] — live render-object instance reconciler with cull hysteresis.
 //!
 //! Submodules are private; their public types are re-exported here so callers
 //! see a flat `currawong::*` surface.

@@ -47,10 +47,9 @@ use glam::Vec4;
 
 use super::asset_server::{AssetServer, TextureSource};
 use super::handle::Handle;
-use super::material::{MeshInstanceAttribs, MeshMaterial};
+use super::material::{MeshMaterial, build_pbr_style_pipeline};
 use super::renderer::Renderer;
 use super::texture::{SamplerKind, SamplerRegistry, Texture};
-use super::vertex::PosNormalUv;
 
 const PBR_SHADER: &str = r#"
 struct Camera {
@@ -277,73 +276,8 @@ impl PbrMaterial {
             source: wgpu::ShaderSource::Wgsl(PBR_SHADER.into()),
         });
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pbr pipeline layout"),
-            bind_group_layouts: &[
-                Some(camera_layout),
-                Some(renderer.scene_layout()),
-                Some(&instance_bgl),
-            ],
-            ..Default::default()
-        });
-
-        let pos_normal_uv_attrs = PosNormalUv::attributes(0);
-        // PosNormalUv consumes per-vertex locations 0..3; instance attribs
-        // start at @location(3) (four mat4 columns, tint, hit_id → 3..9).
-        let instance_attrs = MeshInstanceAttribs::vertex_attributes(3);
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Pbr pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: PosNormalUv::STRIDE,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &pos_normal_uv_attrs,
-                    },
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<MeshInstanceAttribs>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &instance_attrs,
-                    },
-                ],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: renderer.surface_format(),
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    // Write per-instance hit IDs to the engine's R32Uint
-                    // attachment (#56 PR 3). Instances that don't care about
-                    // picking leave their `hit_id` at the 0 default, which
-                    // matches the attachment's clear value — semantically
-                    // identical to PR 1's opt-out shape.
-                    renderer.id_target_writer(),
-                ],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: renderer
-                .depth_format()
-                .map(|format| wgpu::DepthStencilState {
-                    format,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline =
+            build_pbr_style_pipeline(renderer, "Pbr", &shader, camera_layout, &instance_bgl);
 
         Self {
             pipeline,

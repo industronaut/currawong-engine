@@ -9,9 +9,10 @@ A Rust game engine being built from scratch, aimed at simulation-style games in 
 The central commitment is **sim/view separation**, modelled on Unreal's proxy-extraction pattern rather than Unity/Godot scene-graph integration:
 
 - **Sim layer** (`src/sim/`) — always compiled, depends only on `glam` and `std`. Owns world state: zones, world objects, sparse components, a fixed-tick clock. Knows nothing about rendering.
-- **View layer** (`src/render.rs`) — compiled behind the `render` Cargo feature (default on). Owns `wgpu` + `winit`. Reads sim state each frame; never mutates it from the render path.
+- **Data layer** (`src/data/`) — always compiled. Virtual filesystem (`Vfs` over a stack of `AssetSource` layers) and the RON-backed `Definitions` registry. Sim reads `Definitions`; the view streams assets through the same VFS. No GPU dependencies.
+- **View layer** (`src/render/`) — compiled behind the `render` Cargo feature (default on). Owns `wgpu` + `winit`. Reads sim state each frame; never mutates it from the render path.
 
-The boundary is enforced at build time: `cargo build --no-default-features` produces a sim-only binary with no GPU or windowing dependencies in the tree. That build succeeding is the architectural invariant test.
+The sim/view boundary is enforced at build time: `cargo build --no-default-features` produces a sim+data-only binary with no GPU or windowing dependencies in the tree. That build succeeding is the architectural invariant test.
 
 Read [CLAUDE.md](./CLAUDE.md) for the full architectural notes — sim hierarchy (`Simulation → Zones → Zone → { WorldTransform, Components }`), view hierarchy, the tick model, render-object templates and slots, the material model, and the load-bearing invariants the codebase commits to.
 
@@ -33,6 +34,8 @@ cargo run --example trees                # slot-driven growth animation + dual-k
 cargo run --example textured_pbr         # PBR cubes lit by a sim-driven sun
 cargo run --example campfire             # emitter reconciliation
 cargo run --example materials            # material template / instance / per-instance attribs
+cargo run --example assets               # streaming asset pipeline through AssetServer + VFS
+cargo run --example blender_import       # glTF 2.0 mesh + material import from Blender
 cargo run --example multi_zone           # two zones + stair trigger
 cargo run --example hex_terrain          # hex topology through the same mesher
 cargo run --example slope_terrain        # sloped mesher with GPU height-aware picking

@@ -37,6 +37,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec4};
 
 use super::renderer::Renderer;
+use super::vertex::PosNormalUv;
 
 // --- Generic instance registry -------------------------------------------
 
@@ -192,6 +193,106 @@ impl MeshInstanceAttribs {
             },
         ]
     }
+}
+
+/// Build the render pipeline shared by every "PBR-shaped" mesh material —
+/// today [`PbrMaterial`](super::PbrMaterial) and
+/// [`PbrAtlasMaterial`](super::PbrAtlasMaterial). The two differ only in
+/// their shader source and their per-instance bind-group layout; everything
+/// else (pipeline layout, vertex buffers, fragment targets, depth-stencil)
+/// is identical.
+///
+/// The pipeline this builds:
+/// - Bind groups: `[camera, scene, instance]` — material instance lives at
+///   `@group(2)`.
+/// - Vertex buffer slot 0: [`PosNormalUv`] per vertex.
+/// - Vertex buffer slot 1: [`MeshInstanceAttribs`] per instance, with
+///   attributes at `@location(3..9)` — PosNormalUv consumes 0..3.
+/// - Fragment targets: the surface (REPLACE blend) plus the engine's
+///   `R32Uint` hit-ID attachment via [`Renderer::id_target_writer`].
+/// - Depth-stencil: standard `Less` test with depth write enabled, gated
+///   on [`Renderer::depth_format`] so the pipeline auto-omits depth state
+///   when the view didn't allocate a depth attachment.
+///
+/// `label` is the human-readable base used for the pipeline-layout and
+/// pipeline labels (`"<label> pipeline layout"` and `"<label> pipeline"`).
+/// The caller still owns the shader module and the instance BGL because
+/// both are material-specific — the helper just stitches them together.
+pub(super) fn build_pbr_style_pipeline(
+    renderer: &Renderer,
+    label: &str,
+    shader: &wgpu::ShaderModule,
+    camera_layout: &wgpu::BindGroupLayout,
+    instance_bgl: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let device = &renderer.device;
+
+    let layout_label = format!("{label} pipeline layout");
+    let pipeline_label = format!("{label} pipeline");
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(&layout_label),
+        bind_group_layouts: &[
+            Some(camera_layout),
+            Some(renderer.scene_layout()),
+            Some(instance_bgl),
+        ],
+        ..Default::default()
+    });
+
+    let pos_normal_uv_attrs = PosNormalUv::attributes(0);
+    let instance_attrs = MeshInstanceAttribs::vertex_attributes(3);
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(&pipeline_label),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[
+                wgpu::VertexBufferLayout {
+                    array_stride: PosNormalUv::STRIDE,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &pos_normal_uv_attrs,
+                },
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<MeshInstanceAttribs>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &instance_attrs,
+                },
+            ],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: renderer.surface_format(),
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                // Per-instance hit IDs to the engine's R32Uint attachment.
+                // Instances that don't care leave `hit_id` at 0, matching
+                // the attachment's clear value.
+                renderer.id_target_writer(),
+            ],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: renderer
+            .depth_format()
+            .map(|format| wgpu::DepthStencilState {
+                format,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Common shape of every mesh-material template — the structural pattern
