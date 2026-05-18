@@ -322,29 +322,33 @@ impl View for LumberCampView {
         let material = PbrMaterial::new(renderer, camera_binding.layout());
         let atlas_material = PbrAtlasMaterial::new(renderer, camera_binding.layout());
 
-        // Load the lumber-camp atlases eagerly — small files, used once.
+        // View-side VFS — independent of the one main.rs handed to the
+        // sim's `Definitions`. Same on-disk content, separate cache.
+        let vfs = Arc::new(crate::lumber_camp_vfs());
+        let asset_server = AssetServer::new(renderer, vfs.clone());
+
         // The glb's "Lumber" material slot resolves through the registry
         // as `gltf:lumber` (the default-namespace mapping the registry
-        // applies to bare names from glb). gradient is sRGB (colour
-        // data); mre is linear (R=metallic, G=roughness, B=emission mask).
-        let gradient = Texture::from_path(
-            renderer,
-            "assets/lumber/gradient_atlas.png",
+        // applies to bare names from glb). Both atlases stream through
+        // the AssetServer like every other texture in this example —
+        // magenta-fallback while loading, real view on transition. gradient
+        // is sRGB (colour data); mre is linear (R=metallic, G=roughness,
+        // B=emission mask).
+        let gradient_handle = asset_server.texture(
+            VfsPath::new("lumber/gradient_atlas.png").expect("valid path"),
             TextureColorSpace::Srgb,
-        )
-        .expect("load gradient atlas");
-        let mre = Texture::from_path(
-            renderer,
-            "assets/lumber/mre_atlas.png",
+        );
+        let mre_handle = asset_server.texture(
+            VfsPath::new("lumber/mre_atlas.png").expect("valid path"),
             TextureColorSpace::Linear,
-        )
-        .expect("load MRE atlas");
+        );
         let lumber_instance = atlas_material.create_instance(
             renderer,
             &samplers,
+            &asset_server,
             PbrAtlasMaterialParams {
-                gradient,
-                mre,
+                gradient: gradient_handle,
+                mre: mre_handle,
                 // Nearest + clamp — low-poly stylization reads the atlas
                 // as discrete colour bands, so trilinear blending would
                 // muddy the look. Clamp keeps cells from bleeding across
@@ -357,11 +361,6 @@ impl View for LumberCampView {
             MaterialId::new("gltf:lumber").expect("valid id"),
             lumber_instance,
         );
-
-        // View-side VFS — independent of the one main.rs handed to the
-        // sim's `Definitions`. Same on-disk content, separate cache.
-        let vfs = Arc::new(crate::lumber_camp_vfs());
-        let asset_server = AssetServer::new(renderer, vfs.clone());
 
         // We also need to re-parse the defs view-side to walk each kind's
         // `render` block. The sim has already validated the file shapes —
@@ -546,6 +545,7 @@ impl View for LumberCampView {
         // a sizing matrix while the real glTF is still in flight).
         let asset_server = &self.asset_server;
         let material = &self.material;
+        let atlas_material = &self.atlas_material;
         let samplers = &self.samplers;
         let mut adjustments: HashMap<PartKey, Mat4> = HashMap::new();
         for (key, template) in &mut self.mesh_templates {
@@ -556,6 +556,11 @@ impl View for LumberCampView {
                 key.clone(),
                 template.resolve(asset_server).fallback_adjustment,
             );
+        }
+        // Atlas materials reconcile each frame too — same shape, two
+        // handles to flex over instead of one. Cheap when nothing changed.
+        for (_, instance) in self.atlas_materials.iter_mut() {
+            instance.refresh(renderer, atlas_material, samplers, asset_server);
         }
 
         // Phase 1.7: the single sim→view translation seam. Each

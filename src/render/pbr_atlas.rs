@@ -36,6 +36,8 @@
 //! instance. Hit-ID picking flows through identically — see that file's
 //! docs.
 
+use super::asset_server::{AssetServer, TextureSource};
+use super::handle::Handle;
 use super::material::{MeshInstanceAttribs, MeshMaterial};
 use super::renderer::Renderer;
 use super::texture::{SamplerKind, SamplerRegistry, Texture};
@@ -180,19 +182,23 @@ pub struct PbrAtlasMaterial {
     instance_bgl: wgpu::BindGroupLayout,
 }
 
-/// Parameters for [`PbrAtlasMaterial::create_instance`]. Takes owned
-/// [`Texture`]s — the instance keeps them alive for the lifetime of its
-/// bind group. There's no streaming wiring (no [`Handle`](super::Handle)
-/// indirection): if a future caller needs the streaming path, mirror
-/// [`PbrMaterialParams`](super::PbrMaterialParams)' handle shape then.
+/// Parameters for [`PbrAtlasMaterial::create_instance`].
+///
+/// Both atlases come in as [`Handle<Texture>`]s rather than borrows so
+/// the instance can survive its handle's load lifecycle — the bind group
+/// is initially built against whatever the [`AssetServer`] currently
+/// resolves the handle to (the magenta fallback while it's `Loading`,
+/// the real texture if `Ready`), and rebuilt on the frame either handle
+/// transitions via [`PbrAtlasMaterialInstance::refresh`]. Pass
+/// [`Handle::ready`] if you already have the texture in hand and want a
+/// non-streaming wiring.
 pub struct PbrAtlasMaterialParams {
     /// Albedo / colour atlas, sampled at the mesh's UVs to drive both the
     /// base colour and (via the MRE blue channel) emission. Must be sRGB.
-    pub gradient: Texture,
+    pub gradient: Handle<Texture>,
     /// MRE atlas: R=metallic, G=roughness, B=emission mask. Must be
-    /// linear (load with `TextureColorSpace::Linear` /
-    /// `Texture::from_rgba8(.., srgb=false)`).
-    pub mre: Texture,
+    /// linear (load with `TextureColorSpace::Linear`).
+    pub mre: Handle<Texture>,
     /// Must be a clamp-mode sampler so atlas cells don't bleed across
     /// edges. `NearestClamp` for low-poly / stylized assets that read the
     /// atlas as discrete colour bands; `LinearClamp` when smooth blending
@@ -312,12 +318,24 @@ impl PbrAtlasMaterial {
         &self.pipeline
     }
 
-    /// Build a material instance bound to a fully-loaded pair of atlases.
-    /// The instance owns the textures — drop the instance to free them.
+    pub(super) fn instance_bgl(&self) -> &wgpu::BindGroupLayout {
+        &self.instance_bgl
+    }
+
+    /// Build a material instance bound to a pair of atlas
+    /// [`Handle<Texture>`]s.
+    ///
+    /// The initial bind group is built against whatever the asset server
+    /// currently resolves each handle to — the magenta fallback if a
+    /// handle is still `Loading`, the real texture if it's already
+    /// `Ready` (e.g. when the caller used [`Handle::ready`]). Subsequent
+    /// [`PbrAtlasMaterialInstance::refresh`] calls swap the bind group
+    /// over as either handle's state changes.
     pub fn create_instance(
         &self,
         renderer: &Renderer,
         samplers: &SamplerRegistry,
+        asset_server: &AssetServer,
         params: PbrAtlasMaterialParams,
     ) -> PbrAtlasMaterialInstance {
         let PbrAtlasMaterialParams {
@@ -325,32 +343,59 @@ impl PbrAtlasMaterial {
             mre,
             sampler,
         } = params;
-        let bind_group = renderer
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("PbrAtlas instance bind group"),
-                layout: &self.instance_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&gradient.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&mre.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(samplers.get(sampler)),
-                    },
-                ],
-            });
+        let resolved_gradient = asset_server.resolve_texture(&gradient);
+        let resolved_mre = asset_server.resolve_texture(&mre);
+        let bind_group = build_instance_bind_group(
+            &renderer.device,
+            &self.instance_bgl,
+            resolved_gradient.view,
+            resolved_mre.view,
+            samplers.get(sampler),
+        );
+        // Lift the sources out before moving the handles into the struct
+        // — `resolved_*` borrow `gradient` / `mre`, so the borrow has to
+        // end before the struct literal moves them.
+        let last_gradient_source = resolved_gradient.source;
+        let last_mre_source = resolved_mre.source;
         PbrAtlasMaterialInstance {
-            _gradient: gradient,
-            _mre: mre,
+            gradient,
+            mre,
+            sampler_kind: sampler,
             bind_group,
+            last_gradient_source,
+            last_mre_source,
         }
     }
+}
+
+/// Build the per-instance bind group. Shared between
+/// [`PbrAtlasMaterial::create_instance`] and the refresh path so the
+/// layout + entry order live in one place.
+fn build_instance_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    gradient_view: &wgpu::TextureView,
+    mre_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("PbrAtlas instance bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(gradient_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(mre_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 impl MeshMaterial for PbrAtlasMaterial {
@@ -361,24 +406,74 @@ impl MeshMaterial for PbrAtlasMaterial {
     }
 }
 
-/// A live atlas-PBR material instance — owns the two atlas textures and
-/// the bind group that references them. Bind as `@group(2)` when drawing
-/// through [`PbrAtlasMaterial::pipeline`].
+/// A live atlas-PBR material instance — holds streaming handles to the
+/// two atlas textures + the cached bind group built against their
+/// currently-resolved views. Bind as `@group(2)` when drawing through
+/// [`PbrAtlasMaterial::pipeline`].
 ///
-/// No per-frame refresh: textures are eager-loaded (no
-/// [`Handle`](super::Handle) indirection) so the bind group is stable for
-/// the instance's lifetime.
+/// The bound textures flex with the underlying [`Handle<Texture>`]s:
+/// [`refresh`](Self::refresh) checks both handles each frame and rebuilds
+/// the bind group iff either resolved [`TextureSource`] changed
+/// (real ↔ fallback ↔ forced-fallback). Refreshing is cheap when nothing
+/// changes; the rebuild only fires on a transition frame.
 pub struct PbrAtlasMaterialInstance {
-    // Kept alive so the texture views inside `bind_group` remain valid.
-    // wgpu's validator catches use-after-free, but the borrow checker
-    // can't see through the bind group, so we hold the Textures here.
-    _gradient: Texture,
-    _mre: Texture,
+    gradient: Handle<Texture>,
+    mre: Handle<Texture>,
+    sampler_kind: SamplerKind,
     bind_group: wgpu::BindGroup,
+    /// Which view each side of the cached `bind_group` is currently
+    /// built against — used by [`refresh`](Self::refresh) to decide
+    /// whether a rebuild is needed.
+    last_gradient_source: TextureSource,
+    last_mre_source: TextureSource,
 }
 
 impl PbrAtlasMaterialInstance {
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+
+    /// The gradient atlas handle. Cheap to clone — share across instances
+    /// that read the same atlas.
+    pub fn gradient_handle(&self) -> &Handle<Texture> {
+        &self.gradient
+    }
+
+    /// The MRE atlas handle. Cheap to clone.
+    pub fn mre_handle(&self) -> &Handle<Texture> {
+        &self.mre
+    }
+
+    /// Reconcile the cached bind group with both handles' current state.
+    /// Cheap when nothing changed; on a transition (either handle
+    /// finishes loading, or the debug
+    /// [`set_force_loading`](super::AssetServer::set_force_loading) toggle
+    /// flips) the bind group is rebuilt against the new view(s).
+    ///
+    /// Call once per frame for each instance you intend to draw, before
+    /// `pass.set_bind_group(2, instance.bind_group(), ..)`.
+    pub fn refresh(
+        &mut self,
+        renderer: &Renderer,
+        material: &PbrAtlasMaterial,
+        samplers: &SamplerRegistry,
+        asset_server: &AssetServer,
+    ) {
+        let resolved_gradient = asset_server.resolve_texture(&self.gradient);
+        let resolved_mre = asset_server.resolve_texture(&self.mre);
+        if resolved_gradient.source == self.last_gradient_source
+            && resolved_mre.source == self.last_mre_source
+        {
+            return;
+        }
+        self.bind_group = build_instance_bind_group(
+            &renderer.device,
+            material.instance_bgl(),
+            resolved_gradient.view,
+            resolved_mre.view,
+            samplers.get(self.sampler_kind),
+        );
+        self.last_gradient_source = resolved_gradient.source;
+        self.last_mre_source = resolved_mre.source;
     }
 }
