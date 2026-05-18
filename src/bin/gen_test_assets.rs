@@ -230,14 +230,24 @@ fn encode_glb_u32(label: &str, mesh: &PrimitiveMesh) -> Vec<u8> {
 }
 
 fn position_bounds(mesh: &PrimitiveMesh) -> (Vec3, Vec3) {
-    let mut min = Vec3::from(mesh.vertices[0].position);
+    let mut min = Vec3::from(z_up_to_y_up(mesh.vertices[0].position));
     let mut max = min;
     for v in &mesh.vertices[1..] {
-        let p = Vec3::from(v.position);
+        let p = Vec3::from(z_up_to_y_up(v.position));
         min = min.min(p);
         max = max.max(p);
     }
     (min, max)
+}
+
+/// Inverse of the import-side Y-up→Z-up flip in `decode_gltf_mesh`. The
+/// engine's procedural meshes are authored Z-up; glTF's spec-default is
+/// Y-up; the loader does `(x, y, z) → (x, -z, y)` on read, so we apply
+/// `(x, y, z) → (x, z, -y)` on write to round-trip back to the engine's
+/// frame after import. Applied to both positions and normals before they
+/// hit the byte stream — UVs aren't axis-bound.
+fn z_up_to_y_up(v: [f32; 3]) -> [f32; 3] {
+    [v[0], v[2], -v[1]]
 }
 
 /// Shared `.glb` packer: positions, normals, UVs, then indices, four
@@ -258,12 +268,22 @@ fn encode_glb_inner(
     let positions_bytes: Vec<u8> = mesh
         .vertices
         .iter()
-        .flat_map(|v| v.position.iter().flat_map(|f| f.to_le_bytes()))
+        .flat_map(|v| {
+            z_up_to_y_up(v.position)
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect::<Vec<_>>()
+        })
         .collect();
     let normals_bytes: Vec<u8> = mesh
         .vertices
         .iter()
-        .flat_map(|v| v.normal.iter().flat_map(|f| f.to_le_bytes()))
+        .flat_map(|v| {
+            z_up_to_y_up(v.normal)
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect::<Vec<_>>()
+        })
         .collect();
     let uvs_bytes: Vec<u8> = mesh
         .vertices

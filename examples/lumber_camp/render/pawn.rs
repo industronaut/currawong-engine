@@ -69,34 +69,54 @@ pub fn new_log_template(
     )
 }
 
+/// Vertical air gap between the pawn body's top and the bottom of the
+/// carried log. Small enough to read as "balanced on top of the head",
+/// large enough to clear the body's hemispherical cap at any pawn-kind's
+/// declared bounds.
+const LOG_GAP: f32 = 0.08;
+/// Radius of the carried-log cylinder. Used to centre the log on its
+/// long axis above the head — the cylinder mesh is built around its own
+/// origin, so we lift by `radius + gap` to seat it cleanly. Kept in sync
+/// with [`new_log_template`]'s `PrimitiveMesh::cylinder(0.07, ...)` call.
+const LOG_RADIUS: f32 = 0.07;
+/// Half the cylinder's `height` parameter, i.e. how far the log extends
+/// along its long axis from its centre. Same kept-in-sync caveat as
+/// [`LOG_RADIUS`].
+const LOG_HALF_LENGTH: f32 = 0.30;
+
 /// Local-frame transform for the carried log, given the pawn's *body*
-/// bounds. Lays the cylinder on its side at roughly shoulder height (~75%
-/// of body height — works for whatever-shaped pawns the kind def
-/// describes without needing a per-kind shoulder constant in the RON).
+/// bounds. Lays the cylinder on its side just above the pawn's head with
+/// a small gap, so the log reads clearly without hiding inside the body
+/// (the previous "shoulder height" placement put the log entirely inside
+/// the body capsule — the cylinder's half-length was equal to the body's
+/// radius, so its tips sat right at the body's surface).
 pub fn log_local_transform(body_bounds: &Aabb) -> Mat4 {
-    let shoulder_z = body_bounds.min.z + (body_bounds.max.z - body_bounds.min.z) * 0.75;
+    let log_centre_z = body_bounds.max.z + LOG_GAP + LOG_RADIUS;
     Mat4::from_rotation_translation(
         Quat::from_rotation_x(PI / 2.0),
-        Vec3::new(0.0, 0.0, shoulder_z),
+        Vec3::new(0.0, 0.0, log_centre_z),
     )
 }
 
 /// Visual AABB for a pawn kind's [`RenderTemplate`](currawong::RenderTemplate),
-/// extending the body's bounds horizontally to enclose the carried log so
-/// the engine frustum-cull doesn't pop the pawn when only its log is
-/// on-screen. The log lays along local X, so X gets the extension.
+/// extending the body's bounds to enclose the carried log so the engine
+/// frustum-cull doesn't pop the pawn when only its log is on-screen.
+///
+/// After the `Quat::from_rotation_x(PI/2)` in [`log_local_transform`], the
+/// cylinder's long axis sits along the pawn's local Y, so Y is the axis
+/// that needs the half-length extension; Z gets the head-clearance lift.
 pub fn extended_bounds(body_bounds: &Aabb) -> Aabb {
-    let log_half_length = 0.30;
+    let log_top_z = body_bounds.max.z + LOG_GAP + 2.0 * LOG_RADIUS;
     Aabb::new(
         Vec3::new(
-            body_bounds.min.x.min(-log_half_length),
-            body_bounds.min.y,
+            body_bounds.min.x,
+            body_bounds.min.y.min(-LOG_HALF_LENGTH),
             body_bounds.min.z,
         ),
         Vec3::new(
-            body_bounds.max.x.max(log_half_length),
-            body_bounds.max.y,
-            body_bounds.max.z,
+            body_bounds.max.x,
+            body_bounds.max.y.max(LOG_HALF_LENGTH),
+            log_top_z,
         ),
     )
 }

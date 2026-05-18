@@ -29,7 +29,7 @@ bytemuck = { version = "1", optional = true }
 # `read_indices` helpers; we deliberately skip `import` (and its `base64` /
 # `image` deps) because we load bytes through our own `Vfs` and reach the
 # parser via `Gltf::from_slice` — no disk paths, no embedded textures.
-gltf = { version = "1.4", default-features = false, features = ["utils"], optional = true }
+gltf = { version = "1.4", default-features = false, features = ["utils", "names"], optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 pollster = { version = "0.4.0", optional = true }
 wgpu = { version = "29.0.3", optional = true }
@@ -47,6 +47,10 @@ yakui-winit = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a272
 
 [[example]]
 name = "assets"
+required-features = ["render"]
+
+[[example]]
+name = "blender_import"
 required-features = ["render"]
 
 [[example]]

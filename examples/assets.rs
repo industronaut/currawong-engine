@@ -334,8 +334,10 @@ impl View for AssetsView {
         pass.draw_indexed(0..self.inline_cube.index_count, 0, 0..1);
 
         // glTF cube: resolve the handle, compose the fallback adjustment
-        // inside the per-instance model, draw with whichever buffers
-        // resolve_mesh handed back.
+        // inside the per-instance model, draw each primitive in the
+        // resolved mesh. The cube.glb test fixture has a single primitive
+        // — multi-primitive support (#80) loops the same code without
+        // change.
         let resolved = self
             .asset_server
             .resolve_mesh(&self.gltf_cube.handle, Some(self.gltf_cube.visual_bounds));
@@ -347,10 +349,12 @@ impl View for AssetsView {
             0,
             bytemuck::bytes_of(&gltf_attribs),
         );
-        pass.set_vertex_buffer(0, resolved.vertex_buffer.slice(..));
         pass.set_vertex_buffer(1, self.gltf_cube.instance_buffer.slice(..));
-        pass.set_index_buffer(resolved.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..resolved.index_count, 0, 0..1);
+        for prim in resolved.primitives {
+            pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+            pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..prim.index_count, 0, 0..1);
+        }
     }
 
     fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
