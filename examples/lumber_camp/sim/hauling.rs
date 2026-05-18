@@ -8,7 +8,7 @@
 use currawong::glam::Vec3;
 use currawong::{WorldObjectId, Zone};
 
-use super::{Move, PAWN_SPEED};
+use super::{GameStats, Move};
 
 /// Marker on a pawn that finished a chop and is hauling a single log back
 /// to the stockpile. Zero-sized today; carrying capacity grows when the
@@ -62,8 +62,10 @@ pub fn on_arrival(zone: &mut Zone, arrived: &[WorldObjectId]) {
 /// Route `Carrying` pawns with no `Move`/`Hauling` to the given stockpile.
 /// Newly-felled choppers (promoted to `Carrying` in
 /// [`super::chopping::tick_progress`]) land here on the same tick so the
-/// round trip starts immediately.
-pub fn dispatch_carrying(zone: &mut Zone, stockpile: WorldObjectId) {
+/// round trip starts immediately. Walk speed comes from
+/// [`GameStats::lumberjack_speed`] — the same speed `dispatch_idle` stamps
+/// onto the outbound trip.
+pub fn dispatch_carrying(zone: &mut Zone, stockpile: WorldObjectId, stats: &GameStats) {
     let Some(stockpile_pos) = zone.get(stockpile).map(|t| t.position) else {
         return;
     };
@@ -82,7 +84,7 @@ pub fn dispatch_carrying(zone: &mut Zone, stockpile: WorldObjectId) {
             pawn,
             Move {
                 target: stockpile_pos,
-                speed: PAWN_SPEED,
+                speed: stats.lumberjack_speed,
             },
         );
     }

@@ -8,14 +8,11 @@
 
 use std::collections::HashSet;
 
+use currawong::data::KindId;
 use currawong::glam::Vec3;
 use currawong::{WorldObjectId, Zone};
 
-use super::{Carrying, Move, PAWN_SPEED, RenderId};
-
-/// Ticks of [`ChopProgress`] per tree at default 60 Hz — 1.5 seconds of
-/// "chopping" once a pawn reaches the tree.
-pub const CHOP_TICKS: u32 = 90;
+use super::{Carrying, GameStats, Move};
 
 /// Marker on a tree the player has flagged for chopping. Carries no data
 /// today; the planned `JobBoard` slice will grow this into `Designated { job:
@@ -94,19 +91,30 @@ pub fn refresh_move_targets(zone: &mut Zone) {
 /// React to arrivals: a pawn that just reached its chopping target starts
 /// a `ChopProgress` on the tree (if not already counting). The pawn stays
 /// stationary at the tree until [`tick_progress`] fells it.
-pub fn on_arrival(zone: &mut Zone, arrived: &[WorldObjectId]) {
+///
+/// `chop_ticks` is read off the tree's [`KindId`] component via
+/// [`GameStats::tree_stats`], so pine takes longer than oak per its
+/// `pine_tree.ron` body.
+pub fn on_arrival(zone: &mut Zone, arrived: &[WorldObjectId], stats: &GameStats) {
     for &pawn in arrived {
         let Some(tree) = zone.components().get::<Chopping>(pawn).map(|c| c.tree) else {
             continue;
         };
-        if zone.components().get::<ChopProgress>(tree).is_none() {
-            zone.components_mut().insert(
-                tree,
-                ChopProgress {
-                    ticks_remaining: CHOP_TICKS,
-                },
-            );
+        if zone.components().get::<ChopProgress>(tree).is_some() {
+            continue;
         }
+        let Some(tree_kind) = zone.components().get::<KindId>(tree) else {
+            continue;
+        };
+        let Some(tree_stats) = stats.tree_stats(tree_kind) else {
+            // Defensive — designations are limited to tree kinds, but if a
+            // user-defined kind sneaks through dispatch we don't want to
+            // panic mid-tick.
+            continue;
+        };
+        let ticks_remaining = tree_stats.chop_ticks;
+        zone.components_mut()
+            .insert(tree, ChopProgress { ticks_remaining });
     }
 }
 
@@ -140,7 +148,13 @@ pub fn tick_progress(zone: &mut Zone) {
 /// Hand idle pawns (no `Move`, no `Chopping`, no `Carrying`) the nearest
 /// unclaimed `Designated` tree. Claim semantics on trees prevent two pawns
 /// racing the same designation.
-pub fn dispatch_idle(zone: &mut Zone) {
+///
+/// "Pawn" is anything carrying the `lumberjack` kind id — extending to
+/// other worker kinds means adding that kind id to a small allow-list (or
+/// switching to a `Worker` marker component once a second worker kind
+/// exists).
+pub fn dispatch_idle(zone: &mut Zone, stats: &GameStats) {
+    let lumberjack = &stats.kinds.lumberjack;
     let designated: Vec<(WorldObjectId, Vec3)> = zone
         .components()
         .iter::<Designated>()
@@ -157,7 +171,7 @@ pub fn dispatch_idle(zone: &mut Zone) {
     let idle: Vec<(WorldObjectId, Vec3)> = zone
         .iter()
         .filter(|(id, _)| {
-            zone.components().get::<RenderId>(*id) == Some(&RenderId::Pawn)
+            zone.components().get::<KindId>(*id) == Some(lumberjack)
                 && zone.components().get::<Move>(*id).is_none()
                 && zone.components().get::<Chopping>(*id).is_none()
                 && zone.components().get::<Carrying>(*id).is_none()
@@ -183,7 +197,7 @@ pub fn dispatch_idle(zone: &mut Zone) {
             pawn,
             Move {
                 target: tree_pos,
-                speed: PAWN_SPEED,
+                speed: stats.lumberjack_speed,
             },
         );
     }

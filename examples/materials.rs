@@ -228,7 +228,7 @@ impl View for Materials {
         pass.set_vertex_buffer(0, self.cube_vertices.slice(..));
         pass.set_index_buffer(self.cube_indices.slice(..), wgpu::IndexFormat::Uint16);
         for (mid, instance_buffer, count) in self.buckets.iter_filled() {
-            let Some(instance) = self.instances.get(mid) else {
+            let Some(instance) = self.instances.get(*mid) else {
                 continue;
             };
             pass.set_bind_group(1, instance.bind_group(), &[]);

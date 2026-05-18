@@ -1,10 +1,14 @@
-//! View-side state and helpers specific to drawing pawns.
+//! View-side helpers for pawns.
 //!
-//! The pawn body and the carried log are both [`MeshPart`](currawong::MeshPart)s
-//! on the engine [`RenderTemplate`](currawong::RenderTemplate) registered
-//! by [`super::LumberCampView::init`]. This module exports the factory
-//! functions for each part's mesh + PBR material instance, the log's
-//! local-frame transform, and the pawn's visual AABB.
+//! The pawn's *body* mesh + texture come from each pawn-kind's RON def
+//! via [`super::build_body_template`] — today there's only
+//! `currawong:lumberjack`, but additional worker kinds (foreman,
+//! apprentice) drop straight in by adding more RON files with
+//! `render.shape: "pawn"`. The *carried log* is a shared procedural brown
+//! cylinder built once at init and reused across every pawn-kind's
+//! template via [`super::PartKey::CarriedLog`]. Log visibility is a
+//! view-side decision set by [`update_instance`] from the sim's
+//! [`Carrying`] component.
 //!
 //! View-side pawn state lives on [`PawnRenderer`]: tick-boundary position
 //! snapshots for sub-tick interpolation, and the wall-clock idle-bob
@@ -12,9 +16,6 @@
 //! which overwrites `instance.world_xform` with the interpolated +
 //! bobbed pose; the engine then composes `world_xform *
 //! log_local_transform` for the log part automatically.
-//!
-//! Log visibility is also a view-side decision, set in that same closure:
-//! `instance.mesh_parts[LOG_PART].visible = components.get::<Carrying>(id).is_some()`.
 
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
@@ -22,65 +23,45 @@ use std::time::Instant;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, EngineCtx, Handle, LiveRenderObject, PbrMaterial, PosNormalUv,
-    PrimitiveMesh, Renderer, SamplerRegistry, Texture, WorldObjectId, WorldObjectRef,
+    Aabb, AssetServer, Components, EngineCtx, LiveRenderObject, PbrMaterial, PrimitiveMesh,
+    Renderer, SamplerRegistry, WorldObjectId, WorldObjectRef,
 };
 
-use super::{MeshTemplate, TemplateParams};
-use crate::sim::{Carrying, Game, Move, RenderId};
+use super::{InlineTemplate, MeshTemplate, new_inline_template};
+use crate::sim::{Carrying, Game, Move};
 
-/// Index of the carried-log mesh part in the pawn render template. Stable
-/// because parts keep their declaration order on the template builder.
+/// Index of the carried-log mesh part in every pawn's render template —
+/// second part after the body. Stable because
+/// [`super::RenderShape::register_template`] adds parts in declaration
+/// order and only the pawn shape adds the log.
 const LOG_PART: usize = 1;
 
-/// Vertical amplitude of the idle bob applied to pawns without a [`Move`](crate::sim::Move).
-/// A few centimetres reads as breathing without looking like a glitch.
+/// Vertical amplitude of the idle bob applied to pawns without a
+/// [`Move`](crate::sim::Move). A few centimetres reads as breathing
+/// without looking like a glitch.
 const IDLE_BOB_AMPLITUDE: f32 = 0.035;
 /// Idle-bob frequency in Hz. Slow enough to feel like a breath rather
 /// than a hop; wall-clock driven so paused pawns still breathe.
 const IDLE_BOB_HZ: f32 = 1.4;
 
-/// Build the pawn *body* template (capsule + satchel, skin-warm PBR).
-pub fn new_body_template(
-    renderer: &Renderer,
-    material: &PbrMaterial,
-    samplers: &SamplerRegistry,
-    asset_server: &AssetServer,
-    albedo: Handle<Texture>,
-) -> MeshTemplate {
-    MeshTemplate::new(
-        renderer,
-        material,
-        samplers,
-        asset_server,
-        albedo,
-        &pawn_mesh_with_satchel(),
-        TemplateParams {
-            label: "lumber-camp pawn",
-            albedo_factor: Vec4::new(0.95, 0.70, 0.55, 1.0), // skin-warm
-            metallic: 0.0,
-            roughness: 0.70,
-        },
-    )
-}
-
-/// Build the carried-log template — a wood-brown horizontal cylinder.
+/// Build the shared carried-log template — a wood-brown horizontal
+/// cylinder. Procedural because the carried log is a "you have an
+/// inventory item" HUD indicator, not authored content.
 pub fn new_log_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
     asset_server: &AssetServer,
-    albedo: Handle<Texture>,
 ) -> MeshTemplate {
-    MeshTemplate::new(
+    new_inline_template(
         renderer,
         material,
         samplers,
         asset_server,
-        albedo,
-        &PrimitiveMesh::cylinder(0.07, 0.6, 12, true),
-        TemplateParams {
+        InlineTemplate {
             label: "lumber-camp carried log",
+            mesh: &PrimitiveMesh::cylinder(0.07, 0.6, 12, true),
+            bounds: Aabb::new(Vec3::new(-0.30, -0.07, -0.07), Vec3::new(0.30, 0.07, 0.07)),
             albedo_factor: Vec4::new(0.42, 0.27, 0.16, 1.0), // wood brown
             metallic: 0.0,
             roughness: 0.85,
@@ -88,21 +69,36 @@ pub fn new_log_template(
     )
 }
 
-/// Local-frame transform for the carried log: lay the cylinder on its
-/// side and sit it at shoulder height in the pawn's local frame. Engine
-/// composes `parent.world_xform * log_local_transform()`, so the log
-/// rides whatever pose the per-instance update writes onto the proxy.
-pub fn log_local_transform() -> Mat4 {
-    Mat4::from_rotation_translation(Quat::from_rotation_x(PI / 2.0), Vec3::new(0.0, 0.0, 0.95))
+/// Local-frame transform for the carried log, given the pawn's *body*
+/// bounds. Lays the cylinder on its side at roughly shoulder height (~75%
+/// of body height — works for whatever-shaped pawns the kind def
+/// describes without needing a per-kind shoulder constant in the RON).
+pub fn log_local_transform(body_bounds: &Aabb) -> Mat4 {
+    let shoulder_z = body_bounds.min.z + (body_bounds.max.z - body_bounds.min.z) * 0.75;
+    Mat4::from_rotation_translation(
+        Quat::from_rotation_x(PI / 2.0),
+        Vec3::new(0.0, 0.0, shoulder_z),
+    )
 }
 
-/// Visual AABB in the pawn's local frame. Encloses the 1.6 m capsule
-/// centred on the origin plus the satchel protrusion plus the carried log
-/// at shoulder height — the proxy frustum-culls against this even when
-/// the pawn isn't carrying anything (cheaper than swapping bounds with
-/// the `Carrying` flag, and grazing-edge correct).
-pub fn visual_bounds() -> Aabb {
-    Aabb::new(Vec3::new(-0.40, -0.40, -0.85), Vec3::new(0.70, 0.40, 1.10))
+/// Visual AABB for a pawn kind's [`RenderTemplate`](currawong::RenderTemplate),
+/// extending the body's bounds horizontally to enclose the carried log so
+/// the engine frustum-cull doesn't pop the pawn when only its log is
+/// on-screen. The log lays along local X, so X gets the extension.
+pub fn extended_bounds(body_bounds: &Aabb) -> Aabb {
+    let log_half_length = 0.30;
+    Aabb::new(
+        Vec3::new(
+            body_bounds.min.x.min(-log_half_length),
+            body_bounds.min.y,
+            body_bounds.min.z,
+        ),
+        Vec3::new(
+            body_bounds.max.x.max(log_half_length),
+            body_bounds.max.y,
+            body_bounds.max.z,
+        ),
+    )
 }
 
 /// Per-frame pawn-only view state: tick-boundary position snapshots for
@@ -149,9 +145,10 @@ impl PawnRenderer {
             return;
         }
         self.pawn_prev = std::mem::take(&mut self.pawn_curr);
+        let lumberjack = &sim.stats.kinds.lumberjack;
         if let Some(zone) = sim.zones.get(sim.zone) {
             for (id, transform) in zone.iter() {
-                if zone.components().get::<RenderId>(id) == Some(&RenderId::Pawn) {
+                if zone.components().get::<currawong::data::KindId>(id) == Some(lumberjack) {
                     self.pawn_curr.insert(id, transform.position);
                 }
             }
@@ -209,29 +206,4 @@ pub fn update_instance(
     let pos = state.interp_position(parent.id, live_position, alpha, has_move);
     instance.world_xform.w_axis = Vec4::new(pos.x, pos.y, pos.z, 1.0);
     instance.mesh_parts[LOG_PART].visible = components.get::<Carrying>(parent.id).is_some();
-}
-
-/// Pawn body + a small offset cube ("satchel") on the local +X side, baked
-/// into one mesh. Same material as the body, so the satchel doesn't pop
-/// visually — but the geometric protrusion catches the sun at a
-/// different angle than the capsule surface, making the pawn's facing
-/// readable as it walks around.
-fn pawn_mesh_with_satchel() -> PrimitiveMesh {
-    let mut mesh = PrimitiveMesh::capsule(0.30, 1.6, 16, 3);
-    let satchel = PrimitiveMesh::cube(Vec3::splat(0.18));
-    let offset = Vec3::new(0.34, 0.0, 0.45);
-    let base = mesh.vertices.len() as u32;
-    mesh.vertices
-        .extend(satchel.vertices.iter().map(|v| PosNormalUv {
-            position: [
-                v.position[0] + offset.x,
-                v.position[1] + offset.y,
-                v.position[2] + offset.z,
-            ],
-            normal: v.normal,
-            uv: v.uv,
-        }));
-    mesh.indices
-        .extend(satchel.indices.iter().map(|&i| base + i));
-    mesh
 }

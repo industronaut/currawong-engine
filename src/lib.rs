@@ -27,6 +27,8 @@ pub use sim::*;
 pub mod data;
 
 #[cfg(feature = "render")]
+pub use pollster;
+#[cfg(feature = "render")]
 pub use wgpu;
 #[cfg(feature = "render")]
 pub use winit;

@@ -484,7 +484,7 @@ impl View for Demo {
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         for (mesh_handle, instance_buffer, count) in self.buckets.iter_filled() {
-            let mesh = &self.meshes[&mesh_handle];
+            let mesh = &self.meshes[mesh_handle];
             let mat_key = match mesh_handle {
                 MeshHandle::Trunk => MatKey::Bark,
                 MeshHandle::Canopy => MatKey::Leaf,

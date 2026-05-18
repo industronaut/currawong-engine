@@ -1,80 +1,59 @@
-//! View-side state and helpers specific to drawing trees.
+//! View-side helpers for trees.
 //!
-//! The tree body and the designation marker are both
-//! [`MeshPart`](currawong::MeshPart)s on the engine
-//! [`RenderTemplate`](currawong::RenderTemplate) registered by
-//! [`super::LumberCampView::init`]. This module exports each part's
-//! factory, the marker's local-frame transform (apex-down above the
-//! canopy), the tree's visual AABB, and the click-to-toggle input
-//! handler. Marker visibility is a view-side decision set by the
-//! per-instance update closure in [`super`]:
-//! `instance.mesh_parts[MARKER_PART].visible = components.get::<Designated>(id).is_some()`.
+//! The tree's *body* mesh + texture come from each species' RON def via
+//! [`super::build_body_template`] — oak.glb / oak_bark.png for
+//! `currawong:oak_tree`, pine.glb / pine_bark.png for
+//! `currawong:pine_tree`. The *designation marker* is a single shared
+//! procedural red cone built once at init and reused across every species'
+//! template via [`super::PartKey::Marker`]. Marker visibility is a
+//! view-side decision set by [`update_instance`] from the sim's
+//! [`Designated`] component.
 
 use std::f32::consts::PI;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, Handle, LiveRenderObject, PbrMaterial, PrimitiveMesh, Renderer,
-    SamplerRegistry, Texture, WorldObjectRef,
+    Aabb, AssetServer, Components, LiveRenderObject, PbrMaterial, PrimitiveMesh, Renderer,
+    SamplerRegistry, WorldObjectRef,
 };
 
-use super::{MeshTemplate, TemplateParams};
-use crate::sim::{Designated, Game, RenderId};
+use super::{InlineTemplate, MeshTemplate, new_inline_template};
+use crate::sim::{Designated, Game};
 
-/// Index of the designation-marker mesh part in the tree render template.
+/// Index of the designation-marker mesh part in every tree's render
+/// template — second part after the body. Stable because
+/// [`super::RenderShape::register_template`] adds parts in declaration
+/// order and only the tree shape adds the marker.
 const MARKER_PART: usize = 1;
 
-/// Half the tree cone's height — used to position the marker above the
-/// canopy in the *local* frame.
-const TREE_HALF_HEIGHT: f32 = 1.0;
 /// Vertical air gap between the tree apex and the marker apex. Keeps the
 /// marker from kissing the canopy at this camera distance.
 const MARKER_GAP: f32 = 0.12;
 /// Half the marker cone's height.
 const MARKER_HALF_HEIGHT: f32 = 0.175;
 
-/// Build the tree *body* template — foliage-green cone.
-pub fn new_body_template(
-    renderer: &Renderer,
-    material: &PbrMaterial,
-    samplers: &SamplerRegistry,
-    asset_server: &AssetServer,
-    albedo: Handle<Texture>,
-) -> MeshTemplate {
-    MeshTemplate::new(
-        renderer,
-        material,
-        samplers,
-        asset_server,
-        albedo,
-        &PrimitiveMesh::cone(0.60, 2.0, 16, true),
-        TemplateParams {
-            label: "lumber-camp tree",
-            albedo_factor: Vec4::new(0.20, 0.50, 0.18, 1.0), // foliage green
-            metallic: 0.0,
-            roughness: 0.95,
-        },
-    )
-}
-
-/// Build the designation-marker template — a small bright-red cone,
-/// oriented apex-down by [`marker_local_transform`].
+/// Build the shared designation-marker template — a small bright-red
+/// cone, oriented apex-down by [`marker_local_transform`]. Procedural
+/// rather than streamed because the marker is a stylized HUD indicator,
+/// not authored content.
 pub fn new_marker_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
     asset_server: &AssetServer,
-    albedo: Handle<Texture>,
 ) -> MeshTemplate {
-    MeshTemplate::new(
+    new_inline_template(
         renderer,
         material,
         samplers,
         asset_server,
-        albedo,
-        &PrimitiveMesh::cone(0.18, 0.35, 12, true),
-        TemplateParams {
+        InlineTemplate {
             label: "lumber-camp designation marker",
+            mesh: &PrimitiveMesh::cone(0.18, 0.35, 12, true),
+            bounds: Aabb::new(
+                Vec3::new(-0.18, -0.18, -0.175),
+                Vec3::new(0.18, 0.18, 0.175),
+            ),
             albedo_factor: Vec4::new(1.0, 0.15, 0.15, 1.0), // bright red
             metallic: 0.0,
             roughness: 0.55,
@@ -82,23 +61,29 @@ pub fn new_marker_template(
     )
 }
 
-/// Local-frame transform for the marker: rotate the cone apex-down and
-/// sit it just above the tree's canopy. Engine composes
-/// `parent.world_xform * marker_local_transform()` per draw.
-pub fn marker_local_transform() -> Mat4 {
-    let marker_centre_z = TREE_HALF_HEIGHT + MARKER_GAP + MARKER_HALF_HEIGHT;
+/// Local-frame transform for the marker, given the tree's *body* bounds.
+/// Sits the marker just above the canopy with a small gap, apex-down.
+/// Per-species because pine canopies sit higher than oak — the marker
+/// rides each species' own height.
+pub fn marker_local_transform(body_bounds: &Aabb) -> Mat4 {
+    let marker_centre_z = body_bounds.max.z + MARKER_GAP + MARKER_HALF_HEIGHT;
     Mat4::from_rotation_translation(
         Quat::from_rotation_x(PI),
         Vec3::new(0.0, 0.0, marker_centre_z),
     )
 }
 
-/// Visual AABB in the tree's local frame. Encloses the cone (radius 0.60,
-/// height 2.0 centred on origin) plus the marker's reach above the
-/// canopy. Used by the engine's frustum cull even when the tree isn't
-/// designated — cheaper than dynamic bounds, and grazing-edge correct.
-pub fn visual_bounds() -> Aabb {
-    Aabb::new(Vec3::new(-0.65, -0.65, -1.05), Vec3::new(0.65, 0.65, 1.50))
+/// Visual AABB for a tree species' [`RenderTemplate`](currawong::RenderTemplate),
+/// extending the body's bounds upward to enclose the designation marker so
+/// the engine frustum-cull doesn't pop the tree out when only its marker
+/// is on-screen.
+pub fn extended_bounds(body_bounds: &Aabb) -> Aabb {
+    let marker_top = body_bounds.max.z + MARKER_GAP + 2.0 * MARKER_HALF_HEIGHT;
+    let xy_extent = body_bounds.max.x.max(body_bounds.max.y).max(0.65);
+    Aabb::new(
+        Vec3::new(-xy_extent, -xy_extent, body_bounds.min.z),
+        Vec3::new(xy_extent, xy_extent, marker_top),
+    )
 }
 
 /// Per-instance update for a live tree proxy. Called by the dispatcher
@@ -116,23 +101,29 @@ pub fn update_instance(
 }
 
 /// Toggle a [`Designated`] component on whichever sim object is currently
-/// under the cursor — but only if it's a tree. Pawns and the stockpile
-/// click through (left-click on those will mean "select" in a later
-/// slice). Lives here rather than in the top-level view because the
-/// "is this a tree?" filter and the `Designated` component are both
-/// tree-side.
+/// under the cursor — but only if it's a tree (oak or pine). Pawns and the
+/// lumber camp click through; left-click on those will mean "select" in a
+/// later slice.
 pub fn toggle_designation_under_cursor(sim: &mut Game, hovered: Option<WorldObjectRef>) {
     let Some(WorldObjectRef { zone, id }) = hovered else {
         return;
     };
+    // Snapshot the kind id from the immutable side before we take a
+    // mutable borrow of the zone — avoids the borrow checker fight that
+    // a single `zone.components_mut()` then read of `.components()`
+    // would otherwise produce.
+    let is_tree = sim
+        .zones
+        .get(zone)
+        .and_then(|z| z.components().get::<currawong::data::KindId>(id))
+        .map(|k| sim.stats.tree_stats(k).is_some())
+        .unwrap_or(false);
+    if !is_tree {
+        return;
+    }
     let Some(zone) = sim.zones.get_mut(zone) else {
         return;
     };
-    // A readback id can be stale across object removal; component lookup on a
-    // dead id returns None and we no-op.
-    if !matches!(zone.components().get::<RenderId>(id), Some(RenderId::Tree)) {
-        return;
-    }
     if zone.components().get::<Designated>(id).is_some() {
         zone.components_mut().remove::<Designated>(id);
     } else {
