@@ -11,12 +11,12 @@
 //!
 //! | tex             | channel | meaning                                  |
 //! |-----------------|---------|------------------------------------------|
-//! | `gradient_atlas`| RGB     | albedo (sRGB)                            |
+//! | `albedo_atlas`| RGB     | albedo (sRGB)                            |
 //! | `mre_atlas`     | R       | metallic (linear, `0..1`)                |
 //! | `mre_atlas`     | G       | roughness (linear, `0..1`)               |
 //! | `mre_atlas`     | B       | emission mask (linear, `0..1`)           |
 //!
-//! Final emission is `albedo * mre.b` — the gradient atlas doubles as the
+//! Final emission is `albedo * mre.b` — the albedo atlas doubles as the
 //! emission colour, the MRE blue channel is just the per-texel mask.
 //! There is no occlusion channel; future stylized variants that need AO
 //! pack a different atlas and live as a sibling material type.
@@ -27,7 +27,7 @@
 //! |-------|---------------------------------------------------------|
 //! | 0     | camera ([`CameraBinding`](super::CameraBinding))        |
 //! | 1     | scene env ([`Renderer::scene_layout`](super::Renderer)) |
-//! | 2     | material instance — gradient + mre textures + sampler   |
+//! | 2     | material instance — albedo + mre textures + sampler   |
 //!
 //! ## Vertex buffers
 //!
@@ -59,7 +59,7 @@ struct Scene {
 };
 @group(1) @binding(0) var<uniform> scene: Scene;
 
-@group(2) @binding(0) var gradient_tex: texture_2d<f32>;
+@group(2) @binding(0) var albedo_tex: texture_2d<f32>;
 @group(2) @binding(1) var mre_tex:      texture_2d<f32>;
 @group(2) @binding(2) var atlas_sampler: sampler;
 
@@ -132,7 +132,7 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> FsOut {
-    let albedo_sample = textureSample(gradient_tex, atlas_sampler, in.uv);
+    let albedo_sample = textureSample(albedo_tex, atlas_sampler, in.uv);
     let mre           = textureSample(mre_tex,      atlas_sampler, in.uv).rgb;
 
     let albedo    = albedo_sample.rgb * in.tint.rgb;
@@ -194,7 +194,7 @@ pub struct PbrAtlasMaterial {
 pub struct PbrAtlasMaterialParams {
     /// Albedo / colour atlas, sampled at the mesh's UVs to drive both the
     /// base colour and (via the MRE blue channel) emission. Must be sRGB.
-    pub gradient: Handle<Texture>,
+    pub albedo: Handle<Texture>,
     /// MRE atlas: R=metallic, G=roughness, B=emission mask. Must be
     /// linear (load with `TextureColorSpace::Linear`).
     pub mre: Handle<Texture>,
@@ -280,30 +280,30 @@ impl PbrAtlasMaterial {
         params: PbrAtlasMaterialParams,
     ) -> PbrAtlasMaterialInstance {
         let PbrAtlasMaterialParams {
-            gradient,
+            albedo,
             mre,
             sampler,
         } = params;
-        let resolved_gradient = asset_server.resolve_texture(&gradient);
+        let resolved_albedo = asset_server.resolve_texture(&albedo);
         let resolved_mre = asset_server.resolve_texture(&mre);
         let bind_group = build_instance_bind_group(
             &renderer.device,
             &self.instance_bgl,
-            resolved_gradient.view,
+            resolved_albedo.view,
             resolved_mre.view,
             samplers.get(sampler),
         );
         // Lift the sources out before moving the handles into the struct
-        // — `resolved_*` borrow `gradient` / `mre`, so the borrow has to
+        // — `resolved_*` borrow `albedo` / `mre`, so the borrow has to
         // end before the struct literal moves them.
-        let last_gradient_source = resolved_gradient.source;
+        let last_albedo_source = resolved_albedo.source;
         let last_mre_source = resolved_mre.source;
         PbrAtlasMaterialInstance {
-            gradient,
+            albedo,
             mre,
             sampler_kind: sampler,
             bind_group,
-            last_gradient_source,
+            last_albedo_source,
             last_mre_source,
         }
     }
@@ -315,7 +315,7 @@ impl PbrAtlasMaterial {
 fn build_instance_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    gradient_view: &wgpu::TextureView,
+    albedo_view: &wgpu::TextureView,
     mre_view: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
@@ -325,7 +325,7 @@ fn build_instance_bind_group(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(gradient_view),
+                resource: wgpu::BindingResource::TextureView(albedo_view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -358,14 +358,14 @@ impl MeshMaterial for PbrAtlasMaterial {
 /// (real ↔ fallback ↔ forced-fallback). Refreshing is cheap when nothing
 /// changes; the rebuild only fires on a transition frame.
 pub struct PbrAtlasMaterialInstance {
-    gradient: Handle<Texture>,
+    albedo: Handle<Texture>,
     mre: Handle<Texture>,
     sampler_kind: SamplerKind,
     bind_group: wgpu::BindGroup,
     /// Which view each side of the cached `bind_group` is currently
     /// built against — used by [`refresh`](Self::refresh) to decide
     /// whether a rebuild is needed.
-    last_gradient_source: TextureSource,
+    last_albedo_source: TextureSource,
     last_mre_source: TextureSource,
 }
 
@@ -374,10 +374,10 @@ impl PbrAtlasMaterialInstance {
         &self.bind_group
     }
 
-    /// The gradient atlas handle. Cheap to clone — share across instances
+    /// The albedo atlas handle. Cheap to clone — share across instances
     /// that read the same atlas.
-    pub fn gradient_handle(&self) -> &Handle<Texture> {
-        &self.gradient
+    pub fn albedo_handle(&self) -> &Handle<Texture> {
+        &self.albedo
     }
 
     /// The MRE atlas handle. Cheap to clone.
@@ -400,9 +400,9 @@ impl PbrAtlasMaterialInstance {
         samplers: &SamplerRegistry,
         asset_server: &AssetServer,
     ) {
-        let resolved_gradient = asset_server.resolve_texture(&self.gradient);
+        let resolved_albedo = asset_server.resolve_texture(&self.albedo);
         let resolved_mre = asset_server.resolve_texture(&self.mre);
-        if resolved_gradient.source == self.last_gradient_source
+        if resolved_albedo.source == self.last_albedo_source
             && resolved_mre.source == self.last_mre_source
         {
             return;
@@ -410,11 +410,11 @@ impl PbrAtlasMaterialInstance {
         self.bind_group = build_instance_bind_group(
             &renderer.device,
             material.instance_bgl(),
-            resolved_gradient.view,
+            resolved_albedo.view,
             resolved_mre.view,
             samplers.get(self.sampler_kind),
         );
-        self.last_gradient_source = resolved_gradient.source;
+        self.last_albedo_source = resolved_albedo.source;
         self.last_mre_source = resolved_mre.source;
     }
 }
