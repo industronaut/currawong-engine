@@ -49,7 +49,7 @@ use glam::{Mat4, Vec3};
 use crate::data::{Vfs, VfsPath};
 
 use super::handle::{Handle, HandleError, new_pending};
-use super::mesh::{DecodedMesh, Mesh};
+use super::mesh::{DecodedMesh, DecodedPrimitive, Mesh, MeshPrimitive};
 use super::mesh_primitives::PrimitiveMesh;
 use super::renderer::Renderer;
 use super::texture::{Texture, TextureColorSpace};
@@ -235,21 +235,23 @@ impl AssetServer {
         handle
     }
 
-    /// Resolve a mesh handle to the buffers + per-draw transform the caller
-    /// should bind this frame.
+    /// Resolve a mesh handle to the per-primitive buffers + per-draw
+    /// transform the caller should bind this frame.
     ///
-    /// On `Ready` with the debug toggle off, returns the real mesh's
-    /// vertex/index buffers, its index count, and `Mat4::IDENTITY` for the
-    /// fallback adjustment — compose normally.
+    /// On `Ready` with the debug toggle off, returns a borrow of the real
+    /// mesh's primitive slice and `Mat4::IDENTITY` for the fallback
+    /// adjustment — compose normally.
     ///
     /// On `Loading` / `Failed` / forced-fallback, returns the resident
-    /// unit-cube fallback's buffers + a translate-then-scale `Mat4` sized
-    /// to `template_bounds` (or `Mat4::IDENTITY` if no bounds were
+    /// single-primitive unit-cube fallback + a translate-then-scale `Mat4`
+    /// sized to `template_bounds` (or `Mat4::IDENTITY` if no bounds were
     /// provided). Callers compose it inside their per-instance world
     /// transform: `model = world_xform * fallback_adjustment`. This keeps
     /// the placeholder occupying roughly the right volume so frustum
-    /// culling and screen-space size heuristics agree with the real
-    /// mesh's footprint.
+    /// culling and screen-space size heuristics agree with the real mesh's
+    /// footprint.
+    ///
+    /// The returned `primitives` slice is always non-empty.
     pub fn resolve_mesh<'a>(
         &'a self,
         handle: &'a Handle<Mesh>,
@@ -260,9 +262,7 @@ impl AssetServer {
         }
         match handle.peek() {
             super::handle::HandleState::Ready(m) => ResolvedMesh {
-                vertex_buffer: &m.vertex_buffer,
-                index_buffer: &m.index_buffer,
-                index_count: m.index_count,
+                primitives: &m.primitives,
                 source: MeshSource::Real,
                 fallback_adjustment: Mat4::IDENTITY,
             },
@@ -278,6 +278,11 @@ impl AssetServer {
     /// Build a `ResolvedMesh` that draws the resident unit-cube fallback,
     /// scaled+translated so its `[-0.5, 0.5]^3` extents land on
     /// `template_bounds`. Identity when no bounds were provided.
+    ///
+    /// The fallback is a single-primitive mesh; the primitive's
+    /// [`MeshPrimitive::material_name`] is `None`, so a caller that's also
+    /// resolving materials by name lands on its own magenta fallback for
+    /// the missing material binding too.
     fn fallback_resolved(
         &self,
         template_bounds: Option<Aabb>,
@@ -287,9 +292,7 @@ impl AssetServer {
             .map(fallback_adjustment_for)
             .unwrap_or(Mat4::IDENTITY);
         ResolvedMesh {
-            vertex_buffer: &self.fallback_mesh.vertex_buffer,
-            index_buffer: &self.fallback_mesh.index_buffer,
-            index_count: self.fallback_mesh.index_count,
+            primitives: &self.fallback_mesh.primitives,
             source,
             fallback_adjustment,
         }
@@ -358,9 +361,10 @@ pub enum TextureSource {
     ForcedFallback,
 }
 
-/// What a [`AssetServer::resolve_mesh`] call produced — buffers and index
-/// count to draw, a [`MeshSource`] tag for *why* those buffers were
-/// chosen, and a [`Mat4`] adjustment for the per-instance model transform.
+/// What a [`AssetServer::resolve_mesh`] call produced — a non-empty slice
+/// of [`MeshPrimitive`]s to iterate and bind one-per-draw, a [`MeshSource`]
+/// tag for *why* those buffers were chosen, and a [`Mat4`] adjustment for
+/// the per-instance model transform.
 ///
 /// Compose the adjustment inside the world transform:
 ///
@@ -369,12 +373,10 @@ pub enum TextureSource {
 /// ```
 ///
 /// For real meshes the adjustment is `Mat4::IDENTITY`, so the compose is a
-/// no-op. For fallbacks the adjustment scales+translates the unit cube to
-/// the template bounds the caller passed.
+/// no-op. For fallbacks the adjustment scales+translates the resident
+/// unit cube to the template bounds the caller passed.
 pub struct ResolvedMesh<'a> {
-    pub vertex_buffer: &'a wgpu::Buffer,
-    pub index_buffer: &'a wgpu::Buffer,
-    pub index_count: u32,
+    pub primitives: &'a [MeshPrimitive],
     pub source: MeshSource,
     pub fallback_adjustment: Mat4,
 }
@@ -441,11 +443,19 @@ fn load_mesh(
 /// [`PrimitiveMesh::cube`] generator so the fallback geometry stays
 /// consistent with what the rest of the engine considers "a cube" — bounds
 /// `[-0.5, 0.5]^3`, per-face flat normals, UVs spanning 0..1 on each face.
+///
+/// A single primitive with `material_name = None`, so a caller resolving
+/// materials by name against a [`MaterialRegistry`](super::MaterialRegistry)
+/// will independently fall back to whatever it registered as its missing-
+/// material magenta.
 fn build_unit_cube_fallback(device: &wgpu::Device, queue: &wgpu::Queue) -> Mesh {
     let cube = PrimitiveMesh::cube(Vec3::ONE);
     let decoded = DecodedMesh {
-        vertices: cube.vertices,
-        indices: cube.indices,
+        primitives: vec![DecodedPrimitive {
+            vertices: cube.vertices,
+            indices: cube.indices,
+            material_name: None,
+        }],
         bounds: Aabb::cube(0.5),
     };
     Mesh::from_decoded_with_device(device, queue, "asset-server unit-cube fallback", decoded)

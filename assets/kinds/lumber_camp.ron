@@ -5,7 +5,7 @@
     id: "currawong:lumber_camp",
     render: (
         shape: "building",
-        mesh: "models/buildings/lumber_camp.glb",
+        mesh: "lumber/base.glb",
         albedo: "textures/buildings/wood_planks.png",
         metallic: 0.0,
         roughness: 0.85,

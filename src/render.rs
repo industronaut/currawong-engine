@@ -24,6 +24,8 @@
 //! - [`render_object`] — render-object templates + registry (slot schema + parts).
 //! - [`render_object_pass`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
+//! - [`material_registry`] — name-keyed [`MaterialRegistry`] resolving glb material
+//!   slot names to [`PbrMaterialInstance`]s (or any other instance type).
 //! - [`handle`] — streaming-asset reference type (`Handle<T>` + states).
 //! - [`asset_server`] — view-side asset gateway; spawns background loads,
 //!   serves the magenta fallback, carries the debug "force loading" toggle.
@@ -59,6 +61,7 @@ mod handle;
 mod instance;
 mod live_render_objects;
 mod material;
+mod material_registry;
 mod mesh;
 mod mesh_primitives;
 mod pbr;
@@ -90,7 +93,10 @@ pub use material::{
     MaterialInstanceRegistry, MeshInstanceAttribs, MeshMaterial, UnlitColoredInstance,
     UnlitColoredMaterial,
 };
-pub use mesh::{DecodedMesh, Mesh, MeshLoadError, decode_gltf_mesh};
+pub use material_registry::{MaterialId, MaterialIdError, MaterialRegistry};
+pub use mesh::{
+    DecodedMesh, DecodedPrimitive, Mesh, MeshLoadError, MeshPrimitive, decode_gltf_mesh,
+};
 pub use mesh_primitives::PrimitiveMesh;
 pub use pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use picking::{Hover, Ray, TerrainPicker};

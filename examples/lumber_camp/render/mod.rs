@@ -123,24 +123,22 @@ pub enum MeshSource {
     /// glTF body part — buffers live behind a streaming handle and we
     /// pay the per-frame `resolve_mesh` to surface them.
     Streamed { handle: Handle<currawong::Mesh> },
-    /// Procedural ancillary part — buffers are owned outright; no
-    /// streaming, no fallback, draw straight through them.
+    /// Procedural ancillary part — a single owned [`currawong::MeshPrimitive`]
+    /// wrapped in a `Vec` so `ResolvedDraw::primitives` is one shape
+    /// regardless of source. No streaming, no fallback.
     Inline {
-        vertices: wgpu::Buffer,
-        indices: wgpu::Buffer,
-        index_count: u32,
+        primitives: Vec<currawong::MeshPrimitive>,
     },
 }
 
-/// Per-draw resolution of a [`MeshTemplate`] into bindable buffers plus
-/// the model-matrix adjustment the caller composes inside their per-
-/// instance world transform. For streamed templates this matches
-/// [`AssetServer::resolve_mesh`] exactly; for inline templates the
+/// Per-draw resolution of a [`MeshTemplate`] into a slice of primitives
+/// plus the model-matrix adjustment the caller composes inside their
+/// per-instance world transform. For streamed templates this matches
+/// [`AssetServer::resolve_mesh`] exactly; for inline templates the slice
+/// is a single primitive borrowed from a per-template scratchpad and the
 /// adjustment is identity.
 pub struct ResolvedDraw<'a> {
-    pub vertex_buffer: &'a wgpu::Buffer,
-    pub index_buffer: &'a wgpu::Buffer,
-    pub index_count: u32,
+    pub primitives: &'a [currawong::MeshPrimitive],
     pub fallback_adjustment: Mat4,
 }
 
@@ -150,20 +148,12 @@ impl MeshTemplate {
             MeshSource::Streamed { handle } => {
                 let r = asset_server.resolve_mesh(handle, Some(self.visual_bounds));
                 ResolvedDraw {
-                    vertex_buffer: r.vertex_buffer,
-                    index_buffer: r.index_buffer,
-                    index_count: r.index_count,
+                    primitives: r.primitives,
                     fallback_adjustment: r.fallback_adjustment,
                 }
             }
-            MeshSource::Inline {
-                vertices,
-                indices,
-                index_count,
-            } => ResolvedDraw {
-                vertex_buffer: vertices,
-                index_buffer: indices,
-                index_count: *index_count,
+            MeshSource::Inline { primitives } => ResolvedDraw {
+                primitives,
                 fallback_adjustment: Mat4::IDENTITY,
             },
         }
@@ -505,8 +495,10 @@ impl View for LumberCampView {
             template
                 .material
                 .refresh(renderer, material, samplers, asset_server);
-            let resolved = template.resolve(asset_server);
-            adjustments.insert(key.clone(), resolved.fallback_adjustment);
+            adjustments.insert(
+                key.clone(),
+                template.resolve(asset_server).fallback_adjustment,
+            );
         }
 
         // Phase 1.7: the single sim→view translation seam. Each
@@ -585,10 +577,16 @@ impl View for LumberCampView {
             };
             let resolved = template.resolve(asset_server);
             pass.set_bind_group(2, template.material.bind_group(), &[]);
-            pass.set_vertex_buffer(0, resolved.vertex_buffer.slice(..));
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            pass.set_index_buffer(resolved.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..resolved.index_count, 0, 0..count);
+            // Lumber camp's existing assets are all single-primitive, but
+            // post-#80 every glb produces a `Vec<MeshPrimitive>`. Loop
+            // over them so a future multi-primitive species body draws
+            // through the same path without further plumbing.
+            for prim in resolved.primitives {
+                pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+                pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..prim.index_count, 0, 0..count);
+            }
         }
     }
 
@@ -766,20 +764,26 @@ pub fn new_inline_template(
     params: InlineTemplate<'_>,
 ) -> MeshTemplate {
     use wgpu::util::DeviceExt;
-    let vertices = renderer
+    let vertex_buffer = renderer
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(params.label),
             contents: bytemuck::cast_slice(&params.mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-    let indices = renderer
+    let index_buffer = renderer
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(params.label),
             contents: bytemuck::cast_slice(&params.mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
+    let primitive = currawong::MeshPrimitive {
+        vertex_buffer,
+        index_buffer,
+        index_count: params.mesh.index_count(),
+        material_name: None,
+    };
     let white = Texture::from_rgba8(renderer, "lumber-camp ancillary", 1, 1, &[255; 4], true);
     let material_instance = material.create_instance(
         renderer,
@@ -795,9 +799,7 @@ pub fn new_inline_template(
     );
     MeshTemplate {
         mesh: MeshSource::Inline {
-            vertices,
-            indices,
-            index_count: params.mesh.index_count(),
+            primitives: vec![primitive],
         },
         visual_bounds: params.bounds,
         material: material_instance,
