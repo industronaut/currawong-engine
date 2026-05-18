@@ -33,6 +33,8 @@
 //! - [`mesh_primitives`] — CPU-side mesh generators (cube, plane, sphere,
 //!   cylinder, cone) in the canonical [`vertex`] layout.
 //! - [`pbr`] — metallic-roughness PBR material; reads scene env + camera.
+//! - [`pbr_atlas`] — stylized PBR material that reads albedo + MRE from two
+//!   atlases; resolves through [`MaterialRegistry`] by glb material name.
 //! - [`picking`] — screen-space cursor → world ray + tile-grid hover picker.
 //! - [`picking_buffer`] — GPU hit-ID buffer plumbing: per-frame indirection
 //!   table + readback ring for sloped-terrain and mesh-object picking.
@@ -65,6 +67,7 @@ mod material_registry;
 mod mesh;
 mod mesh_primitives;
 mod pbr;
+mod pbr_atlas;
 mod picking;
 mod picking_buffer;
 mod render_object;
@@ -99,6 +102,7 @@ pub use mesh::{
 };
 pub use mesh_primitives::PrimitiveMesh;
 pub use pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
+pub use pbr_atlas::{PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams};
 pub use picking::{Hover, Ray, TerrainPicker};
 pub use picking_buffer::{FrameIdTable, HitTarget};
 pub use render_object::{

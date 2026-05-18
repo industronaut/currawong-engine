@@ -46,11 +46,12 @@ use currawong::data::{Definitions, KindId, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, Handle,
-    HitTarget, InstanceBuckets, LiveRenderObjects, MeshInstanceAttribs, OrbitRig, PbrMaterial,
-    PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh, RenderObjectPass, RenderRegistry,
-    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
-    TerrainMaterialInstance, TerrainRenderer, Texture, TextureColorSpace, View, ViewConfig,
-    ViewEnvironment, WorldObjectRef, ZoneId, wgpu, winit, yakui,
+    HitTarget, InstanceBuckets, LiveRenderObjects, MaterialId, MaterialRegistry,
+    MeshInstanceAttribs, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance,
+    PbrAtlasMaterialParams, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
+    RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
+    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, Texture, TextureColorSpace, View,
+    ViewConfig, ViewEnvironment, WorldObjectRef, ZoneId, wgpu, winit, yakui,
 };
 use serde::Deserialize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -61,6 +62,16 @@ use pawn::PawnRenderer;
 use crate::sim::{Game, GameState, HEIGHT_UNIT, TILE_SIZE, TIME_LIMIT_SECS, WOOD_GOAL};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Which mesh pipeline is currently bound to the pass. Tracked across
+/// the per-primitive loop in [`LumberCampView::render`] so we only call
+/// `set_pipeline` on transitions, not per draw.
+#[derive(PartialEq, Eq)]
+enum ActivePipeline {
+    None,
+    Pbr,
+    Atlas,
+}
 const MAX_INSTANCES_PER_PART: u32 = 64;
 /// 30 frames matches CLAUDE.md's hysteresis recommendation — enough to
 /// hide pop-out at grazing camera angles around the orbit rig.
@@ -234,6 +245,13 @@ pub struct LumberCampView {
     rig: OrbitRig,
 
     material: PbrMaterial,
+    /// Stylized atlas-PBR material — used by glb primitives whose
+    /// material slot resolves through [`Self::atlas_materials`].
+    atlas_material: PbrAtlasMaterial,
+    /// Registry of atlas-material instances keyed by glb material name.
+    /// Today only `gltf:lumber` is populated (from `assets/lumber/`'s
+    /// gradient + MRE atlases); add a new entry per stylized atlas pair.
+    atlas_materials: MaterialRegistry<PbrAtlasMaterialInstance>,
     samplers: SamplerRegistry,
     asset_server: AssetServer,
 
@@ -302,11 +320,47 @@ impl View for LumberCampView {
 
         let samplers = SamplerRegistry::new(&renderer.device);
         let material = PbrMaterial::new(renderer, camera_binding.layout());
+        let atlas_material = PbrAtlasMaterial::new(renderer, camera_binding.layout());
 
         // View-side VFS — independent of the one main.rs handed to the
         // sim's `Definitions`. Same on-disk content, separate cache.
         let vfs = Arc::new(crate::lumber_camp_vfs());
         let asset_server = AssetServer::new(renderer, vfs.clone());
+
+        // The glb's "Lumber" material slot resolves through the registry
+        // as `gltf:lumber` (the default-namespace mapping the registry
+        // applies to bare names from glb). Both atlases stream through
+        // the AssetServer like every other texture in this example —
+        // magenta-fallback while loading, real view on transition. gradient
+        // is sRGB (colour data); mre is linear (R=metallic, G=roughness,
+        // B=emission mask).
+        let gradient_handle = asset_server.texture(
+            VfsPath::new("lumber/gradient_atlas.png").expect("valid path"),
+            TextureColorSpace::Srgb,
+        );
+        let mre_handle = asset_server.texture(
+            VfsPath::new("lumber/mre_atlas.png").expect("valid path"),
+            TextureColorSpace::Linear,
+        );
+        let lumber_instance = atlas_material.create_instance(
+            renderer,
+            &samplers,
+            &asset_server,
+            PbrAtlasMaterialParams {
+                gradient: gradient_handle,
+                mre: mre_handle,
+                // Nearest + clamp — low-poly stylization reads the atlas
+                // as discrete colour bands, so trilinear blending would
+                // muddy the look. Clamp keeps cells from bleeding across
+                // edges.
+                sampler: SamplerKind::NearestClamp,
+            },
+        );
+        let mut atlas_materials = MaterialRegistry::new();
+        atlas_materials.register(
+            MaterialId::new("gltf:lumber").expect("valid id"),
+            lumber_instance,
+        );
 
         // We also need to re-parse the defs view-side to walk each kind's
         // `render` block. The sim has already validated the file shapes —
@@ -393,6 +447,8 @@ impl View for LumberCampView {
             camera_binding,
             rig,
             material,
+            atlas_material,
+            atlas_materials,
             samplers,
             asset_server,
             mesh_templates,
@@ -489,6 +545,7 @@ impl View for LumberCampView {
         // a sizing matrix while the real glTF is still in flight).
         let asset_server = &self.asset_server;
         let material = &self.material;
+        let atlas_material = &self.atlas_material;
         let samplers = &self.samplers;
         let mut adjustments: HashMap<PartKey, Mat4> = HashMap::new();
         for (key, template) in &mut self.mesh_templates {
@@ -499,6 +556,11 @@ impl View for LumberCampView {
                 key.clone(),
                 template.resolve(asset_server).fallback_adjustment,
             );
+        }
+        // Atlas materials reconcile each frame too — same shape, two
+        // handles to flex over instead of one. Cheap when nothing changed.
+        for (_, instance) in self.atlas_materials.iter_mut() {
+            instance.refresh(renderer, atlas_material, samplers, asset_server);
         }
 
         // Phase 1.7: the single sim→view translation seam. Each
@@ -564,25 +626,53 @@ impl View for LumberCampView {
         self.terrain
             .draw_solid(pass, renderer, sim.zone, &self.terrain_solid);
 
-        // Mesh parts: one indexed-instanced call per non-empty bucket,
-        // resolving the mesh buffers fresh each draw (cheap — HashMap
-        // lookup + Handle::peek). Swapping pipeline once is enough
-        // because every kind shares the same PBR material template.
-        pass.set_pipeline(self.material.pipeline());
+        // Mesh parts: one indexed-instanced call per primitive, resolving
+        // the mesh buffers fresh each draw (cheap — HashMap lookup +
+        // Handle::peek). Camera + scene bind groups (0 + 1) are shared
+        // across both PBR pipelines since both declare the same first two
+        // bind-group layouts; the per-primitive switch only touches the
+        // pipeline + bind group 2 when a primitive's `material_name`
+        // resolves to a registered atlas-material instance.
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
+        // Track the currently-bound pipeline so we only call set_pipeline
+        // on the transition. ActivePipeline::None forces a bind on the
+        // first draw of the frame.
+        let mut active = ActivePipeline::None;
         for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
             let Some(template) = self.mesh_templates.get(part_key) else {
                 continue;
             };
             let resolved = template.resolve(asset_server);
-            pass.set_bind_group(2, template.material.bind_group(), &[]);
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            // Lumber camp's existing assets are all single-primitive, but
-            // post-#80 every glb produces a `Vec<MeshPrimitive>`. Loop
-            // over them so a future multi-primitive species body draws
-            // through the same path without further plumbing.
+            // Lumber camp's existing assets are mostly single-primitive,
+            // but post-#80 every glb produces a `Vec<MeshPrimitive>` and
+            // each primitive carries its own `material_name`. Dispatch
+            // per primitive so a multi-material glb (lumber camp body
+            // uses the "Lumber" atlas; ancillary primitives could fall
+            // back to the streamed PBR material) draws through the right
+            // pipeline + bind group 2 for each piece.
             for prim in resolved.primitives {
+                let atlas = prim
+                    .material_name
+                    .as_deref()
+                    .and_then(|name| self.atlas_materials.get_by_name(name));
+                match atlas {
+                    Some(instance) => {
+                        if active != ActivePipeline::Atlas {
+                            pass.set_pipeline(self.atlas_material.pipeline());
+                            active = ActivePipeline::Atlas;
+                        }
+                        pass.set_bind_group(2, instance.bind_group(), &[]);
+                    }
+                    None => {
+                        if active != ActivePipeline::Pbr {
+                            pass.set_pipeline(self.material.pipeline());
+                            active = ActivePipeline::Pbr;
+                        }
+                        pass.set_bind_group(2, template.material.bind_group(), &[]);
+                    }
+                }
                 pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
                 pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..prim.index_count, 0, 0..count);
