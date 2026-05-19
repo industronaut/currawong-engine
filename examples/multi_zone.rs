@@ -26,11 +26,11 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, Liquid, LiquidId, MeshInstanceAttribs,
-    OrbitRig, Renderer, SimEnvironment, Simulation, TerrainMaterial, TerrainMaterialInstance,
-    TerrainRenderer, TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig,
-    ViewEnvironment, WorldObjectRef, WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu,
-    winit,
+    Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, Liquid, LiquidId,
+    MeshInstanceAttribs, OrbitRig, Renderer, SimEnvironment, Simulation, TerrainMaterial,
+    TerrainMaterialInstance, TerrainRenderer, TileCoord, UnlitColoredInstance,
+    UnlitColoredMaterial, View, ViewConfig, ViewEnvironment, WorldObjectRef, WorldTransform, Zone,
+    ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -231,10 +231,32 @@ impl Game {
     }
 }
 
+/// External sim mutations the View can request. Two are exposed: walking
+/// the player one tile, and resetting them to the starting tile. The stair
+/// trigger that swaps zones runs inside `tick`, not as a command, because
+/// it's a consequence of sim state (player tile) rather than a user
+/// intent.
+#[derive(Debug, Clone)]
+enum Command {
+    /// Step the player by `(dx, dy)` tiles within the current zone.
+    StepPlayer { dx: i32, dy: i32 },
+    /// Drop the player and recreate them at the ground starting tile.
+    ResetPlayer,
+}
+
 impl Simulation for Game {
+    type Command = Command;
+
     fn tick(&mut self, dt: Duration) {
         self.env.advance(dt.as_secs_f32());
         self.check_stair_trigger();
+    }
+
+    fn apply_command(&mut self, cmd: &Command) {
+        match cmd {
+            Command::StepPlayer { dx, dy } => self.step_player(*dx, *dy),
+            Command::ResetPlayer => self.reset_player(),
+        }
     }
 }
 
@@ -429,7 +451,13 @@ impl View for MultiZoneView {
         Some(sim.player.zone)
     }
 
-    fn update(&mut self, sim: &Game, _: &mut EngineCtx, dt: Duration) {
+    fn update(
+        &mut self,
+        sim: &Game,
+        _: &mut EngineCtx,
+        _: &mut CommandQueue<Command>,
+        dt: Duration,
+    ) {
         // Re-pin the rig's focus to the player every frame. When the
         // player crosses a stair, `player.position` is the destination
         // zone's local-frame coordinate — yaw/pitch/distance survive
@@ -561,7 +589,13 @@ impl View for MultiZoneView {
         pass.draw_indexed(0..self.cube_index_count, 0, 0..1);
     }
 
-    fn input(&mut self, sim: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _sim: &Game,
+        ctx: &mut EngineCtx,
+        cmds: &mut CommandQueue<Command>,
+        event: &WindowEvent,
+    ) {
         // Route only mouse and scroll events to the rig — the camera
         // follows the player here, so WASD belongs to the player, not
         // the rig's pan handler. Y/X invert toggles still come through
@@ -584,11 +618,17 @@ impl View for MultiZoneView {
         };
         match code {
             KeyCode::Escape => ctx.event_loop.exit(),
-            KeyCode::KeyW | KeyCode::ArrowUp => sim.step_player(0, 1),
-            KeyCode::KeyS | KeyCode::ArrowDown => sim.step_player(0, -1),
-            KeyCode::KeyA | KeyCode::ArrowLeft => sim.step_player(-1, 0),
-            KeyCode::KeyD | KeyCode::ArrowRight => sim.step_player(1, 0),
-            KeyCode::KeyR => sim.reset_player(),
+            KeyCode::KeyW | KeyCode::ArrowUp => cmds.push_now(Command::StepPlayer { dx: 0, dy: 1 }),
+            KeyCode::KeyS | KeyCode::ArrowDown => {
+                cmds.push_now(Command::StepPlayer { dx: 0, dy: -1 })
+            }
+            KeyCode::KeyA | KeyCode::ArrowLeft => {
+                cmds.push_now(Command::StepPlayer { dx: -1, dy: 0 })
+            }
+            KeyCode::KeyD | KeyCode::ArrowRight => {
+                cmds.push_now(Command::StepPlayer { dx: 1, dy: 0 })
+            }
+            KeyCode::KeyR => cmds.push_now(Command::ResetPlayer),
             KeyCode::Digit0 => ctx.clock.set_speed(0.0),
             KeyCode::Digit1 => ctx.clock.set_speed(1.0),
             KeyCode::KeyY => self.rig.config.invert_pitch = !self.rig.config.invert_pitch,
@@ -670,6 +710,40 @@ mod tests {
         }
         assert_eq!(game.player.zone, game.upper);
         assert_eq!(game.current_player_tile(), game.stair_in_upper);
+    }
+
+    /// Replay a hard-coded command sequence through `apply_command` and
+    /// assert the observable state. This is the foundation the issue calls
+    /// out: a recorded command stream replayed from a known start state
+    /// produces a known end state. Replay, save-as-log, scripted tests,
+    /// and (eventually) lockstep networking all build on this seam.
+    #[test]
+    fn command_script_replays_to_known_end_state() {
+        let mut game = Game::new();
+        // Drive the player from the ground starting tile across to the
+        // ground stair tile (4, 4), then tick to fire the transition.
+        let script = [
+            Command::StepPlayer { dx: 1, dy: 0 },
+            Command::StepPlayer { dx: 1, dy: 0 },
+            Command::StepPlayer { dx: 1, dy: 0 },
+            Command::StepPlayer { dx: 1, dy: 0 },
+            Command::StepPlayer { dx: 0, dy: 1 },
+            Command::StepPlayer { dx: 0, dy: 1 },
+            Command::StepPlayer { dx: 0, dy: 1 },
+            Command::StepPlayer { dx: 0, dy: 1 },
+        ];
+        for cmd in &script {
+            game.apply_command(cmd);
+        }
+        assert_eq!(game.current_player_tile(), game.stair_in_ground);
+        game.tick(Duration::from_millis(16));
+        assert_eq!(game.player.zone, game.upper);
+
+        // Reset command undoes everything — player back on the ground
+        // starting tile, all stair state cleared.
+        game.apply_command(&Command::ResetPlayer);
+        assert_eq!(game.player.zone, game.ground);
+        assert_eq!(game.current_player_tile(), TileCoord::new(0, 0));
     }
 
     /// Stepping back onto the upper stair should bounce the player back to

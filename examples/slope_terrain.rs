@@ -34,8 +34,8 @@ use std::time::Duration;
 
 use currawong::glam::{Vec2, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, Liquid, LiquidId, OrbitRig, Renderer, Simulation,
-    SlopeMesher, SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker,
+    Camera, CameraBinding, CommandQueue, EngineCtx, Liquid, LiquidId, OrbitRig, Renderer,
+    Simulation, SlopeMesher, SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker,
     TerrainRenderer, TileCoord, View, ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, wgpu,
     winit,
 };
@@ -113,6 +113,7 @@ impl Game {
 }
 
 impl Simulation for Game {
+    type Command = ();
     fn tick(&mut self, _: Duration) {}
 }
 
@@ -181,7 +182,7 @@ impl View for TerrainView {
         }
     }
 
-    fn update(&mut self, _: &Game, _: &mut EngineCtx, dt: Duration) {
+    fn update(&mut self, _: &Game, _: &mut EngineCtx, _: &mut CommandQueue<()>, dt: Duration) {
         self.rig.update(dt);
         self.rig.apply_to(&mut self.camera);
     }
@@ -269,7 +270,13 @@ impl View for TerrainView {
         }
     }
 
-    fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        event: &WindowEvent,
+    ) {
         self.rig.handle_event(event);
         self.picker.handle_event(event);
 

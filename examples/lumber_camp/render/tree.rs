@@ -18,7 +18,7 @@ use currawong::{
 };
 
 use super::{InlineTemplate, MeshTemplate, new_inline_template};
-use crate::sim::{Designated, Game};
+use crate::sim::Designated;
 
 /// Index of the designation-marker mesh part in every tree's render
 /// template — second part after the body. Stable because
@@ -100,33 +100,17 @@ pub fn update_instance(
     instance.mesh_parts[MARKER_PART].visible = components.get::<Designated>(parent.id).is_some();
 }
 
-/// Toggle a [`Designated`] component on whichever sim object is currently
-/// under the cursor — but only if it's a tree (oak or pine). Pawns and the
-/// lumber camp click through; left-click on those will mean "select" in a
-/// later slice.
-pub fn toggle_designation_under_cursor(sim: &mut Game, hovered: Option<WorldObjectRef>) {
-    let Some(WorldObjectRef { zone, id }) = hovered else {
+/// Emit a [`Command::ToggleDesignation`] for whichever sim object is
+/// currently under the cursor. The view doesn't check whether the target
+/// is a tree — [`Game::apply_command`] re-validates, which is the right
+/// place anyway: a future replay or scripted-test command stream gets the
+/// same validation without round-tripping through the view.
+pub fn emit_toggle_designation(
+    cmds: &mut currawong::CommandQueue<crate::sim::Command>,
+    hovered: Option<WorldObjectRef>,
+) {
+    let Some(target) = hovered else {
         return;
     };
-    // Snapshot the kind id from the immutable side before we take a
-    // mutable borrow of the zone — avoids the borrow checker fight that
-    // a single `zone.components_mut()` then read of `.components()`
-    // would otherwise produce.
-    let is_tree = sim
-        .zones
-        .get(zone)
-        .and_then(|z| z.components().get::<currawong::data::KindId>(id))
-        .map(|k| sim.stats.tree_stats(k).is_some())
-        .unwrap_or(false);
-    if !is_tree {
-        return;
-    }
-    let Some(zone) = sim.zones.get_mut(zone) else {
-        return;
-    };
-    if zone.components().get::<Designated>(id).is_some() {
-        zone.components_mut().remove::<Designated>(id);
-    } else {
-        zone.components_mut().insert(id, Designated);
-    }
+    cmds.push_now(crate::sim::Command::ToggleDesignation { target });
 }

@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{IVec2, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, FlatTopsMesher, HexGrid, Liquid, LiquidId, Renderer,
-    Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, View, ViewConfig,
-    ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
+    Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, HexGrid, Liquid, LiquidId,
+    Renderer, Simulation, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, View,
+    ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -95,6 +95,7 @@ fn axial_distance(a: IVec2, b: IVec2) -> i32 {
 }
 
 impl Simulation for Game {
+    type Command = ();
     fn tick(&mut self, _: Duration) {}
 }
 
@@ -200,7 +201,13 @@ impl View for TerrainView {
         }
     }
 
-    fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        event: &WindowEvent,
+    ) {
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };

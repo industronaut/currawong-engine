@@ -29,9 +29,9 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EmitterReconciler, EmitterTemplate, EngineCtx, InstanceBuckets,
-    ParticleLifecycle, Renderer, Simulation, View, ViewConfig, WorldObjectId, WorldObjectRef,
-    WorldTransform, Zone, Zones, mat4_instance_attributes, wgpu, winit,
+    Camera, CameraBinding, CommandQueue, EmitterReconciler, EmitterTemplate, EngineCtx,
+    InstanceBuckets, ParticleLifecycle, Renderer, Simulation, View, ViewConfig, WorldObjectId,
+    WorldObjectRef, WorldTransform, Zone, Zones, mat4_instance_attributes, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -83,9 +83,26 @@ impl Game {
     }
 }
 
+/// External sim mutations the View can request. Today just one: the user
+/// pressing Space asks for the fire to toggle. `apply_command` resolves
+/// `fire_ref` against current sim state, so the command is primitive (no
+/// reference, no closure).
+#[derive(Debug, Clone)]
+enum Command {
+    ToggleFire,
+}
+
 impl Simulation for Game {
+    type Command = Command;
+
     fn tick(&mut self, dt: Duration) {
         self.elapsed += dt;
+    }
+
+    fn apply_command(&mut self, cmd: &Command) {
+        match cmd {
+            Command::ToggleFire => self.toggle_fire(),
+        }
     }
 }
 
@@ -638,7 +655,13 @@ impl View for CampfireView {
         }
     }
 
-    fn input(&mut self, sim: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _sim: &Game,
+        ctx: &mut EngineCtx,
+        cmds: &mut CommandQueue<Command>,
+        event: &WindowEvent,
+    ) {
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };
@@ -650,7 +673,7 @@ impl View for CampfireView {
         };
         match code {
             KeyCode::Escape => ctx.event_loop.exit(),
-            KeyCode::Space => sim.toggle_fire(),
+            KeyCode::Space => cmds.push_now(Command::ToggleFire),
             KeyCode::Digit0 => ctx.clock.set_speed(0.0),
             KeyCode::Digit1 => ctx.clock.set_speed(1.0),
             KeyCode::Digit2 => ctx.clock.set_speed(2.0),

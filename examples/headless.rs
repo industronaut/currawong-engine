@@ -51,6 +51,7 @@ impl Game {
 }
 
 impl Simulation for Game {
+    type Command = ();
     fn tick(&mut self, dt: Duration) {
         self.elapsed += dt;
         let dx = dt.as_secs_f32();

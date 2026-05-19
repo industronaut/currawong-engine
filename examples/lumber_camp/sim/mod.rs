@@ -30,7 +30,9 @@ use std::time::Duration;
 
 use currawong::data::{Definitions, KindId};
 use currawong::glam::{Quat, Vec3};
-use currawong::{Simulation, TileCoord, WorldObjectId, WorldTransform, Zone, ZoneId, Zones};
+use currawong::{
+    Simulation, TileCoord, WorldObjectId, WorldObjectRef, WorldTransform, Zone, ZoneId, Zones,
+};
 use serde::Deserialize;
 
 // Re-export only what the view consumes today; everything else stays
@@ -271,7 +273,52 @@ fn spawn_tree(zone: &mut Zone, x: f32, y: f32, kind: &KindId) {
     zone.components_mut().insert(tree, kind.clone());
 }
 
+/// External sim mutations the player can request. Today there's one —
+/// toggling a chop designation on a tree by left-clicking it — but this is
+/// the place new player verbs land (order rally, pause-individual-pawn,
+/// cancel-order, …). Commands carry only the ids they need so they
+/// serialise as plain data; resolution against current sim state happens
+/// inside [`Game::apply_command`].
+#[derive(Debug, Clone)]
+pub enum Command {
+    /// Toggle a chop designation on the targeted object. No-op if the
+    /// target isn't a tree (the view filters before pushing, but
+    /// `apply_command` re-validates so a recorded command stream replays
+    /// safely against a possibly-altered sim).
+    ToggleDesignation { target: WorldObjectRef },
+}
+
 impl Simulation for Game {
+    type Command = Command;
+
+    fn apply_command(&mut self, cmd: &Command) {
+        match cmd {
+            Command::ToggleDesignation { target } => {
+                let WorldObjectRef { zone, id } = *target;
+                // Snapshot the kind id from the immutable side before
+                // taking a mutable borrow — same shape the original
+                // toggle helper used.
+                let is_tree = self
+                    .zones
+                    .get(zone)
+                    .and_then(|z| z.components().get::<KindId>(id))
+                    .map(|k| self.stats.tree_stats(k).is_some())
+                    .unwrap_or(false);
+                if !is_tree {
+                    return;
+                }
+                let Some(zone) = self.zones.get_mut(zone) else {
+                    return;
+                };
+                if zone.components().get::<Designated>(id).is_some() {
+                    zone.components_mut().remove::<Designated>(id);
+                } else {
+                    zone.components_mut().insert(id, Designated);
+                }
+            }
+        }
+    }
+
     fn tick(&mut self, dt: Duration) {
         if self.state != GameState::Playing {
             // Freeze gameplay on win/lose: no pawn motion, no chop ticks,

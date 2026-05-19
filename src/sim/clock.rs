@@ -76,6 +76,14 @@ impl SimClock {
         self.total_ticks
     }
 
+    /// Current sim tick — alias for [`total_ticks`](Self::total_ticks) named
+    /// for the [`Command`](crate::Simulation::Command) flow. `u64` because
+    /// at 60 Hz a `u32` runs out at ~828 days of accumulated playtime, which
+    /// sim-game saves can plausibly reach across sessions.
+    pub fn tick(&self) -> u64 {
+        self.total_ticks
+    }
+
     /// Total simulated time elapsed (`total_ticks * tick_period`). Differs
     /// from wall time when speed is not 1.0.
     pub fn sim_time(&self) -> Duration {
