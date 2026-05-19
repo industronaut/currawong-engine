@@ -37,7 +37,7 @@ use std::time::Duration;
 use currawong::data::{FsSource, Vfs, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Camera, CameraBinding, EngineCtx, Handle, HandleState, Mesh,
+    Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Handle, HandleState, Mesh,
     MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
     Renderer, SamplerKind, SamplerRegistry, Simulation, Texture, TextureColorSpace, View,
     ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
@@ -72,6 +72,7 @@ impl Game {
 }
 
 impl Simulation for Game {
+    type Command = ();
     fn tick(&mut self, dt: Duration) {
         let day_seconds = 90.0;
         self.time_of_day = (self.time_of_day + dt.as_secs_f32() / day_seconds).rem_euclid(1.0);
@@ -246,7 +247,13 @@ impl View for AssetsView {
         }
     }
 
-    fn update(&mut self, _sim: &Game, _ctx: &mut EngineCtx, _dt: Duration) {
+    fn update(
+        &mut self,
+        _sim: &Game,
+        _ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        _dt: Duration,
+    ) {
         if !self.hint_logged {
             println!("assets demo: hold F to force the magenta fallback, Esc to quit");
             self.hint_logged = true;
@@ -357,7 +364,13 @@ impl View for AssetsView {
         }
     }
 
-    fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        event: &WindowEvent,
+    ) {
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };

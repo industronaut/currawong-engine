@@ -52,10 +52,10 @@ use std::time::Instant;
 use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, CellHighlight, EngineCtx, FlatTopsMesher, Frustum, HitTarget,
-    InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshInstanceAttribs, MeshPart,
-    OrbitRig, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKey,
-    SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker, TerrainRenderer,
+    Camera, CameraBinding, CellHighlight, CommandQueue, EngineCtx, FlatTopsMesher, Frustum,
+    HitTarget, InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshInstanceAttribs,
+    MeshPart, OrbitRig, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation,
+    SlotKey, SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker, TerrainRenderer,
     TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig, WorldObjectId,
     WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
 };
@@ -138,6 +138,7 @@ impl Game {
 }
 
 impl Simulation for Game {
+    type Command = ();
     fn tick(&mut self, _: Duration) {
         for (_, zone) in self.zones.iter_mut() {
             // Snapshot ids first — `get_mut` would conflict with the iter borrow.
@@ -334,7 +335,7 @@ impl View for Demo {
         }
     }
 
-    fn update(&mut self, _: &Game, _: &mut EngineCtx, dt: Duration) {
+    fn update(&mut self, _: &Game, _: &mut EngineCtx, _: &mut CommandQueue<()>, dt: Duration) {
         // Integrate held-WASD pan + held rotation against wall-clock dt so
         // panning keeps working at sim speed 0 — see camera_rig docs.
         self.rig.update(dt);
@@ -510,7 +511,13 @@ impl View for Demo {
         self.last_draws = draws;
     }
 
-    fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        event: &WindowEvent,
+    ) {
         // Both helpers see every event. The rig consumes mouse-buttons /
         // scroll / WASD; the picker filters to CursorMoved / CursorLeft.
         // Each ignores what it doesn't care about, so order doesn't matter.
@@ -537,7 +544,13 @@ impl View for Demo {
     }
 
     #[cfg(feature = "egui")]
-    fn ui(&mut self, _: &mut Game, ctx: &mut EngineCtx, egui_ctx: &egui::Context) {
+    fn ui(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        egui_ctx: &egui::Context,
+    ) {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;

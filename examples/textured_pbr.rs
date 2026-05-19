@@ -32,7 +32,7 @@ use currawong::data::Vfs;
 use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    AssetServer, Camera, CameraBinding, EngineCtx, Handle, InstanceBuckets,
+    AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Handle, InstanceBuckets,
     MaterialInstanceRegistry, MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance,
     PbrMaterialParams, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, SimEnvironment,
     Simulation, Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldTransform,
@@ -97,9 +97,27 @@ impl Game {
     }
 }
 
+/// External mutations the debug UI can perform on the sim. Today there's
+/// one — dragging the time-of-day slider in the egui overlay. New variants
+/// land as more debug knobs need to drive sim state.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "egui"), allow(dead_code))]
+enum Command {
+    /// Set [`SimEnvironment::time_of_day`] to the given `[0, 1)` value.
+    SetTimeOfDay(f32),
+}
+
 impl Simulation for Game {
+    type Command = Command;
+
     fn tick(&mut self, dt: Duration) {
         self.env.advance(dt.as_secs_f32());
+    }
+
+    fn apply_command(&mut self, cmd: &Command) {
+        match cmd {
+            Command::SetTimeOfDay(t) => self.env.time_of_day = t.rem_euclid(1.0),
+        }
     }
 }
 
@@ -330,7 +348,13 @@ impl View for TexturedPbr {
         }
     }
 
-    fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<Command>,
+        event: &WindowEvent,
+    ) {
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };
@@ -355,7 +379,13 @@ impl View for TexturedPbr {
     }
 
     #[cfg(feature = "egui")]
-    fn ui(&mut self, sim: &mut Game, ctx: &mut EngineCtx, egui_ctx: &egui::Context) {
+    fn ui(
+        &mut self,
+        sim: &Game,
+        ctx: &mut EngineCtx,
+        cmds: &mut CommandQueue<Command>,
+        egui_ctx: &egui::Context,
+    ) {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -394,11 +424,20 @@ impl View for TexturedPbr {
                 ui.separator();
 
                 ui.label(format!("day: {}", sim.env.day));
-                ui.add(
-                    egui::Slider::new(&mut sim.env.time_of_day, 0.0..=1.0)
+                // Slider drives a local copy; if egui reports the user
+                // changed it, emit a Command. Avoids holding `&mut sim`
+                // inside the UI closure (sim mutation lives behind
+                // `apply_command`) and decouples the frame the slider was
+                // dragged on from the tick the change applies on.
+                let mut time_of_day = sim.env.time_of_day;
+                let response = ui.add(
+                    egui::Slider::new(&mut time_of_day, 0.0..=1.0)
                         .text("time of day")
                         .custom_formatter(|v, _| format_time_of_day(v as f32)),
                 );
+                if response.changed() {
+                    cmds.push_now(Command::SetTimeOfDay(time_of_day));
+                }
                 let sun = sun_direction_for(sim.env.time_of_day);
                 ui.label(format!(
                     "sun dir: ({:+.2}, {:+.2}, {:+.2})",

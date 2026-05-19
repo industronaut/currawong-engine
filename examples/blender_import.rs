@@ -58,10 +58,10 @@ use std::time::Duration;
 use currawong::data::{FsSource, Vfs, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Camera, CameraBinding, EngineCtx, Handle, MaterialId, MaterialRegistry,
-    Mesh, MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance, PbrMaterialParams,
-    Renderer, SamplerKind, SamplerRegistry, Simulation, Texture, View, ViewConfig, ViewEnvironment,
-    Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Handle, MaterialId,
+    MaterialRegistry, Mesh, MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance,
+    PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry, Simulation, Texture, View,
+    ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -91,6 +91,7 @@ impl Game {
 }
 
 impl Simulation for Game {
+    type Command = ();
     fn tick(&mut self, dt: Duration) {
         let day_seconds = 180.0;
         self.time_of_day = (self.time_of_day + dt.as_secs_f32() / day_seconds).rem_euclid(1.0);
@@ -275,7 +276,13 @@ impl View for BlenderImportView {
         }
     }
 
-    fn update(&mut self, _sim: &Game, _ctx: &mut EngineCtx, dt: Duration) {
+    fn update(
+        &mut self,
+        _sim: &Game,
+        _ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        dt: Duration,
+    ) {
         self.rig.update(dt);
         self.rig.apply_to(&mut self.camera);
 
@@ -364,7 +371,13 @@ impl View for BlenderImportView {
         }
     }
 
-    fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        event: &WindowEvent,
+    ) {
         self.rig.handle_event(event);
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;

@@ -45,8 +45,8 @@ use std::time::Duration;
 use currawong::data::{Definitions, KindId, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Camera, CameraBinding, EngineCtx, FlatTopsMesher, Frustum, Handle,
-    HitTarget, InstanceBuckets, LiveRenderObjects, MaterialId, MaterialRegistry,
+    Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, Frustum,
+    Handle, HitTarget, InstanceBuckets, LiveRenderObjects, MaterialId, MaterialRegistry,
     MeshInstanceAttribs, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance,
     PbrAtlasMaterialParams, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
     RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
@@ -59,7 +59,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 
 use pawn::PawnRenderer;
 
-use crate::sim::{Game, GameState, HEIGHT_UNIT, TILE_SIZE, TIME_LIMIT_SECS, WOOD_GOAL};
+use crate::sim::{Command, Game, GameState, HEIGHT_UNIT, TILE_SIZE, TIME_LIMIT_SECS, WOOD_GOAL};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -464,7 +464,13 @@ impl View for LumberCampView {
         }
     }
 
-    fn update(&mut self, sim: &Game, ctx: &mut EngineCtx, dt: Duration) {
+    fn update(
+        &mut self,
+        sim: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<Command>,
+        dt: Duration,
+    ) {
         // Wall-clock rig integration so held-WASD pan and zoom keep working
         // independently of sim speed.
         self.rig.update(dt);
@@ -679,7 +685,13 @@ impl View for LumberCampView {
         }
     }
 
-    fn input(&mut self, sim: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _sim: &Game,
+        ctx: &mut EngineCtx,
+        cmds: &mut CommandQueue<Command>,
+        event: &WindowEvent,
+    ) {
         self.rig.handle_event(event);
         match event {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
@@ -699,12 +711,12 @@ impl View for LumberCampView {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => tree::toggle_designation_under_cursor(sim, self.hovered),
+            } => tree::emit_toggle_designation(cmds, self.hovered),
             _ => {}
         }
     }
 
-    fn game_ui(&mut self, sim: &mut Game, ctx: &mut EngineCtx) {
+    fn game_ui(&mut self, sim: &Game, ctx: &mut EngineCtx, _: &mut CommandQueue<Command>) {
         // Top-left status panel: wood progress + countdown. Always present
         // so the player sees the goal even after winning.
         let wood = sim.wood_count();

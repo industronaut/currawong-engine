@@ -9,7 +9,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use crate::sim::{SimClock, Simulation};
+use crate::sim::{CommandQueue, SimClock, Simulation};
 
 #[cfg(feature = "egui")]
 use super::debug_ui::DebugUi;
@@ -33,6 +33,7 @@ pub fn run_with_clock<V: View>(sim: V::Sim, clock: SimClock) {
         sim: Some(sim),
         clock: Some(clock),
         state: None,
+        cmds: Some(CommandQueue::new()),
     };
     event_loop
         .run_app(&mut handler)
@@ -42,6 +43,7 @@ pub fn run_with_clock<V: View>(sim: V::Sim, clock: SimClock) {
 struct Handler<V: View> {
     sim: Option<V::Sim>,
     clock: Option<SimClock>,
+    cmds: Option<CommandQueue<<V::Sim as Simulation>::Command>>,
     state: Option<RunState<V>>,
 }
 
@@ -50,6 +52,7 @@ struct RunState<V: View> {
     view: V,
     sim: V::Sim,
     clock: SimClock,
+    cmds: CommandQueue<<V::Sim as Simulation>::Command>,
     last_redraw: Instant,
     /// Latest cursor position in physical pixels; `None` while the cursor
     /// is outside the window. Drives the per-frame hit-ID readback
@@ -81,11 +84,14 @@ impl<V: View> ApplicationHandler for Handler<V> {
         let view = V::init(&renderer);
         let sim = self.sim.take().expect("simulation already taken");
         let clock = self.clock.take().expect("clock already taken");
+        let mut cmds = self.cmds.take().expect("command queue already taken");
+        cmds.set_current_tick(clock.tick());
         self.state = Some(RunState {
             renderer,
             view,
             sim,
             clock,
+            cmds,
             last_redraw: Instant::now(),
             cursor_px: None,
             #[cfg(feature = "egui")]
@@ -124,7 +130,9 @@ impl<V: View> ApplicationHandler for Handler<V> {
                 event_loop,
                 clock: &mut state.clock,
             };
-            state.view.input(&mut state.sim, &mut ctx, &event);
+            state
+                .view
+                .input(&state.sim, &mut ctx, &mut state.cmds, &event);
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -150,11 +158,29 @@ impl<V: View> ApplicationHandler for Handler<V> {
                 let wall_dt = now - state.last_redraw;
                 state.last_redraw = now;
 
-                let ticks = state.clock.advance(wall_dt);
+                let pending = state.clock.advance(wall_dt);
                 let tick_period = state.clock.tick_period();
-                for _ in 0..ticks {
-                    state.sim.tick(tick_period);
+                // After `advance`, the clock counts the ticks the engine
+                // *should* have fired; the sim hasn't actually ticked yet,
+                // so we replay them here. Per tick: bump the queue's
+                // current tick, drain commands that ready'd at or before
+                // it, then `sim.tick`. The drain seam is the single point
+                // where external mutations land on `Sim`, mirroring
+                // `Simulation::apply_command`'s contract.
+                let total_after_advance = state.clock.tick();
+                for i in 0..pending {
+                    let sim_tick = total_after_advance - pending as u64 + (i + 1) as u64;
+                    let sim = &mut state.sim;
+                    state.cmds.set_current_tick(sim_tick);
+                    state
+                        .cmds
+                        .drain_ready(sim_tick, |cmd| sim.apply_command(&cmd));
+                    sim.tick(tick_period);
                 }
+                // Keep the queue's notion of "now" up to date even on frames
+                // that fired zero ticks, so `push_now` during input events
+                // between frames stamps with the latest known tick.
+                state.cmds.set_current_tick(state.clock.tick());
                 // View-side per-frame update, driven by wall-clock dt rather
                 // than sim time so view animation (camera rigs, UI tweens, …)
                 // keeps moving when the sim is paused.
@@ -163,7 +189,9 @@ impl<V: View> ApplicationHandler for Handler<V> {
                         event_loop,
                         clock: &mut state.clock,
                     };
-                    state.view.update(&state.sim, &mut ctx, wall_dt);
+                    state
+                        .view
+                        .update(&state.sim, &mut ctx, &mut state.cmds, wall_dt);
                 }
                 let alpha = state.clock.alpha();
                 render_frame::<V>(state, event_loop, alpha);
@@ -238,8 +266,9 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
     #[cfg(feature = "yakui")]
     yakui_overlay::<V>(
         &mut state.view,
-        &mut state.sim,
+        &state.sim,
         &mut ctx,
+        &mut state.cmds,
         &state.renderer,
         &mut state.game_ui,
         &mut frame,
@@ -247,8 +276,9 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
     #[cfg(feature = "egui")]
     egui_overlay::<V>(
         &mut state.view,
-        &mut state.sim,
+        &state.sim,
         &mut ctx,
+        &mut state.cmds,
         &state.renderer,
         &mut state.debug_ui,
         &mut frame,
@@ -377,14 +407,15 @@ fn main_pass<V: View>(
 #[cfg(feature = "yakui")]
 fn yakui_overlay<V: View>(
     view: &mut V,
-    sim: &mut V::Sim,
+    sim: &V::Sim,
     ctx: &mut EngineCtx,
+    cmds: &mut CommandQueue<<V::Sim as Simulation>::Command>,
     renderer: &Renderer,
     game_ui: &mut GameUi,
     frame: &mut Frame,
 ) {
     game_ui.run_and_render(renderer, &mut frame.encoder, &frame.view_tex, || {
-        view.game_ui(sim, ctx);
+        view.game_ui(sim, ctx, cmds);
     });
 }
 
@@ -395,15 +426,16 @@ fn yakui_overlay<V: View>(
 #[cfg(feature = "egui")]
 fn egui_overlay<V: View>(
     view: &mut V,
-    sim: &mut V::Sim,
+    sim: &V::Sim,
     ctx: &mut EngineCtx,
+    cmds: &mut CommandQueue<<V::Sim as Simulation>::Command>,
     renderer: &Renderer,
     debug_ui: &mut DebugUi,
     frame: &mut Frame,
 ) {
     let staging =
         debug_ui.run_and_render(renderer, &mut frame.encoder, &frame.view_tex, |egui_ctx| {
-            view.ui(sim, ctx, egui_ctx);
+            view.ui(sim, ctx, cmds, egui_ctx);
         });
     frame.pre_submit.extend(staging);
 }

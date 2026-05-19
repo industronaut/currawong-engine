@@ -5,7 +5,7 @@ use std::time::Duration;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 
-use crate::sim::{SimClock, Simulation, ZoneId};
+use crate::sim::{CommandQueue, SimClock, Simulation, ZoneId};
 
 use super::environment::ViewEnvironment;
 use super::renderer::Renderer;
@@ -72,8 +72,15 @@ impl Default for ViewConfig {
 /// A view onto a [`Simulation`].
 ///
 /// `render` receives `&Sim` (read-only), so the rendering path is structurally
-/// prevented from mutating the simulation. `input` receives `&mut Sim` so
-/// user-driven actions (clicks, key presses) can drive sim changes.
+/// prevented from mutating the simulation. `input`, `update`, `ui`, and
+/// `game_ui` also receive `&Sim` — sim mutation never goes through any view
+/// callback directly. User-driven actions emit
+/// [`Command`](crate::sim::Simulation::Command) values into a [`CommandQueue`]
+/// instead; the engine drains the queue at sim tick boundaries and calls
+/// [`Simulation::apply_command`](crate::sim::Simulation::apply_command) once
+/// per command. Reifying mutations like this is what unlocks replay,
+/// deterministic testing, command-script tests, and (later) lockstep
+/// networking.
 ///
 /// `init` runs once after the GPU is ready (build pipelines, load assets).
 /// Static window + render-target settings live on the [`CONFIG`](Self::CONFIG)
@@ -109,8 +116,18 @@ pub trait View: 'static {
         let _ = (sim, alpha, renderer, pass);
     }
 
-    fn input(&mut self, sim: &mut Self::Sim, ctx: &mut EngineCtx, event: &WindowEvent) {
-        let _ = (sim, ctx, event);
+    /// Handle a window event. Push
+    /// [`Command`](crate::sim::Simulation::Command) values into `cmds` for
+    /// any user-driven sim mutation; the engine applies them at the next
+    /// tick boundary.
+    fn input(
+        &mut self,
+        sim: &Self::Sim,
+        ctx: &mut EngineCtx,
+        cmds: &mut CommandQueue<<Self::Sim as Simulation>::Command>,
+        event: &WindowEvent,
+    ) {
+        let _ = (sim, ctx, cmds, event);
     }
 
     /// Per-frame view-side update, called by the engine once per frame just
@@ -121,23 +138,37 @@ pub trait View: 'static {
     /// camera-rig integration (held-key WASD pan), UI tweens, or view-side
     /// particle simulation.
     ///
-    /// `sim` is read-only by signature, mirroring `render`: sim-mutating user
-    /// actions belong in [`input`](Self::input) or [`ui`](Self::ui).
+    /// `sim` is read-only by signature, mirroring `render`. Continuous
+    /// interactions (drag-to-paint, held-key intents) coalesce into one
+    /// [`Command`](crate::sim::Simulation::Command) at stroke end and push
+    /// into `cmds`.
     ///
     /// Default no-op; opt in by overriding.
-    fn update(&mut self, sim: &Self::Sim, ctx: &mut EngineCtx, dt: Duration) {
-        let _ = (sim, ctx, dt);
+    fn update(
+        &mut self,
+        sim: &Self::Sim,
+        ctx: &mut EngineCtx,
+        cmds: &mut CommandQueue<<Self::Sim as Simulation>::Command>,
+        dt: Duration,
+    ) {
+        let _ = (sim, ctx, cmds, dt);
     }
 
     /// Build the per-frame debug UI. Called once per frame after `render`,
-    /// with the engine's `egui::Context`. Mirrors `input`'s mutability:
-    /// widgets can read sim state and drive sim/engine changes (pause,
-    /// speed change, exit) via `ctx`.
+    /// with the engine's `egui::Context`. Widgets read sim state through
+    /// `&Self::Sim` and push commands into `cmds` for any sim-mutating
+    /// action (speed change, scenario reset, time-of-day slider, …).
     ///
     /// Default no-op; opt in by overriding. Behind the `egui` feature.
     #[cfg(feature = "egui")]
-    fn ui(&mut self, sim: &mut Self::Sim, ctx: &mut EngineCtx, egui_ctx: &egui::Context) {
-        let _ = (sim, ctx, egui_ctx);
+    fn ui(
+        &mut self,
+        sim: &Self::Sim,
+        ctx: &mut EngineCtx,
+        cmds: &mut CommandQueue<<Self::Sim as Simulation>::Command>,
+        egui_ctx: &egui::Context,
+    ) {
+        let _ = (sim, ctx, cmds, egui_ctx);
     }
 
     /// Build the per-frame game UI with yakui. Called once per frame after
@@ -145,15 +176,20 @@ pub trait View: 'static {
     /// (`yakui::widgets::*`, `yakui::label`, `yakui::button`, …) attach to the
     /// engine's `Yakui` state via yakui's thread-local context.
     ///
-    /// Mirrors `input`'s mutability: widgets can read sim state and drive
-    /// sim/engine changes via `ctx`.
+    /// Same mutability contract as [`ui`](Self::ui): widgets read sim
+    /// state and push commands for any sim-mutating action.
     ///
     /// Default no-op; opt in by overriding. Behind the `yakui` feature.
     /// Independent of [`ui`](Self::ui) — both can be implemented when both
     /// `egui` and `yakui` features are enabled.
     #[cfg(feature = "yakui")]
-    fn game_ui(&mut self, sim: &mut Self::Sim, ctx: &mut EngineCtx) {
-        let _ = (sim, ctx);
+    fn game_ui(
+        &mut self,
+        sim: &Self::Sim,
+        ctx: &mut EngineCtx,
+        cmds: &mut CommandQueue<<Self::Sim as Simulation>::Command>,
+    ) {
+        let _ = (sim, ctx, cmds);
     }
 
     /// Which zone the camera is currently looking at, if any. The engine

@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
+    Camera, CameraBinding, CommandQueue, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
     MeshInstanceAttribs, Renderer, Simulation, UnlitColoredInstance, UnlitColoredMaterial, View,
     ViewConfig, WorldTransform, Zone, Zones, wgpu, winit,
 };
@@ -85,6 +85,7 @@ impl Game {
 }
 
 impl Simulation for Game {
+    type Command = ();
     fn tick(&mut self, _: std::time::Duration) {}
 }
 
@@ -237,7 +238,13 @@ impl View for Materials {
         }
     }
 
-    fn input(&mut self, _: &mut Game, ctx: &mut EngineCtx, event: &WindowEvent) {
+    fn input(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<()>,
+        event: &WindowEvent,
+    ) {
         let WindowEvent::KeyboardInput { event, .. } = event else {
             return;
         };
