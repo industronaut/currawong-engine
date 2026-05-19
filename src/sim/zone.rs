@@ -5,32 +5,29 @@
 //! data. Movement between zones is a storage operation — the engine provides
 //! no cross-zone positional math.
 
-use glam::{Quat, Vec3};
-
 use super::components::Components;
+use super::facing::Facing;
 use super::grid::{Grid, SquareGrid};
 use super::slot_map::{SlotKey, SlotMap};
 use super::terrain::Terrain;
+use super::units::SimPos;
 
-/// Per-object spatial state — position and rotation.
+/// Per-object spatial state — position and yaw-only facing.
 ///
 /// This is *only* the transform of an object in a zone. Richer payloads
 /// (kind, behaviour, attached data) are added by the caller in their own
 /// [`Simulation`](crate::Simulation) impl — usually as [`Components`]
 /// entries keyed by [`WorldObjectId`], or as parallel storage.
-#[derive(Clone, Copy)]
+///
+/// Both fields are integer-backed for determinism: [`SimPos`] is Q16.16
+/// fixed-point and [`Facing`] is a wrapping `u16` angle. View-side code
+/// converts these to `glam::Vec3` / `glam::Quat` at extract time. The
+/// rotation field is called `facing` rather than `rotation` to reflect the
+/// constraint — sim objects rotate around Z only, not freely in 3D.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct WorldTransform {
-    pub position: Vec3,
-    pub rotation: Quat,
-}
-
-impl Default for WorldTransform {
-    fn default() -> Self {
-        Self {
-            position: Vec3::ZERO,
-            rotation: Quat::IDENTITY,
-        }
-    }
+    pub position: SimPos,
+    pub facing: Facing,
 }
 
 /// Stable handle to an object within its owning [`Zone`].
@@ -267,11 +264,12 @@ impl WorldObjectRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::units::SimUnit;
 
-    fn obj(x: f32) -> WorldTransform {
+    fn obj(x: i32) -> WorldTransform {
         WorldTransform {
-            position: Vec3::new(x, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
+            position: SimPos::tile(x, 0, 0),
+            facing: Facing::ZERO,
         }
     }
 
@@ -280,18 +278,18 @@ mod tests {
     #[test]
     fn insert_then_get() {
         let mut z = Zone::new();
-        let a = z.insert(obj(1.0));
+        let a = z.insert(obj(1));
         assert_eq!(z.len(), 1);
         assert!(z.contains(a));
-        assert_eq!(z.get(a).unwrap().position.x, 1.0);
+        assert_eq!(z.get(a).unwrap().position.x, SimUnit::from_num(1));
     }
 
     #[test]
     fn remove_invalidates_id() {
         let mut z = Zone::new();
-        let a = z.insert(obj(1.0));
+        let a = z.insert(obj(1));
         let removed = z.remove(a).unwrap();
-        assert_eq!(removed.position.x, 1.0);
+        assert_eq!(removed.position.x, SimUnit::from_num(1));
         assert!(!z.contains(a));
         assert!(z.get(a).is_none());
         assert_eq!(z.len(), 0);
@@ -301,22 +299,22 @@ mod tests {
     #[test]
     fn slot_reuse_bumps_generation() {
         let mut z = Zone::new();
-        let a = z.insert(obj(1.0));
+        let a = z.insert(obj(1));
         z.remove(a);
-        let b = z.insert(obj(2.0));
+        let b = z.insert(obj(2));
         assert_eq!(a.index(), b.index(), "slot index reused");
         assert_ne!(a.generation(), b.generation(), "generation bumped");
         assert!(!z.contains(a), "old id is stale");
         assert!(z.contains(b), "new id is valid");
-        assert_eq!(z.get(b).unwrap().position.x, 2.0);
+        assert_eq!(z.get(b).unwrap().position.x, SimUnit::from_num(2));
     }
 
     #[test]
     fn iter_visits_only_live_objects() {
         let mut z = Zone::new();
-        let a = z.insert(obj(1.0));
-        let b = z.insert(obj(2.0));
-        let c = z.insert(obj(3.0));
+        let a = z.insert(obj(1));
+        let b = z.insert(obj(2));
+        let c = z.insert(obj(3));
         z.remove(b);
         let ids: Vec<_> = z.iter().map(|(id, _)| id).collect();
         assert_eq!(ids.len(), 2);
@@ -328,24 +326,24 @@ mod tests {
     #[test]
     fn iter_mut_can_modify_in_place() {
         let mut z = Zone::new();
-        let a = z.insert(obj(0.0));
+        let a = z.insert(obj(0));
         for (_, o) in z.iter_mut() {
-            o.position.x += 5.0;
+            o.position.x += SimUnit::from_num(5);
         }
-        assert_eq!(z.get(a).unwrap().position.x, 5.0);
+        assert_eq!(z.get(a).unwrap().position.x, SimUnit::from_num(5));
     }
 
     #[test]
     fn free_list_chains_multiple_removes() {
         let mut z = Zone::new();
-        let a = z.insert(obj(1.0));
-        let b = z.insert(obj(2.0));
-        let c = z.insert(obj(3.0));
+        let a = z.insert(obj(1));
+        let b = z.insert(obj(2));
+        let c = z.insert(obj(3));
         z.remove(a);
         z.remove(b);
-        let d = z.insert(obj(4.0));
-        let e = z.insert(obj(5.0));
-        let f = z.insert(obj(6.0));
+        let d = z.insert(obj(4));
+        let e = z.insert(obj(5));
+        let f = z.insert(obj(6));
         assert_eq!(z.len(), 4);
         for id in [c, d, e, f] {
             assert!(z.contains(id));
@@ -360,10 +358,10 @@ mod tests {
     fn nested_slot_maps_compose() {
         let mut zones = Zones::new();
         let zone_id = zones.insert(Zone::new());
-        let obj_id = zones.get_mut(zone_id).unwrap().insert(obj(7.0));
+        let obj_id = zones.get_mut(zone_id).unwrap().insert(obj(7));
         assert_eq!(
             zones.get(zone_id).unwrap().get(obj_id).unwrap().position.x,
-            7.0
+            SimUnit::from_num(7)
         );
     }
 
@@ -371,26 +369,26 @@ mod tests {
     fn world_object_ref_resolves() {
         let mut zones = Zones::new();
         let zone = zones.insert(Zone::new());
-        let id = zones.get_mut(zone).unwrap().insert(obj(3.5));
+        let id = zones.get_mut(zone).unwrap().insert(obj(3));
         let r = WorldObjectRef { zone, id };
-        assert_eq!(r.resolve(&zones).unwrap().position.x, 3.5);
+        assert_eq!(r.resolve(&zones).unwrap().position.x, SimUnit::from_num(3));
     }
 
     #[test]
     fn world_object_ref_resolve_mut() {
         let mut zones = Zones::new();
         let zone = zones.insert(Zone::new());
-        let id = zones.get_mut(zone).unwrap().insert(obj(0.0));
+        let id = zones.get_mut(zone).unwrap().insert(obj(0));
         let r = WorldObjectRef { zone, id };
-        r.resolve_mut(&mut zones).unwrap().position.x = 9.0;
-        assert_eq!(r.resolve(&zones).unwrap().position.x, 9.0);
+        r.resolve_mut(&mut zones).unwrap().position.x = SimUnit::from_num(9);
+        assert_eq!(r.resolve(&zones).unwrap().position.x, SimUnit::from_num(9));
     }
 
     #[test]
     fn ref_with_stale_zone_returns_none() {
         let mut zones = Zones::new();
         let zone = zones.insert(Zone::new());
-        let id = zones.get_mut(zone).unwrap().insert(obj(1.0));
+        let id = zones.get_mut(zone).unwrap().insert(obj(1));
         let r = WorldObjectRef { zone, id };
         zones.remove(zone);
         assert!(r.resolve(&zones).is_none());
@@ -400,7 +398,7 @@ mod tests {
     fn ref_with_stale_object_id_returns_none() {
         let mut zones = Zones::new();
         let zone = zones.insert(Zone::new());
-        let id = zones.get_mut(zone).unwrap().insert(obj(1.0));
+        let id = zones.get_mut(zone).unwrap().insert(obj(1));
         let r = WorldObjectRef { zone, id };
         zones.get_mut(zone).unwrap().remove(id);
         assert!(r.resolve(&zones).is_none());
@@ -412,36 +410,36 @@ mod tests {
         struct Health(u32);
 
         let mut z = Zone::new();
-        let a = z.insert(obj(0.0));
+        let a = z.insert(obj(0));
         z.components_mut().insert(a, Health(7));
 
         let (mut objects, components) = z.split_mut();
         for (id, h) in components.iter::<Health>() {
             if let Some(o) = objects.get_mut(id) {
-                o.position.x = h.0 as f32;
+                o.position.x = SimUnit::from_num(h.0 as i32);
             }
         }
-        assert_eq!(z.get(a).unwrap().position.x, 7.0);
+        assert_eq!(z.get(a).unwrap().position.x, SimUnit::from_num(7));
     }
 
     #[test]
     fn world_objects_mut_supports_iter_mut() {
         let mut z = Zone::new();
-        let a = z.insert(obj(1.0));
-        let b = z.insert(obj(2.0));
+        let a = z.insert(obj(1));
+        let b = z.insert(obj(2));
         let (mut objects, _components) = z.split_mut();
         for (_, o) in objects.iter_mut() {
-            o.position.x += 10.0;
+            o.position.x += SimUnit::from_num(10);
         }
-        assert_eq!(z.get(a).unwrap().position.x, 11.0);
-        assert_eq!(z.get(b).unwrap().position.x, 12.0);
+        assert_eq!(z.get(a).unwrap().position.x, SimUnit::from_num(11));
+        assert_eq!(z.get(b).unwrap().position.x, SimUnit::from_num(12));
     }
 
     #[test]
     fn world_objects_mut_reports_len() {
         let mut z = Zone::new();
-        z.insert(obj(1.0));
-        z.insert(obj(2.0));
+        z.insert(obj(1));
+        z.insert(obj(2));
         let (objects, _components) = z.split_mut();
         assert_eq!(objects.len(), 2);
         assert!(!objects.is_empty());

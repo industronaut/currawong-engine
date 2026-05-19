@@ -32,11 +32,11 @@ use currawong::data::Vfs;
 use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Handle, InstanceBuckets,
+    AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, Handle, InstanceBuckets,
     MaterialInstanceRegistry, MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance,
     PbrMaterialParams, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, SimEnvironment,
-    Simulation, Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldTransform,
-    Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    SimPos, SimUnit, Simulation, Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment,
+    WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -75,19 +75,19 @@ impl Game {
 
         // Five cubes along the X axis, evenly spaced.
         for (i, &mat) in ALL_MATERIALS.iter().enumerate() {
-            let x = (i as f32 - 2.0) * 1.5;
+            let x = SimUnit::from_num(i as i32 - 2) * SimUnit::from_num(1.5);
             let id = zone.insert(WorldTransform {
-                position: Vec3::new(x, 0.0, 0.5),
-                rotation: Quat::IDENTITY,
+                position: SimPos::new(x, SimUnit::ZERO, SimUnit::from_num(0.5)),
+                facing: Facing::ZERO,
             });
             zone.components_mut().insert(id, mat);
         }
 
         let mut env = SimEnvironment::new();
         // Compress the day so the sun crosses the sky quickly at 1× speed.
-        env.seconds_per_day = 30.0;
+        env.seconds_per_day = SimUnit::from_num(30);
         // Start an hour after sunrise so the cubes are lit at startup.
-        env.time_of_day = 0.30;
+        env.time_of_day = SimUnit::from_num(0.30);
 
         Self {
             zones,
@@ -111,12 +111,16 @@ impl Simulation for Game {
     type Command = Command;
 
     fn tick(&mut self, dt: Duration) {
-        self.env.advance(dt.as_secs_f32());
+        self.env.advance(dt);
     }
 
     fn apply_command(&mut self, cmd: &Command) {
         match cmd {
-            Command::SetTimeOfDay(t) => self.env.time_of_day = t.rem_euclid(1.0),
+            // Float at the command boundary (egui slider speaks `f32`);
+            // convert to `SimUnit` so sim state stays integer.
+            Command::SetTimeOfDay(t) => {
+                self.env.time_of_day = SimUnit::from_num(t.rem_euclid(1.0));
+            }
         }
     }
 }
@@ -309,7 +313,10 @@ impl View for TexturedPbr {
                 let Some(&mat) = zone.components().get::<MaterialId>(id) else {
                     continue;
                 };
-                let model = Mat4::from_rotation_translation(obj.rotation * cube_yaw, obj.position);
+                let model = Mat4::from_rotation_translation(
+                    obj.facing.to_quat() * cube_yaw,
+                    obj.position.to_vec3(),
+                );
                 // Reserve a per-cube hit ID so the GPU readback can resolve
                 // a cursor over any of these cubes back to its sim
                 // `WorldObjectId` (#56 PR 3).
@@ -424,12 +431,14 @@ impl View for TexturedPbr {
                 ui.separator();
 
                 ui.label(format!("day: {}", sim.env.day));
-                // Slider drives a local copy; if egui reports the user
-                // changed it, emit a Command. Avoids holding `&mut sim`
-                // inside the UI closure (sim mutation lives behind
-                // `apply_command`) and decouples the frame the slider was
-                // dragged on from the tick the change applies on.
-                let mut time_of_day = sim.env.time_of_day;
+                // Slider drives a local `f32` copy; if egui reports the
+                // user changed it, emit a Command. Avoids holding
+                // `&mut sim` inside the UI closure (sim mutation lives
+                // behind `apply_command`) and decouples the frame the
+                // slider was dragged on from the tick the change applies
+                // on. The Command's payload is `f32` because egui only
+                // speaks float; the sim converts to `SimUnit` on apply.
+                let mut time_of_day: f32 = sim.env.time_of_day.to_num();
                 let response = ui.add(
                     egui::Slider::new(&mut time_of_day, 0.0..=1.0)
                         .text("time of day")

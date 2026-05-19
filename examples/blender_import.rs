@@ -60,7 +60,7 @@ use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Handle, MaterialId,
     MaterialRegistry, Mesh, MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance,
-    PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry, Simulation, Texture, View,
+    PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry, SimUnit, Simulation, Texture, View,
     ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
@@ -75,7 +75,7 @@ struct Game {
     #[allow(dead_code)]
     zones: Zones,
     zone: ZoneId,
-    time_of_day: f32,
+    time_of_day: SimUnit,
 }
 
 impl Game {
@@ -85,7 +85,7 @@ impl Game {
         Self {
             zones,
             zone,
-            time_of_day: 0.35,
+            time_of_day: SimUnit::from_num(0.35),
         }
     }
 }
@@ -93,8 +93,15 @@ impl Game {
 impl Simulation for Game {
     type Command = ();
     fn tick(&mut self, dt: Duration) {
-        let day_seconds = 180.0;
-        self.time_of_day = (self.time_of_day + dt.as_secs_f32() / day_seconds).rem_euclid(1.0);
+        let nanos = dt.as_nanos();
+        let secs_q16: u128 = (nanos << 16) / 1_000_000_000;
+        let dt_secs = SimUnit::from_bits(secs_q16.min(i32::MAX as u128) as i32);
+        let day_seconds = SimUnit::from_num(180);
+        let mut next = self.time_of_day + dt_secs / day_seconds;
+        while next >= SimUnit::from_num(1) {
+            next -= SimUnit::from_num(1);
+        }
+        self.time_of_day = next;
     }
 }
 

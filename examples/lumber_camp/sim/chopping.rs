@@ -9,8 +9,7 @@
 use std::collections::HashSet;
 
 use currawong::data::KindId;
-use currawong::glam::Vec3;
-use currawong::{WorldObjectId, Zone};
+use currawong::{SimPos, SimUnit, WorldObjectId, Zone};
 
 use super::{Carrying, GameStats, Idle, Move};
 
@@ -55,7 +54,12 @@ pub fn validate(zone: &mut Zone) {
     for pawn in cancel {
         zone.components_mut().remove::<Chopping>(pawn);
         zone.components_mut().remove::<Move>(pawn);
-        zone.components_mut().insert(pawn, Idle { seconds: 0.0 });
+        zone.components_mut().insert(
+            pawn,
+            Idle {
+                seconds: SimUnit::ZERO,
+            },
+        );
     }
     let active_choppers: HashSet<WorldObjectId> = zone
         .components()
@@ -76,7 +80,7 @@ pub fn validate(zone: &mut Zone) {
 /// Trees are static today but this future-proofs against them moving
 /// (wind sway) without changing the arrival check.
 pub fn refresh_move_targets(zone: &mut Zone) {
-    let mut refresh: Vec<(WorldObjectId, Vec3)> = Vec::new();
+    let mut refresh: Vec<(WorldObjectId, SimPos)> = Vec::new();
     for (pawn, c) in zone.components().iter::<Chopping>() {
         if let Some(t) = zone.get(c.tree) {
             refresh.push((pawn, t.position));
@@ -156,7 +160,7 @@ pub fn tick_progress(zone: &mut Zone) {
 /// exists).
 pub fn dispatch_idle(zone: &mut Zone, stats: &GameStats) {
     let lumberjack = &stats.kinds.lumberjack;
-    let designated: Vec<(WorldObjectId, Vec3)> = zone
+    let designated: Vec<(WorldObjectId, SimPos)> = zone
         .components()
         .iter::<Designated>()
         .filter_map(|(id, _)| zone.get(id).map(|t| (id, t.position)))
@@ -169,7 +173,7 @@ pub fn dispatch_idle(zone: &mut Zone, stats: &GameStats) {
         .iter::<Chopping>()
         .map(|(_, c)| c.tree)
         .collect();
-    let idle: Vec<(WorldObjectId, Vec3)> = zone
+    let idle: Vec<(WorldObjectId, SimPos)> = zone
         .iter()
         .filter(|(id, _)| {
             zone.components().get::<KindId>(*id) == Some(lumberjack)
@@ -180,14 +184,12 @@ pub fn dispatch_idle(zone: &mut Zone, stats: &GameStats) {
         .map(|(id, t)| (id, t.position))
         .collect();
     for (pawn, pawn_pos) in idle {
+        // Distance comparison stays in squared form (no sqrt) — integer
+        // ordering, deterministic, no floats.
         let Some(&(tree_id, tree_pos)) = designated
             .iter()
             .filter(|(tree, _)| !claimed.contains(tree))
-            .min_by(|a, b| {
-                let da = (a.1 - pawn_pos).length_squared();
-                let db = (b.1 - pawn_pos).length_squared();
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .min_by_key(|(_, p)| (*p - pawn_pos).length_squared())
         else {
             continue;
         };

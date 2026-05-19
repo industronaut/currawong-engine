@@ -17,6 +17,8 @@
 //!
 //! - [`slot_map`] — generic generational slot-map (the storage primitive).
 //! - [`grid`] — tile-grid topology trait + [`SquareGrid`] / (future) `HexGrid`.
+//! - [`units`] — fixed-point [`SimUnit`] / [`SimPos`] / [`SimVec`].
+//! - [`facing`] — yaw-only quantized [`Facing`] + integer atan2.
 //! - [`zone`] — [`WorldTransform`], [`Zone`], [`Zones`], cross-zone refs.
 //! - [`components`] — sparse, type-erased per-object data.
 //! - [`terrain`] — tile-grid terrain with optional liquids per tile.
@@ -25,6 +27,7 @@
 //!   mutations reach the simulation (input handlers, UI, scripts).
 //! - [`environment`] — sim-side environment state (time of day) + the trivial
 //!   sun-direction model.
+//! - [`rng`] — [`SimRng`], the single seeded sim PRNG.
 //!
 //! Submodules are private; their public types are re-exported here so callers
 //! see a flat `sim::*` surface.
@@ -35,18 +38,24 @@ mod clock;
 mod command;
 mod components;
 mod environment;
+mod facing;
 mod grid;
+mod rng;
 mod slot_map;
 mod terrain;
+mod units;
 mod zone;
 
 pub use clock::SimClock;
 pub use command::CommandQueue;
 pub use components::Components;
 pub use environment::{SimEnvironment, sun_direction_for};
+pub use facing::Facing;
 pub use grid::{Grid, HexGrid, SquareGrid};
+pub use rng::SimRng;
 pub use slot_map::{SlotKey, SlotMap};
 pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};
+pub use units::{SimPos, SimUnit, SimVec, tile as sim_tile};
 pub use zone::{
     WorldObjectId, WorldObjectRef, WorldObjectsMut, WorldTransform, Zone, ZoneId, Zones,
 };

@@ -5,8 +5,7 @@
 //! cleared on deposit), the per-pawn [`Hauling`] intent (which stockpile),
 //! and the per-stockpile [`WoodStored`] count.
 
-use currawong::glam::Vec3;
-use currawong::{WorldObjectId, Zone};
+use currawong::{SimPos, SimUnit, WorldObjectId, Zone};
 
 use super::{GameStats, Idle, Move};
 
@@ -31,7 +30,7 @@ pub struct WoodStored {
 /// Refresh `Move.target` from the current `Hauling` target's position.
 /// Stockpiles are static today but this future-proofs against mobile depots.
 pub fn refresh_move_targets(zone: &mut Zone) {
-    let mut refresh: Vec<(WorldObjectId, Vec3)> = Vec::new();
+    let mut refresh: Vec<(WorldObjectId, SimPos)> = Vec::new();
     for (pawn, h) in zone.components().iter::<Hauling>() {
         if let Some(t) = zone.get(h.stockpile) {
             refresh.push((pawn, t.position));
@@ -53,7 +52,12 @@ pub fn on_arrival(zone: &mut Zone, arrived: &[WorldObjectId]) {
         };
         zone.components_mut().remove::<Hauling>(pawn);
         zone.components_mut().remove::<Carrying>(pawn);
-        zone.components_mut().insert(pawn, Idle { seconds: 0.0 });
+        zone.components_mut().insert(
+            pawn,
+            Idle {
+                seconds: SimUnit::ZERO,
+            },
+        );
         if let Some(store) = zone.components_mut().get_mut::<WoodStored>(stockpile) {
             store.count += 1;
         }

@@ -10,8 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use currawong::glam::{Quat, Vec3};
-use currawong::{Simulation, WorldObjectRef, WorldTransform, Zone, Zones};
+use currawong::{Facing, SimPos, SimUnit, Simulation, WorldObjectRef, WorldTransform, Zone, Zones};
 
 struct Game {
     zones: Zones,
@@ -27,12 +26,12 @@ impl Game {
         let zone = zones.get_mut(zone_id).expect("just inserted");
 
         let obj_a_id = zone.insert(WorldTransform {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
+            position: SimPos::tile(0, 0, 0),
+            facing: Facing::ZERO,
         });
         let obj_b_id = zone.insert(WorldTransform {
-            position: Vec3::new(10.0, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
+            position: SimPos::tile(10, 0, 0),
+            facing: Facing::ZERO,
         });
 
         Self {
@@ -54,7 +53,12 @@ impl Simulation for Game {
     type Command = ();
     fn tick(&mut self, dt: Duration) {
         self.elapsed += dt;
-        let dx = dt.as_secs_f32();
+        // Convert tick dt to fractional seconds in Q16.16 via integer
+        // nanoseconds — same shape as `SimEnvironment::advance`, so the
+        // motion stays bit-exact across runs.
+        let nanos = dt.as_nanos();
+        let secs_q16: u128 = (nanos << 16) / 1_000_000_000;
+        let dx = SimUnit::from_bits(secs_q16.min(i32::MAX as u128) as i32);
         for (_, zone) in self.zones.iter_mut() {
             for (_, obj) in zone.iter_mut() {
                 obj.position.x += dx;
@@ -78,8 +82,18 @@ fn main() {
             println!(
                 "frame {frame:3}: elapsed={:.3}s obj_a.x={:.3} obj_b.x={:.3}",
                 game.elapsed.as_secs_f32(),
-                game.obj_a.resolve(&game.zones).unwrap().position.x,
-                game.obj_b.resolve(&game.zones).unwrap().position.x,
+                game.obj_a
+                    .resolve(&game.zones)
+                    .unwrap()
+                    .position
+                    .x
+                    .to_num::<f32>(),
+                game.obj_b
+                    .resolve(&game.zones)
+                    .unwrap()
+                    .position
+                    .x
+                    .to_num::<f32>(),
             );
         }
         if let Some(remaining) = target_dt.checked_sub(now.elapsed()) {

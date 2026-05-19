@@ -162,7 +162,7 @@ impl PawnRenderer {
         if let Some(zone) = sim.zones.get(sim.zone) {
             for (id, transform) in zone.iter() {
                 if zone.components().get::<currawong::data::KindId>(id) == Some(lumberjack) {
-                    self.pawn_curr.insert(id, transform.position);
+                    self.pawn_curr.insert(id, transform.position.to_vec3());
                 }
             }
         }
@@ -210,7 +210,9 @@ pub fn update_instance(
     state: &PawnRenderer,
 ) {
     let live_position = instance.world_xform.w_axis.truncate();
-    let idle_seconds = components.get::<Idle>(parent.id).map(|i| i.seconds);
+    let idle_seconds = components
+        .get::<Idle>(parent.id)
+        .map(|i| i.seconds.to_num::<f32>());
     let pos = state.interp_position(parent.id, live_position, alpha, idle_seconds);
     instance.world_xform.w_axis = Vec4::new(pos.x, pos.y, pos.z, 1.0);
     instance.mesh_parts[LOG_PART].visible = components.get::<Carrying>(parent.id).is_some();

@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, Liquid, LiquidId,
-    MeshInstanceAttribs, OrbitRig, Renderer, SimEnvironment, Simulation, TerrainMaterial,
-    TerrainMaterialInstance, TerrainRenderer, TileCoord, UnlitColoredInstance,
+    Camera, CameraBinding, CommandQueue, EngineCtx, Facing, FlatTopsMesher, Liquid, LiquidId,
+    MeshInstanceAttribs, OrbitRig, Renderer, SimEnvironment, SimPos, SimUnit, Simulation,
+    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TileCoord, UnlitColoredInstance,
     UnlitColoredMaterial, View, ViewConfig, ViewEnvironment, WorldObjectRef, WorldTransform, Zone,
     ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
@@ -86,7 +86,7 @@ impl Game {
         let zone = zones.get_mut(ground).unwrap();
         let player_id = zone.insert(WorldTransform {
             position: tile_to_pos(start_tile, 0),
-            rotation: Quat::IDENTITY,
+            facing: Facing::ZERO,
         });
         zone.components_mut().insert(player_id, Player);
         zone.components_mut().insert(player_id, Health(100));
@@ -97,8 +97,8 @@ impl Game {
 
         let mut env = SimEnvironment::new();
         // Short day so the sun visibly moves during a play session.
-        env.seconds_per_day = 60.0;
-        env.time_of_day = 0.35;
+        env.seconds_per_day = SimUnit::from_num(60);
+        env.time_of_day = SimUnit::from_num(0.35);
 
         Self {
             zones,
@@ -114,7 +114,8 @@ impl Game {
 
     fn current_player_tile(&self) -> TileCoord {
         let p = self.player.resolve(&self.zones).expect("player exists");
-        TileCoord::new(p.position.x.floor() as i32, p.position.y.floor() as i32)
+        let (x, y, _) = p.position.tile_coord();
+        TileCoord::new(x, y)
     }
 
     /// Move the player one tile within their current zone, clamped to the
@@ -143,7 +144,7 @@ impl Game {
         let zone = self.zones.get_mut(self.ground).unwrap();
         let id = zone.insert(WorldTransform {
             position: tile_to_pos(TileCoord::new(0, 0), 0),
-            rotation: Quat::IDENTITY,
+            facing: Facing::ZERO,
         });
         zone.components_mut().insert(id, Player);
         zone.components_mut().insert(id, Health(100));
@@ -248,7 +249,7 @@ impl Simulation for Game {
     type Command = Command;
 
     fn tick(&mut self, dt: Duration) {
-        self.env.advance(dt.as_secs_f32());
+        self.env.advance(dt);
         self.check_stair_trigger();
     }
 
@@ -260,13 +261,13 @@ impl Simulation for Game {
     }
 }
 
-fn tile_to_pos(tile: TileCoord, floor_height: i32) -> Vec3 {
+fn tile_to_pos(tile: TileCoord, floor_height: i32) -> SimPos {
     // Match FlatTopsMesher's tile-centre convention with our height_unit.
-    Vec3::new(
-        tile.x as f32 + 0.5,
-        tile.y as f32 + 0.5,
-        floor_height as f32 * HEIGHT_UNIT,
-    )
+    SimPos {
+        x: SimUnit::from_num(tile.x) + SimUnit::from_num(0.5),
+        y: SimUnit::from_num(tile.y) + SimUnit::from_num(0.5),
+        z: SimUnit::from_num(floor_height) * SimUnit::from_num(HEIGHT_UNIT),
+    }
 }
 
 fn in_bounds(tile: TileCoord) -> bool {
@@ -465,7 +466,7 @@ impl View for MultiZoneView {
         // same way it left.
         let player = sim.player.resolve(&sim.zones).expect("player exists");
         self.rig.update(dt);
-        self.rig.focus = player.position + Vec3::new(0.0, 0.0, 0.4);
+        self.rig.focus = player.position.to_vec3() + Vec3::new(0.0, 0.0, 0.4);
         self.rig.apply_to(&mut self.camera);
     }
 
@@ -575,7 +576,10 @@ impl View for MultiZoneView {
 
         // --- Player pass -------------------------------------------------
         let spin = Quat::from_rotation_z(t * 0.8);
-        let model = Mat4::from_rotation_translation(player.rotation * spin, player.position);
+        let model = Mat4::from_rotation_translation(
+            player.facing.to_quat() * spin,
+            player.position.to_vec3(),
+        );
         let attribs = MeshInstanceAttribs::new(model, Vec4::ONE);
         renderer
             .queue

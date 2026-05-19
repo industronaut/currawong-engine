@@ -60,7 +60,9 @@ impl RenderObjectPass {
                 let Some(template) = templates.get(rid) else {
                     continue;
                 };
-                let object_xform = Mat4::from_rotation_translation(obj.rotation, obj.position);
+                // sim→view seam: convert integer SimPos / Facing to glam.
+                let object_xform =
+                    Mat4::from_rotation_translation(obj.facing.to_quat(), obj.position.to_vec3());
                 let world_aabb = template
                     .visual_bounds()
                     .map(|local| local.transformed(object_xform));
@@ -281,8 +283,8 @@ mod tests {
     use super::*;
     use crate::render::render_object::RenderTemplate;
     use crate::render::visibility::Aabb;
-    use crate::sim::{WorldTransform, Zone, ZoneId, Zones};
-    use glam::{Quat, Vec3, Vec4};
+    use crate::sim::{Facing, SimPos, WorldTransform, Zone, ZoneId, Zones};
+    use glam::{Vec3, Vec4};
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum Rid {
@@ -318,8 +320,8 @@ mod tests {
     fn insert_tree(zones: &mut Zones, zid: ZoneId, position: Vec3, appearance: Option<Appearance>) {
         let zone = zones.get_mut(zid).expect("zone");
         let id = zone.insert(WorldTransform {
-            position,
-            rotation: Quat::IDENTITY,
+            position: SimPos::from_vec3(position),
+            facing: Facing::ZERO,
         });
         zone.components_mut().insert(id, Rid::Tree);
         if let Some(a) = appearance {

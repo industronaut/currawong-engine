@@ -23,6 +23,18 @@ glam = "0.32.1"
 # compiles, including under `--no-default-features`.
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"
+# Determinism foundation (see #87). All four are no_std-friendly and don't
+# pull in any render-side machinery, so they're unconditional sim-side deps.
+# `fixed` backs SimUnit (Q16.16) — bit-exact integer math instead of f32.
+# `indexmap` backs `Components` and `Terrain::chunks`, replacing `HashMap`
+#   so iteration is deterministic (insertion order, not seeded hash).
+# `rand` + `rand_pcg` back `SimRng` (Pcg64) — the single sim-wide source of
+#   randomness, seeded at construction. `rand` itself is no_std-compatible
+#   with `default-features = false`.
+fixed = "1.27"
+indexmap = "2"
+rand = { version = "0.8", default-features = false }
+rand_pcg = "0.3"
 bytemuck = { version = "1", optional = true }
 # glTF 2.0 loader for static-mesh streaming. `utils` gives us the
 # `Reader::read_positions` / `read_normals` / `read_tex_coords` /

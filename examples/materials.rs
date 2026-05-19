@@ -16,11 +16,12 @@
 
 use std::time::Instant;
 
-use currawong::glam::{Mat4, Quat, Vec3, Vec4};
+use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, CommandQueue, EngineCtx, InstanceBuckets, MaterialInstanceRegistry,
-    MeshInstanceAttribs, Renderer, Simulation, UnlitColoredInstance, UnlitColoredMaterial, View,
-    ViewConfig, WorldTransform, Zone, Zones, wgpu, winit,
+    Camera, CameraBinding, CommandQueue, EngineCtx, Facing, InstanceBuckets,
+    MaterialInstanceRegistry, MeshInstanceAttribs, Renderer, SimPos, Simulation,
+    UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig, WorldTransform, Zone, Zones,
+    wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -64,16 +65,16 @@ impl Game {
 
         for (pos, tint) in reds {
             let id = zone.insert(WorldTransform {
-                position: pos,
-                rotation: Quat::IDENTITY,
+                position: SimPos::from_vec3(pos),
+                facing: Facing::ZERO,
             });
             zone.components_mut().insert(id, MaterialInstanceId::Red);
             zone.components_mut().insert(id, Tint(tint));
         }
         for (pos, tint) in golds {
             let id = zone.insert(WorldTransform {
-                position: pos,
-                rotation: Quat::IDENTITY,
+                position: SimPos::from_vec3(pos),
+                facing: Facing::ZERO,
             });
             zone.components_mut().insert(id, MaterialInstanceId::Gold);
             zone.components_mut().insert(id, Tint(tint));
@@ -216,7 +217,8 @@ impl View for Materials {
                     .get::<Tint>(id)
                     .map(|t| t.0)
                     .unwrap_or(Vec4::ONE);
-                let model = Mat4::from_rotation_translation(obj.rotation, obj.position);
+                let model =
+                    Mat4::from_rotation_translation(obj.facing.to_quat(), obj.position.to_vec3());
                 self.buckets
                     .push(mid, MeshInstanceAttribs::new(model, tint));
             }
