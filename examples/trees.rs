@@ -6,9 +6,10 @@
 //! turning current age into `height` + `tint` for that frame. Trees visibly
 //! grow and shift colour over ~12 s at speed 1.0; pausing freezes growth.
 //!
-//! Adding a new slot (e.g. `sway_phase: F32`) requires only a
-//! `with_slot(...)` on the template and a one-liner in [`extract_part`].
-//! No edits to the render walk itself — the v1 ergonomics goal from #8.
+//! The sim→view translation (age → height + tint) lives in
+//! [`extract_part`]: a single function that reads the sim's [`Tree`]
+//! component and produces a [`MeshInstanceAttribs`]. Adding a new visual
+//! fact (e.g. sway phase) is a one-liner there.
 //!
 //! ## Picking (#56)
 //!
@@ -54,7 +55,7 @@ use currawong::{
     Camera, CameraBinding, CellHighlight, EngineCtx, FlatTopsMesher, Frustum, HitTarget,
     InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshInstanceAttribs, MeshPart,
     OrbitRig, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation, SlotKey,
-    SlotKind, SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker, TerrainRenderer,
+    SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker, TerrainRenderer,
     TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig, WorldObjectId,
     WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
 };
@@ -275,13 +276,11 @@ impl View for Demo {
         instances.register(MatKey::Leaf, material.create_instance(renderer, Vec4::ONE));
 
         // Unit tree, root at z=0: trunk 0..0.4, canopy 0.3..1.0 in template Z.
-        // The `height` slot Z-scales the whole template per-instance; XY stays put.
+        // Per-instance growth Z-scales the whole template; XY stays put.
         let mut templates: Templates = RenderRegistry::new();
         templates.register(
             RenderId::TreeOak,
             RenderTemplate::new("tree_oak")
-                .with_slot("height", SlotKind::F32)
-                .with_slot("tint", SlotKind::Color)
                 .with_mesh_part(
                     MeshHandle::Trunk,
                     MatKey::Bark,
@@ -441,9 +440,10 @@ impl View for Demo {
             &frustum,
         );
 
-        // Per-frame slot extraction loop. The whole slot-driven mapping
+        // Per-frame extraction loop. The whole sim→view mapping
         // (age → height → world matrix; age + seed → tint) lives inside
-        // `extract_part`; adding a new slot is local to that function.
+        // `extract_part`; adding a new visual fact is local to that
+        // function.
         //
         // A single GPU hit ID per tree is reserved here (#56 PR 3) and
         // stamped onto every mesh part of that tree, so a cursor over the
@@ -656,22 +656,22 @@ fn draw_frametime_chart(ui: &mut egui::Ui, samples: &VecDeque<f32>, max_sample: 
     );
 }
 
-/// Slot-extraction closure for one mesh part of one tree. Owns the
-/// (sim state → slot value → per-instance attrib) mapping; nothing in the
-/// per-frame walk above knows about `Tree`.
+/// Per-instance extraction for one mesh part of one tree. Owns the
+/// (sim state → per-instance attrib) mapping; nothing in the per-frame
+/// walk above knows about `Tree`.
 fn extract_part(
     tree: &Tree,
     part: &MeshPart<MeshHandle, MatKey>,
     root: Mat4,
 ) -> MeshInstanceAttribs {
     let maturity = smoothstep((tree.age_ticks as f32 / MATURE_AGE as f32).clamp(0.0, 1.0));
-    // `height` slot: 0.3 → 3.0 along Z, applied between root and part transform
+    // Height: 0.3 → 3.0 along Z, applied between root and part transform
     // so the trunk's XY radius stays put while the tree grows upward.
     let height = 0.3 + 2.7 * maturity;
     let world = root * Mat4::from_scale(Vec3::new(1.0, 1.0, height)) * part.local_transform;
 
-    // `tint` slot: young → mature green plus per-seed jitter. Only the
-    // leaf material consumes it; bark stays flat brown.
+    // Tint: young → mature green plus per-seed jitter. Only the leaf
+    // material consumes it; bark stays flat brown.
     let young = Vec4::new(0.55, 0.85, 0.30, 1.0);
     let mature = Vec4::new(0.15, 0.42, 0.18, 1.0);
     let s = tree.tint_seed;

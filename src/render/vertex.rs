@@ -1,11 +1,10 @@
 //! Canonical vertex layouts.
 //!
 //! The engine ships a small *closed* set of vertex layouts that materials
-//! pick from — same architectural move as
-//! [`SlotKind`](super::SlotKind): typed end-to-end, no string keys, no
-//! dynamic attribute negotiation. A material that wants normal-mapped PBR
-//! statically demands [`PosNormalUv`] (or [`PosNormalUvTangent`] when it
-//! exists); meshes are built for one layout and either match or don't.
+//! pick from: typed end-to-end, no string keys, no dynamic attribute
+//! negotiation. A material that wants normal-mapped PBR statically demands
+//! [`PosNormalUv`] (or [`PosNormalUvTangent`] when it exists); meshes are
+//! built for one layout and either match or don't.
 //!
 //! Adding a new layout is a deliberate code change: add the `Pod` struct,
 //! its `ATTRIBS` const, and (typically) one matching material pipeline.

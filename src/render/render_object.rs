@@ -6,170 +6,26 @@
 //! type `R` (`Copy + Eq + Hash`; conventionally named `RenderId` at the call
 //! site) and stored in a [`RenderRegistry`] owned by the `View`.
 //!
-//! Templates declare typed **slots** — named parameters with a fixed
-//! [`SlotKind`] — that instances later bind to concrete [`SlotValue`]s.
 //! Templates carry two kinds of parts: [`MeshPart<M, MK>`] for static
 //! geometry and [`EmitterPart<E, S>`] for particle emitter attachments.
-//! Each part has a local transform from the template root. Slot-driven
-//! parameter routing and visual-behaviour bindings land in later steps.
-//! Re-registering an id silently replaces the previous template — same
-//! idiom as
-//! [`EmitterReconciler::register_template`](super::EmitterReconciler::register_template)
-//! and [`InstanceBuckets::register`](super::InstanceBuckets::register).
+//! Each part has a local transform from the template root. Per-instance
+//! state lives on the persistent
+//! [`LiveRenderObject`](super::LiveRenderObject); the per-instance update
+//! closure reads sim [`Components`](crate::sim::Components) and writes it
+//! there each frame.
 //!
 //! `RenderTemplate` and `RenderRegistry` default `M`, `MK`, `E`, `S` to
 //! `()` so callers that haven't committed to a given part kind can use the
 //! shorter forms — e.g. `RenderTemplate<MyMesh, MyMat>` for mesh-only
-//! templates, or just `RenderTemplate` / `RenderRegistry<R>` for
-//! slot-schema-only templates.
+//! templates, or just `RenderTemplate` / `RenderRegistry<R>` for empty
+//! templates.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use glam::{Mat4, Vec2, Vec3, Vec4};
+use glam::Mat4;
 
 use super::visibility::Aabb;
-
-/// Type of a parameter slot on a [`RenderTemplate`]. Each variant pairs with
-/// a [`SlotValue`] of the same name. The set is deliberately closed: adding
-/// a kind requires a code change, not a string tag, which keeps slots strongly
-/// typed end-to-end (Godot `@export` / Unreal `UPROPERTY`-style).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum SlotKind {
-    F32,
-    Vec2,
-    Vec3,
-    Vec4,
-    /// Linear RGBA in `[0, 1]`. Packed identically to [`SlotKind::Vec4`];
-    /// separated so consumers can route to colour-aware bindings (sRGB
-    /// textures, tone mapping) without sniffing slot names.
-    Color,
-    Bool,
-    I32,
-    U32,
-}
-
-/// Concrete value for a slot. Each variant corresponds to a [`SlotKind`] of
-/// the same name; use [`SlotValue::kind`] to recover the kind for validation
-/// against a template's schema.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum SlotValue {
-    F32(f32),
-    Vec2(Vec2),
-    Vec3(Vec3),
-    Vec4(Vec4),
-    Color(Vec4),
-    Bool(bool),
-    I32(i32),
-    U32(u32),
-}
-
-impl SlotValue {
-    /// The [`SlotKind`] this value satisfies.
-    pub fn kind(&self) -> SlotKind {
-        match self {
-            SlotValue::F32(_) => SlotKind::F32,
-            SlotValue::Vec2(_) => SlotKind::Vec2,
-            SlotValue::Vec3(_) => SlotKind::Vec3,
-            SlotValue::Vec4(_) => SlotKind::Vec4,
-            SlotValue::Color(_) => SlotKind::Color,
-            SlotValue::Bool(_) => SlotKind::Bool,
-            SlotValue::I32(_) => SlotKind::I32,
-            SlotValue::U32(_) => SlotKind::U32,
-        }
-    }
-}
-
-/// How a slot's value is delivered to a draw call. Declared per slot at
-/// template-build time so the engine can pick the right packing strategy
-/// without runtime inference.
-///
-/// `Instance` is the only routing currently implemented. `Uniform` is a
-/// doc-only reservation: [`RenderTemplate::with_routed_slot`] panics if
-/// asked for it, so the variant cannot reach a draw call. It exists so
-/// that adding the packing path later — gather across instances, allocate
-/// the uniform array buffer, write the values, bind to the pipeline,
-/// index by `instance_index` in shaders — doesn't break this enum's API.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub enum SlotRouting {
-    /// Packed into the per-instance attribute buffer once per draw. Right
-    /// for values that vary per instance and change frequently
-    /// (transform-adjacent floats, per-instance colours).
-    #[default]
-    Instance,
-    /// **Not yet implemented — reserved for the future.** Will pack values
-    /// into a per-instance uniform array indexed by `instance_index`, for
-    /// larger payloads that don't fit cleanly into a vertex-attribute slot.
-    /// [`RenderTemplate::with_routed_slot`] rejects this variant today.
-    Uniform,
-}
-
-/// Schema entry for one slot on a [`RenderTemplate`]: a name plus its kind
-/// plus its [`SlotRouting`]. Slots are stored in declaration order so
-/// consumers can derive stable uniform / instance-buffer layouts from them.
-#[derive(Clone, Debug)]
-pub struct SlotDescriptor {
-    pub name: String,
-    pub kind: SlotKind,
-    pub routing: SlotRouting,
-}
-
-/// Named [`SlotValue`]s for one render instance. The sim provides these
-/// per object (typically as a component keyed by `WorldObjectId`); the View
-/// reads them at render time to drive per-instance attribs, material
-/// instance selection, visual-script state, and so on. Templates declare
-/// the *schema* — names and kinds — via [`RenderTemplate::with_slot`];
-/// `SlotValues` is the *data* matching that schema.
-///
-/// Storage is a `HashMap` keyed by `&'static str`. Slot names are
-/// template-declared string literals at the call site, so the keys never
-/// outlive the program and no per-value `String` allocation is needed.
-/// Lookup is O(1). Iteration order is non-deterministic, matching the
-/// `HashMap`-backed [`Components`](crate::sim::components::Components)
-/// registry.
-#[derive(Clone, Debug, Default)]
-pub struct SlotValues {
-    values: HashMap<&'static str, SlotValue>,
-}
-
-impl SlotValues {
-    pub fn new() -> Self {
-        Self {
-            values: HashMap::new(),
-        }
-    }
-
-    /// Set the value for `name`, replacing any existing entry. Returns
-    /// `self` for chained builder use at sim-init time.
-    pub fn with(mut self, name: &'static str, value: SlotValue) -> Self {
-        self.set(name, value);
-        self
-    }
-
-    /// In-place set / overwrite.
-    pub fn set(&mut self, name: &'static str, value: SlotValue) {
-        self.values.insert(name, value);
-    }
-
-    /// Look up a value by name. Returns the `SlotValue` by value (it's
-    /// `Copy`); the caller `match`es to extract the typed inner.
-    pub fn get(&self, name: &str) -> Option<SlotValue> {
-        self.values.get(name).copied()
-    }
-
-    /// `(name, value)` iterator. Order is unspecified.
-    pub fn iter(&self) -> impl Iterator<Item = (&'static str, SlotValue)> + '_ {
-        self.values.iter().map(|(&n, &v)| (n, v))
-    }
-
-    pub fn len(&self) -> usize {
-        self.values.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
-    }
-}
 
 /// One drawable piece of a [`RenderTemplate`]: a mesh handle, the material
 /// key it draws with, and a transform relative to the template root.
@@ -208,9 +64,6 @@ impl<M, MK> MeshPart<M, MK> {
 /// [`EmitterReconciler<E, S>`](super::EmitterReconciler), which owns the
 /// emitter lifecycle and particle integration. The render-object system
 /// only declares attachments; the reconciler handles state.
-///
-/// `attachment` is distinct from a [`SlotKind`] template slot — it's an
-/// emitter-keying id chosen by the user, not a typed template parameter.
 #[derive(Clone, Debug)]
 pub struct EmitterPart<E, S> {
     pub template: E,
@@ -233,17 +86,18 @@ impl<E, S> EmitterPart<E, S> {
 
 /// Static template describing a renderable object. Many sim objects may
 /// reference one template (every oak tree → `tree_oak`); per-instance
-/// variation lives in transforms and slot values.
+/// variation lives in transforms and in the
+/// [`LiveRenderObject`](super::LiveRenderObject) per-instance state the
+/// update closure writes.
 ///
 /// Templates are built with [`Self::new`] then chained
-/// [`Self::with_slot`] / [`Self::with_mesh_part`] / [`Self::with_emitter_part`]
-/// calls. `M`, `MK`, `E`, `S` default to `()` for callers that don't need
-/// the corresponding part kind yet.
+/// [`Self::with_mesh_part`] / [`Self::with_emitter_part`] calls. `M`, `MK`,
+/// `E`, `S` default to `()` for callers that don't need the corresponding
+/// part kind yet.
 #[derive(Clone, Debug)]
 pub struct RenderTemplate<M = (), MK = (), E = (), S = ()> {
     /// Human-readable name. Used in panics, logs, and tracing.
     pub label: String,
-    slots: Vec<SlotDescriptor>,
     mesh_parts: Vec<MeshPart<M, MK>>,
     emitter_parts: Vec<EmitterPart<E, S>>,
     visual_bounds: Option<Aabb>,
@@ -253,59 +107,10 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            slots: Vec::new(),
             mesh_parts: Vec::new(),
             emitter_parts: Vec::new(),
             visual_bounds: None,
         }
-    }
-
-    /// Declare an instance-routed slot. Slot names must be unique within a
-    /// template; passing a duplicate panics — programming error, not
-    /// runtime condition. Returns `self` for chaining.
-    ///
-    /// Equivalent to [`Self::with_routed_slot`] with
-    /// [`SlotRouting::Instance`]; covers the common case where a slot
-    /// drives per-instance attribs.
-    pub fn with_slot(self, name: impl Into<String>, kind: SlotKind) -> Self {
-        self.with_routed_slot(name, kind, SlotRouting::Instance)
-    }
-
-    /// Declare a slot with an explicit [`SlotRouting`]. Slot names must be
-    /// unique within a template; passing a duplicate panics — programming
-    /// error, not runtime condition. Returns `self` for chaining.
-    ///
-    /// [`SlotRouting::Uniform`] is not yet implemented and is rejected here
-    /// at template-build time, so the failure surfaces at the API boundary
-    /// rather than as a draw-time trap. Use [`SlotRouting::Instance`] until
-    /// the uniform packing path lands.
-    pub fn with_routed_slot(
-        mut self,
-        name: impl Into<String>,
-        kind: SlotKind,
-        routing: SlotRouting,
-    ) -> Self {
-        let name = name.into();
-        assert!(
-            routing != SlotRouting::Uniform,
-            "RenderTemplate '{}' slot '{}' requested SlotRouting::Uniform, \
-             which is not yet implemented — declare it as SlotRouting::Instance \
-             until uniform-routed packing lands.",
-            self.label,
-            name,
-        );
-        assert!(
-            !self.slots.iter().any(|s| s.name == name),
-            "RenderTemplate '{}' already has a slot named '{}'",
-            self.label,
-            name
-        );
-        self.slots.push(SlotDescriptor {
-            name,
-            kind,
-            routing,
-        });
-        self
     }
 
     /// Add a [`MeshPart`] to the template. Parts are stored in insertion
@@ -325,16 +130,6 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
         self.emitter_parts
             .push(EmitterPart::new(template, attachment, local_transform));
         self
-    }
-
-    /// All slots in declaration order.
-    pub fn slots(&self) -> &[SlotDescriptor] {
-        &self.slots
-    }
-
-    /// Look up a slot descriptor by name.
-    pub fn slot(&self, name: &str) -> Option<&SlotDescriptor> {
-        self.slots.iter().find(|s| s.name == name)
     }
 
     /// All mesh parts in declaration order.
@@ -427,6 +222,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum RenderId {
@@ -468,97 +264,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn template_has_no_slots_by_default() {
-        let t: RenderTemplate = RenderTemplate::new("bare");
-        assert!(t.slots().is_empty());
-        assert!(t.slot("anything").is_none());
-    }
-
-    #[test]
-    fn with_slot_preserves_declaration_order() {
-        let t: RenderTemplate = RenderTemplate::new("campfire")
-            .with_slot("intensity", SlotKind::F32)
-            .with_slot("tint", SlotKind::Color)
-            .with_slot("lit", SlotKind::Bool);
-
-        let names: Vec<&str> = t.slots().iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["intensity", "tint", "lit"]);
-
-        let kinds: Vec<SlotKind> = t.slots().iter().map(|s| s.kind).collect();
-        assert_eq!(kinds, vec![SlotKind::F32, SlotKind::Color, SlotKind::Bool]);
-    }
-
-    #[test]
-    fn slot_lookup_by_name() {
-        let t: RenderTemplate = RenderTemplate::new("tree")
-            .with_slot("trunk_height", SlotKind::F32)
-            .with_slot("leaf_tint", SlotKind::Color);
-
-        assert_eq!(t.slot("trunk_height").map(|s| s.kind), Some(SlotKind::F32));
-        assert_eq!(t.slot("leaf_tint").map(|s| s.kind), Some(SlotKind::Color));
-        assert!(t.slot("missing").is_none());
-    }
-
-    #[test]
-    #[should_panic(expected = "already has a slot named")]
-    fn duplicate_slot_name_panics() {
-        let _: RenderTemplate = RenderTemplate::new("bad")
-            .with_slot("intensity", SlotKind::F32)
-            .with_slot("intensity", SlotKind::Color);
-    }
-
-    #[test]
-    fn with_slot_defaults_to_instance_routing() {
-        let t: RenderTemplate = RenderTemplate::new("oak")
-            .with_slot("height", SlotKind::F32)
-            .with_slot("tint", SlotKind::Color);
-
-        let routings: Vec<SlotRouting> = t.slots().iter().map(|s| s.routing).collect();
-        assert_eq!(
-            routings,
-            vec![SlotRouting::Instance, SlotRouting::Instance],
-            "with_slot must default routing to Instance",
-        );
-    }
-
-    #[test]
-    fn with_routed_slot_records_routing() {
-        let t: RenderTemplate = RenderTemplate::new("torch")
-            .with_routed_slot("brightness", SlotKind::F32, SlotRouting::Instance)
-            .with_routed_slot("tint", SlotKind::Color, SlotRouting::Instance);
-
-        let routings: Vec<SlotRouting> = t.slots().iter().map(|s| s.routing).collect();
-        assert_eq!(routings, vec![SlotRouting::Instance, SlotRouting::Instance]);
-    }
-
-    #[test]
-    #[should_panic(expected = "SlotRouting::Uniform")]
-    fn with_routed_slot_uniform_panics() {
-        let _: RenderTemplate = RenderTemplate::new("torch").with_routed_slot(
-            "brightness",
-            SlotKind::F32,
-            SlotRouting::Uniform,
-        );
-    }
-
-    #[test]
-    fn slot_routing_default_is_instance() {
-        assert_eq!(SlotRouting::default(), SlotRouting::Instance);
-    }
-
-    #[test]
-    fn slot_value_kind_matches_variant() {
-        assert_eq!(SlotValue::F32(1.0).kind(), SlotKind::F32);
-        assert_eq!(SlotValue::Vec2(Vec2::ZERO).kind(), SlotKind::Vec2);
-        assert_eq!(SlotValue::Vec3(Vec3::ZERO).kind(), SlotKind::Vec3);
-        assert_eq!(SlotValue::Vec4(Vec4::ZERO).kind(), SlotKind::Vec4);
-        assert_eq!(SlotValue::Color(Vec4::ONE).kind(), SlotKind::Color);
-        assert_eq!(SlotValue::Bool(true).kind(), SlotKind::Bool);
-        assert_eq!(SlotValue::I32(-1).kind(), SlotKind::I32);
-        assert_eq!(SlotValue::U32(7).kind(), SlotKind::U32);
-    }
-
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     enum TestMesh {
         Cube,
@@ -595,16 +300,6 @@ mod tests {
         assert_eq!(parts[1].material, TestMat::Stone);
         // Column 3 of an Mat4 holds the translation.
         assert_eq!(parts[1].local_transform.col(3).truncate().y, -0.5);
-    }
-
-    #[test]
-    fn template_carries_slots_and_parts_together() {
-        let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("torch")
-            .with_slot("intensity", SlotKind::F32)
-            .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY);
-
-        assert_eq!(t.slots().len(), 1);
-        assert_eq!(t.mesh_parts().len(), 1);
     }
 
     #[test]
@@ -677,11 +372,9 @@ mod tests {
     fn template_can_carry_all_part_kinds() {
         let t: RenderTemplate<TestMesh, TestMat, TestEmitter, TestEmitterSlot> =
             RenderTemplate::new("rich")
-                .with_slot("intensity", SlotKind::F32)
                 .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY)
                 .with_emitter_part(TestEmitter::Flame, TestEmitterSlot::Main, Mat4::IDENTITY);
 
-        assert_eq!(t.slots().len(), 1);
         assert_eq!(t.mesh_parts().len(), 1);
         assert_eq!(t.emitter_parts().len(), 1);
     }
@@ -697,58 +390,5 @@ mod tests {
         let bounds = Aabb::new(Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 2.5, 1.0));
         let t: RenderTemplate = RenderTemplate::new("campfire").with_visual_bounds(bounds);
         assert_eq!(t.visual_bounds(), Some(bounds));
-    }
-
-    #[test]
-    fn slot_values_empty_by_default() {
-        let sv = SlotValues::new();
-        assert!(sv.is_empty());
-        assert_eq!(sv.len(), 0);
-        assert!(sv.get("anything").is_none());
-    }
-
-    #[test]
-    fn slot_values_with_and_get() {
-        let sv = SlotValues::new()
-            .with("intensity", SlotValue::F32(0.7))
-            .with("tint", SlotValue::Color(Vec4::new(1.0, 0.5, 0.2, 1.0)));
-
-        assert_eq!(sv.len(), 2);
-        assert_eq!(sv.get("intensity"), Some(SlotValue::F32(0.7)));
-        assert_eq!(
-            sv.get("tint"),
-            Some(SlotValue::Color(Vec4::new(1.0, 0.5, 0.2, 1.0)))
-        );
-        assert!(sv.get("missing").is_none());
-    }
-
-    #[test]
-    fn slot_values_set_overwrites() {
-        let mut sv = SlotValues::new();
-        sv.set("intensity", SlotValue::F32(0.5));
-        sv.set("intensity", SlotValue::F32(0.9));
-
-        assert_eq!(sv.len(), 1, "set must overwrite, not append");
-        assert_eq!(sv.get("intensity"), Some(SlotValue::F32(0.9)));
-    }
-
-    #[test]
-    fn slot_values_iter_visits_every_entry() {
-        let sv = SlotValues::new()
-            .with("a", SlotValue::I32(1))
-            .with("b", SlotValue::I32(2))
-            .with("c", SlotValue::I32(3));
-
-        // Iteration order is unspecified — sort by name for a deterministic check.
-        let mut entries: Vec<(&'static str, SlotValue)> = sv.iter().collect();
-        entries.sort_by_key(|(n, _)| *n);
-        assert_eq!(
-            entries,
-            vec![
-                ("a", SlotValue::I32(1)),
-                ("b", SlotValue::I32(2)),
-                ("c", SlotValue::I32(3)),
-            ]
-        );
     }
 }
