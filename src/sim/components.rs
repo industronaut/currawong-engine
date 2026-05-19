@@ -1,7 +1,8 @@
 //! Heterogeneous, type-erased component storage for sparse per-object state.
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+
+use indexmap::IndexMap;
 
 use super::zone::WorldObjectId;
 
@@ -20,13 +21,19 @@ use super::zone::WorldObjectId;
 ///
 /// # Determinism
 ///
-/// `HashMap` iteration order is randomly seeded — component iteration is
-/// **not** deterministic across runs. This is fine for prototyping but will
-/// break sim replay / lockstep networking once those exist. Swap the inner
-/// `HashMap<WorldObjectId, T>` for a sparse-set (deterministic by insertion
-/// order) or a fixed-seed hasher when that becomes a constraint.
+/// Both the inner per-type map and the outer type-id map are [`IndexMap`]s,
+/// so [`Self::iter`] / [`Self::iter_mut`] visit objects in insertion order.
+/// This is bit-stable across runs and across library versions (IndexMap has
+/// no random seed). Removal uses `swap_remove` so it stays O(1); the
+/// last-inserted entry takes the freed slot, which is still deterministic
+/// for a given sequence of insertions + removals.
+///
+/// Outer-map iteration order over `TypeId`s is not part of the API; `TypeId`
+/// values themselves can shift across recompilations, so cross-build
+/// save-file portability is a separate concern (a stable component-id
+/// registry — see #87's out-of-scope notes).
 pub struct Components {
-    maps: HashMap<TypeId, Entry>,
+    maps: IndexMap<TypeId, Entry>,
 }
 
 /// One type-erased per-component map, plus the function pointer needed to
@@ -41,30 +48,30 @@ struct Entry {
 impl Entry {
     fn new<T: 'static>() -> Self {
         Self {
-            map: Box::new(HashMap::<WorldObjectId, T>::new()),
+            map: Box::new(IndexMap::<WorldObjectId, T>::new()),
             remove: |map, id| {
-                map.downcast_mut::<HashMap<WorldObjectId, T>>()
+                map.downcast_mut::<IndexMap<WorldObjectId, T>>()
                     .expect("TypeId keys its concrete map")
-                    .remove(&id);
+                    .swap_remove(&id);
             },
         }
     }
 }
 
-fn map_of<T: 'static>(maps: &HashMap<TypeId, Entry>) -> Option<&HashMap<WorldObjectId, T>> {
+fn map_of<T: 'static>(maps: &IndexMap<TypeId, Entry>) -> Option<&IndexMap<WorldObjectId, T>> {
     maps.get(&TypeId::of::<T>())?.map.downcast_ref()
 }
 
 fn map_of_mut<T: 'static>(
-    maps: &mut HashMap<TypeId, Entry>,
-) -> Option<&mut HashMap<WorldObjectId, T>> {
+    maps: &mut IndexMap<TypeId, Entry>,
+) -> Option<&mut IndexMap<WorldObjectId, T>> {
     maps.get_mut(&TypeId::of::<T>())?.map.downcast_mut()
 }
 
 impl Components {
     pub fn new() -> Self {
         Self {
-            maps: HashMap::new(),
+            maps: IndexMap::new(),
         }
     }
 
@@ -74,7 +81,7 @@ impl Components {
             .entry(TypeId::of::<T>())
             .or_insert_with(Entry::new::<T>)
             .map
-            .downcast_mut::<HashMap<WorldObjectId, T>>()
+            .downcast_mut::<IndexMap<WorldObjectId, T>>()
             .expect("TypeId keys its concrete map")
             .insert(id, value)
     }
@@ -87,9 +94,11 @@ impl Components {
         map_of_mut::<T>(&mut self.maps)?.get_mut(&id)
     }
 
-    /// Remove the `T` attached to `id`, returning it if present.
+    /// Remove the `T` attached to `id`, returning it if present. O(1) via
+    /// `swap_remove`; the entry that previously held the last slot moves
+    /// into the freed position.
     pub fn remove<T: 'static>(&mut self, id: WorldObjectId) -> Option<T> {
-        map_of_mut::<T>(&mut self.maps)?.remove(&id)
+        map_of_mut::<T>(&mut self.maps)?.swap_remove(&id)
     }
 
     /// Drop every component attached to `id`. Called by
@@ -123,13 +132,14 @@ impl Default for Components {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{WorldTransform, Zone};
-    use glam::{Quat, Vec3};
+    use crate::sim::{Facing, SimPos, WorldTransform, Zone};
 
     fn obj(x: f32) -> WorldTransform {
+        // Tests don't care about exact position; tile-flavoured + facing
+        // zero is enough. Cast f32 → integer tile via truncation.
         WorldTransform {
-            position: Vec3::new(x, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
+            position: SimPos::tile(x as i32, 0, 0),
+            facing: Facing::ZERO,
         }
     }
 
@@ -185,20 +195,40 @@ mod tests {
     }
 
     #[test]
-    fn components_iter_visits_all_entries() {
+    fn components_iter_visits_in_insertion_order() {
+        // Determinism guarantee post-#87: IndexMap iterates in insertion
+        // order, no sort required.
         let mut z = Zone::new();
         let a = z.insert(obj(1.0));
         let b = z.insert(obj(2.0));
         z.components_mut().insert(a, Health(10));
         z.components_mut().insert(b, Health(20));
-        // HashMap iteration order is non-deterministic — sort before comparing.
-        let mut got: Vec<(WorldObjectId, u32)> = z
+        let got: Vec<(WorldObjectId, u32)> = z
             .components()
             .iter::<Health>()
             .map(|(id, h)| (id, h.0))
             .collect();
-        got.sort_by_key(|(_, h)| *h);
         assert_eq!(got, vec![(a, 10), (b, 20)]);
+    }
+
+    #[test]
+    fn components_iter_order_is_stable_across_runs() {
+        // The determinism invariant. Build the same component soup twice
+        // and assert iteration order matches exactly. A `HashMap`-backed
+        // version of this test would have ~50% odds of failing on any
+        // given run.
+        fn build() -> Vec<u32> {
+            let mut z = Zone::new();
+            let ids: Vec<_> = (0..32).map(|_| z.insert(obj(0.0))).collect();
+            for (i, &id) in ids.iter().enumerate() {
+                z.components_mut().insert(id, Health(i as u32));
+            }
+            z.components().iter::<Health>().map(|(_, h)| h.0).collect()
+        }
+        let a = build();
+        let b = build();
+        assert_eq!(a, b);
+        assert_eq!(a, (0..32).collect::<Vec<_>>());
     }
 
     #[test]

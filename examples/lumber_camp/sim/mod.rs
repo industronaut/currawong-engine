@@ -29,9 +29,9 @@ pub mod motion;
 use std::time::Duration;
 
 use currawong::data::{Definitions, KindId};
-use currawong::glam::{Quat, Vec3};
 use currawong::{
-    Simulation, TileCoord, WorldObjectId, WorldObjectRef, WorldTransform, Zone, ZoneId, Zones,
+    Facing, SimPos, SimUnit, Simulation, TileCoord, WorldObjectId, WorldObjectRef, WorldTransform,
+    Zone, ZoneId, Zones,
 };
 use serde::Deserialize;
 
@@ -62,8 +62,9 @@ pub const HEIGHT_UNIT: f32 = 0.1;
 /// clear most of them.
 pub const WOOD_GOAL: u32 = 5;
 /// Wall-time budget (sim seconds — same thing at 1× speed) before the game
-/// is lost.
-pub const TIME_LIMIT_SECS: f32 = 60.0;
+/// is lost. Stored as a plain integer since the value has no fractional
+/// part; compared against [`Game::elapsed`] (Q16.16 sim-seconds).
+pub const TIME_LIMIT_SECS: i32 = 60;
 
 /// Square-grid extent. Tiles span `[-HALF_EXTENT, HALF_EXTENT)` along X and Y.
 const HALF_EXTENT: i32 = 8;
@@ -91,8 +92,10 @@ pub struct GameStats {
     pub oak: TreeStats,
     pub pine: TreeStats,
     /// Walk speed in metres per sim-second for [`KindIds::lumberjack`].
-    /// Stamped into every [`Move`] component at insertion time.
-    pub lumberjack_speed: f32,
+    /// Stamped into every [`Move`] component at insertion time. Defs
+    /// authored as floats (RON files speak `f32`); converted to fixed-
+    /// point once at load.
+    pub lumberjack_speed: SimUnit,
 }
 
 impl GameStats {
@@ -128,7 +131,7 @@ impl GameStats {
             pine: TreeStats {
                 chop_ticks: pine.chop_ticks,
             },
-            lumberjack_speed: walker.walk_speed,
+            lumberjack_speed: SimUnit::from_num(walker.walk_speed),
         }
     }
 
@@ -187,8 +190,9 @@ pub struct Game {
     pub stockpile: WorldObjectId,
     pub state: GameState,
     /// Sim-seconds elapsed since the run started — drives the time-limit
-    /// check and the HUD's countdown. Only advances while `Playing`.
-    pub elapsed: f32,
+    /// check and the HUD's countdown. Only advances while `Playing`. Q16.16
+    /// for determinism; the HUD converts to `f32` at render time.
+    pub elapsed: SimUnit,
     /// Resolved kind ids + per-species stats from the [`Definitions`].
     pub stats: GameStats,
 }
@@ -212,31 +216,42 @@ impl Game {
         // Lumber camp building in the +X +Y corner. Origin-at-base on the
         // glTF means Z = 0 is the ground.
         let stockpile = zone.insert(WorldTransform {
-            position: Vec3::new(6.0, 6.0, 0.0),
-            rotation: Quat::IDENTITY,
+            position: SimPos::tile(6, 6, 0),
+            facing: Facing::ZERO,
         });
         zone.components_mut()
             .insert(stockpile, stats.kinds.lumber_camp.clone());
         zone.components_mut()
             .insert(stockpile, WoodStored { count: 0 });
 
-        // Three lumberjacks loitering near the camp.
-        for &(x, y) in &[(4.5, 5.5), (5.5, 4.5), (4.5, 6.5)] {
+        // Three lumberjacks loitering near the camp. Tile centres
+        // (`x.5`, `y.5`) — half-tile offset is the example's convention.
+        for &(x, y) in &[(4, 5), (5, 4), (4, 6)] {
             let pawn = zone.insert(WorldTransform {
-                position: Vec3::new(x, y, 0.0),
-                rotation: Quat::IDENTITY,
+                position: SimPos {
+                    x: SimUnit::from_num(x) + SimUnit::from_num(0.5),
+                    y: SimUnit::from_num(y) + SimUnit::from_num(0.5),
+                    z: SimUnit::ZERO,
+                },
+                facing: Facing::ZERO,
             });
             zone.components_mut()
                 .insert(pawn, stats.kinds.lumberjack.clone());
-            zone.components_mut().insert(pawn, Idle { seconds: 0.0 });
+            zone.components_mut().insert(
+                pawn,
+                Idle {
+                    seconds: SimUnit::ZERO,
+                },
+            );
         }
 
         // Three oaks + two pines scattered across the -X / -Y half of the
         // map. Two species so the per-kind asset binding (oak.glb vs
         // pine.glb, different bark textures, different chop times) is
-        // visibly load-bearing rather than incidental.
-        let oaks: &[(f32, f32)] = &[(-5.5, -4.5), (-3.0, -6.0), (-6.5, -1.5)];
-        let pines: &[(f32, f32)] = &[(-1.0, -3.5), (1.5, -5.5)];
+        // visibly load-bearing rather than incidental. Half-tile-centred
+        // like the pawns.
+        let oaks: &[(i32, i32)] = &[(-6, -5), (-3, -6), (-7, -2)];
+        let pines: &[(i32, i32)] = &[(-1, -4), (1, -6)];
         for &(x, y) in oaks {
             spawn_tree(zone, x, y, &stats.kinds.oak_tree);
         }
@@ -249,7 +264,7 @@ impl Game {
             zone: zone_id,
             stockpile,
             state: GameState::Playing,
-            elapsed: 0.0,
+            elapsed: SimUnit::ZERO,
             stats,
         }
     }
@@ -265,10 +280,14 @@ impl Game {
     }
 }
 
-fn spawn_tree(zone: &mut Zone, x: f32, y: f32, kind: &KindId) {
+fn spawn_tree(zone: &mut Zone, x: i32, y: i32, kind: &KindId) {
     let tree = zone.insert(WorldTransform {
-        position: Vec3::new(x, y, 0.0),
-        rotation: Quat::IDENTITY,
+        position: SimPos {
+            x: SimUnit::from_num(x) + SimUnit::from_num(0.5),
+            y: SimUnit::from_num(y) + SimUnit::from_num(0.5),
+            z: SimUnit::ZERO,
+        },
+        facing: Facing::ZERO,
     });
     zone.components_mut().insert(tree, kind.clone());
 }
@@ -325,7 +344,11 @@ impl Simulation for Game {
             // no timer advancement. The HUD keeps drawing the banner.
             return;
         }
-        let dt = dt.as_secs_f32();
+        // Convert wall-clock dt to Q16.16 sim-seconds via integer nanos
+        // — bit-exact, no float involved.
+        let nanos = dt.as_nanos();
+        let secs_q16: u128 = (nanos << 16) / 1_000_000_000;
+        let dt = SimUnit::from_bits(secs_q16.min(i32::MAX as u128) as i32);
         self.elapsed += dt;
         let stockpile = self.stockpile;
         let stats = &self.stats;
@@ -354,7 +377,7 @@ impl Simulation for Game {
         // early-return at the top.
         if self.wood_count() >= WOOD_GOAL {
             self.state = GameState::Won;
-        } else if self.elapsed >= TIME_LIMIT_SECS {
+        } else if self.elapsed >= SimUnit::from_num(TIME_LIMIT_SECS) {
             self.state = GameState::Lost;
         }
     }

@@ -52,12 +52,12 @@ use std::time::Instant;
 use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, CellHighlight, CommandQueue, EngineCtx, FlatTopsMesher, Frustum,
+    Camera, CameraBinding, CellHighlight, CommandQueue, EngineCtx, Facing, FlatTopsMesher, Frustum,
     HitTarget, InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshInstanceAttribs,
-    MeshPart, OrbitRig, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, Simulation,
-    SlotKey, SquareGrid, TerrainMaterial, TerrainMaterialInstance, TerrainPicker, TerrainRenderer,
-    TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View, ViewConfig, WorldObjectId,
-    WorldTransform, Zone, ZoneId, Zones, wgpu, winit,
+    MeshPart, OrbitRig, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, SimPos, SimRng,
+    SimUnit, Simulation, SlotKey, SquareGrid, TerrainMaterial, TerrainMaterialInstance,
+    TerrainPicker, TerrainRenderer, TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View,
+    ViewConfig, WorldObjectId, WorldTransform, Zone, ZoneId, Zones, sim_tile, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -67,7 +67,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 #[derive(Clone, Copy, Default)]
 struct Tree {
     age_ticks: u32,
-    tint_seed: f32,
+    /// Per-tree jitter in `[0, 1)`. Sim-side state, integer-backed for
+    /// determinism; the renderer converts to `f32` at extract time.
+    tint_seed: SimUnit,
 }
 
 const MATURE_AGE: u32 = 720; // ~12 s at the default 60 Hz tick rate.
@@ -106,24 +108,28 @@ impl Game {
             }
         }
 
-        // Fixed seed → identical layout every run.
-        let mut rng = Rng::new(0xC0FFEE);
+        // Fixed seed → identical layout every run. SimRng (Pcg64) is the
+        // engine-blessed sim PRNG; the previous bespoke generator went
+        // away with #87.
+        let mut rng = SimRng::from_seed(0xC0FFEE);
         for _ in 0..TREE_COUNT {
-            let tx = rng.range_i32(-TERRAIN_HALF, TERRAIN_HALF);
-            let ty = rng.range_i32(-TERRAIN_HALF, TERRAIN_HALF);
-            let floor_h = zone
+            let tx = rng.gen_range_i32(-TERRAIN_HALF, TERRAIN_HALF);
+            let ty = rng.gen_range_i32(-TERRAIN_HALF, TERRAIN_HALF);
+            let floor_h_units = zone
                 .terrain()
                 .tile_or_default(TileCoord::new(tx, ty))
-                .floor_height as f32
-                * HEIGHT_UNIT;
-            let position = Vec3::new(
-                tx as f32 + 0.5 + rng.next_f32() - 0.5,
-                ty as f32 + 0.5 + rng.next_f32() - 0.5,
-                floor_h,
+                .floor_height;
+            let floor_z = SimUnit::from_num(floor_h_units) * SimUnit::from_num(HEIGHT_UNIT);
+            // Tile-centred origin plus uniform [0, 1) sub-tile jitter.
+            let position = SimPos::new(
+                sim_tile(tx) + rng.gen_sub_tile(),
+                sim_tile(ty) + rng.gen_sub_tile(),
+                floor_z,
             );
-            let tint_seed = rng.next_f32();
-            let rotation = Quat::from_rotation_z(rng.next_f32() * TAU);
-            let id = zone.insert(WorldTransform { position, rotation });
+            let tint_seed = rng.gen_sub_tile();
+            // Uniform yaw: full 2^16 of Facing units.
+            let facing = Facing(rng.gen_range_u32(0, Facing::FULL_TURN) as u16);
+            let id = zone.insert(WorldTransform { position, facing });
             zone.components_mut().insert(id, RenderId::TreeOak);
             zone.components_mut().insert(
                 id,
@@ -149,29 +155,6 @@ impl Simulation for Game {
                 }
             }
         }
-    }
-}
-
-// --- Tiny deterministic RNG --------------------------------------------------
-
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-    fn next_u32(&mut self) -> u32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (self.0 >> 33) as u32
-    }
-    fn next_f32(&mut self) -> f32 {
-        self.next_u32() as f32 / (u32::MAX as f32 + 1.0)
-    }
-    fn range_i32(&mut self, lo: i32, hi: i32) -> i32 {
-        lo + (self.next_u32() % (hi - lo) as u32) as i32
     }
 }
 
@@ -687,7 +670,7 @@ fn extract_part(
     // material consumes it; bark stays flat brown.
     let young = Vec4::new(0.55, 0.85, 0.30, 1.0);
     let mature = Vec4::new(0.15, 0.42, 0.18, 1.0);
-    let s = tree.tint_seed;
+    let s: f32 = tree.tint_seed.to_num();
     let jitter = Vec4::new(
         (s * TAU).sin() * 0.06,
         (s * 4.10 + 1.7).sin() * 0.06,

@@ -23,8 +23,8 @@
 //! part of this module — the game's [`Simulation`](crate::Simulation) impl
 //! ticks it, reading and writing [`Tile::liquid`].
 
-use std::collections::HashMap;
-use std::collections::hash_map;
+use indexmap::IndexMap;
+use indexmap::map as indexmap_map;
 
 use glam::{IVec2, UVec2};
 
@@ -132,7 +132,7 @@ impl Default for Chunk {
 /// Defaults to [`SquareGrid`] so unparameterized callers keep working.
 pub struct Terrain<G: Grid = SquareGrid> {
     grid: G,
-    chunks: HashMap<ChunkCoord, Chunk>,
+    chunks: IndexMap<ChunkCoord, Chunk>,
 }
 
 impl Default for Terrain<SquareGrid> {
@@ -156,7 +156,7 @@ impl<G: Grid> Terrain<G> {
     pub fn with_grid(grid: G) -> Self {
         Self {
             grid,
-            chunks: HashMap::new(),
+            chunks: IndexMap::new(),
         }
     }
 
@@ -193,9 +193,9 @@ impl<G: Grid> Terrain<G> {
         self.chunks.get(&coord)
     }
 
-    /// Iterate every allocated chunk. Order is unspecified (and currently
-    /// non-deterministic — `HashMap` uses a randomly-seeded hasher).
-    pub fn chunks(&self) -> hash_map::Iter<'_, ChunkCoord, Chunk> {
+    /// Iterate every allocated chunk in insertion order. `IndexMap`-backed,
+    /// so the order is deterministic across runs.
+    pub fn chunks(&self) -> indexmap_map::Iter<'_, ChunkCoord, Chunk> {
         self.chunks.iter()
     }
 

@@ -8,14 +8,13 @@
 //! motion and read [`advance`]'s arrival list to react when the pawn gets
 //! there.
 
-use currawong::glam::Quat;
-use currawong::{WorldObjectId, Zone};
+use currawong::{Facing, SimPos, SimUnit, SimVec, WorldObjectId, Zone};
 
-/// Advance the parent's transform toward `target` at `speed` metres per
-/// second each tick. Removed by [`advance`] on arrival.
+/// Advance the parent's transform toward `target` at `speed` Q16.16 metres
+/// per second each tick. Removed by [`advance`] on arrival.
 pub struct Move {
-    pub target: currawong::glam::Vec3,
-    pub speed: f32,
+    pub target: SimPos,
+    pub speed: SimUnit,
 }
 
 /// Step every Move-bearing object toward its target. Returns the ids of
@@ -24,10 +23,9 @@ pub struct Move {
 /// [`super::chopping::on_arrival`] on the same slice.
 ///
 /// Also faces the object along its velocity (local +X = "forward", rotating
-/// around Z). Capsule pawns are rotationally symmetric so this isn't visible
-/// today, but the per-instance rotation flows through `WorldTransform.rotation`
-/// into the pawn template's model matrix end-to-end.
-pub fn advance(zone: &mut Zone, dt: f32) -> Vec<WorldObjectId> {
+/// around Z) via the integer atan2 in [`Facing::from_direction`] — bit-exact
+/// across architectures, no `f32::atan2` involved.
+pub fn advance(zone: &mut Zone, dt: SimUnit) -> Vec<WorldObjectId> {
     let mut arrived: Vec<WorldObjectId> = Vec::new();
     {
         let (mut objects, components) = zone.split_mut();
@@ -35,16 +33,27 @@ pub fn advance(zone: &mut Zone, dt: f32) -> Vec<WorldObjectId> {
             let Some(transform) = objects.get_mut(pawn) else {
                 continue;
             };
-            let delta = m.target - transform.position;
+            let delta: SimVec = m.target - transform.position;
             let dist = delta.length();
             let step = m.speed * dt;
-            if dist <= step.max(1e-3) {
+            // 1e-3 tile threshold mirrors the float version. Q16.16
+            // resolution makes anything smaller indistinguishable from
+            // zero anyway, so this is a clarity threshold, not a fudge.
+            let epsilon = SimUnit::from_num(0.001);
+            if dist <= step.max(epsilon) {
                 transform.position = m.target;
                 arrived.push(pawn);
             } else {
-                let dir = delta / dist;
+                // dir = delta / dist (Q16.16 / Q16.16). Direction
+                // magnitudes are small, so no widening tricks needed —
+                // the `fixed` crate's divide handles it.
+                let dir = SimVec {
+                    x: delta.x / dist,
+                    y: delta.y / dist,
+                    z: delta.z / dist,
+                };
                 transform.position += dir * step;
-                transform.rotation = Quat::from_rotation_z(dir.y.atan2(dir.x));
+                transform.facing = Facing::from_direction(dir);
             }
         }
     }

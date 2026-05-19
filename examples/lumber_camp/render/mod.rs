@@ -720,7 +720,10 @@ impl View for LumberCampView {
         // Top-left status panel: wood progress + countdown. Always present
         // so the player sees the goal even after winning.
         let wood = sim.wood_count();
-        let remaining = (TIME_LIMIT_SECS - sim.elapsed).max(0.0);
+        // View-side render of a sim-side fixed-point value — convert at
+        // the seam.
+        let elapsed: f32 = sim.elapsed.to_num();
+        let remaining = ((TIME_LIMIT_SECS as f32) - elapsed).max(0.0);
         yakui::pad(yakui::widgets::Pad::all(16.0), || {
             yakui::align(yakui::Alignment::TOP_LEFT, || {
                 yakui::colored_box_container(yakui::Color::rgba(20, 24, 32, 220), || {

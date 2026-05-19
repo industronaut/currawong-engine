@@ -5,16 +5,16 @@
 //! hauling re-adds it when a delivery completes. This module just owns the
 //! type and ticks the counter.
 
-use currawong::Zone;
+use currawong::{SimUnit, Zone};
 
 /// Component on a pawn with no job. `seconds` resets to 0 each time the
 /// pawn becomes idle and increments by `dt` every tick it remains idle.
 pub struct Idle {
-    pub seconds: f32,
+    pub seconds: SimUnit,
 }
 
 /// Increment every idle pawn's counter by `dt` sim-seconds.
-pub fn tick(zone: &mut Zone, dt: f32) {
+pub fn tick(zone: &mut Zone, dt: SimUnit) {
     for (_, idle) in zone.components_mut().iter_mut::<Idle>() {
         idle.seconds += dt;
     }

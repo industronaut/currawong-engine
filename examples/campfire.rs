@@ -27,11 +27,12 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use currawong::glam::{Mat4, Quat, Vec3, Vec4};
+use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Camera, CameraBinding, CommandQueue, EmitterReconciler, EmitterTemplate, EngineCtx,
-    InstanceBuckets, ParticleLifecycle, Renderer, Simulation, View, ViewConfig, WorldObjectId,
-    WorldObjectRef, WorldTransform, Zone, Zones, mat4_instance_attributes, wgpu, winit,
+    Camera, CameraBinding, CommandQueue, EmitterReconciler, EmitterTemplate, EngineCtx, Facing,
+    InstanceBuckets, ParticleLifecycle, Renderer, SimPos, Simulation, View, ViewConfig,
+    WorldObjectId, WorldObjectRef, WorldTransform, Zone, Zones, mat4_instance_attributes, wgpu,
+    winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -57,8 +58,8 @@ impl Game {
         let zone = zones.get_mut(main_zone).expect("just inserted");
 
         let fire_id = zone.insert(WorldTransform {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            rotation: Quat::IDENTITY,
+            position: SimPos::ZERO,
+            facing: Facing::ZERO,
         });
         zone.components_mut()
             .insert(fire_id, Campfire { lit: true });
@@ -152,21 +153,23 @@ fn extract_visuals(
     push: &mut dyn FnMut(VisualPart),
 ) {
     if let Some(fire) = zone.components().get::<Campfire>(id) {
+        // Convert the sim transform to a `glam::Mat4` at the extract seam.
+        let world_pos = obj.position.to_vec3();
         // The log itself is always present, lit or not.
         push(VisualPart::Mesh {
             mesh_id: MeshId::Log,
-            transform: Mat4::from_rotation_translation(obj.rotation, obj.position),
+            transform: Mat4::from_rotation_translation(obj.facing.to_quat(), world_pos),
         });
         if fire.lit {
             // Flame at the top of the log.
-            let flame_origin = obj.position + Vec3::new(0.0, 0.0, 0.45);
+            let flame_origin = world_pos + Vec3::new(0.0, 0.0, 0.45);
             push(VisualPart::AttachEmitter {
                 template: EmitterId::Flame,
                 slot: EmitterSlot::Flame,
                 transform: Mat4::from_translation(flame_origin),
             });
             // Smoke a bit higher, drifting up and slightly off-axis.
-            let smoke_origin = obj.position + Vec3::new(0.0, 0.0, 0.85);
+            let smoke_origin = world_pos + Vec3::new(0.0, 0.0, 0.85);
             push(VisualPart::AttachEmitter {
                 template: EmitterId::Smoke,
                 slot: EmitterSlot::Smoke,
