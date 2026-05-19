@@ -7,8 +7,7 @@
 //!   from raw RGBA8 byte slices via [`Texture::from_rgba8`] — generates
 //!   mipmaps on CPU using box-filter downsampling.
 //! - [`SamplerKind`] is a closed enum of canonical sampler configurations.
-//!   Adding a new one is a deliberate code change, like
-//!   [`SlotKind`](super::SlotKind).
+//!   Adding a new one is a deliberate code change.
 //! - [`SamplerRegistry`] holds the live `wgpu::Sampler` for each
 //!   [`SamplerKind`]. Build once at `View::init` and share across
 //!   materials.
@@ -344,7 +343,7 @@ fn downsample_rgba8(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) 
 }
 
 /// Closed set of canonical sampler configurations. Adding a new variant is
-/// a deliberate code change — same idea as [`SlotKind`](super::SlotKind).
+/// a deliberate code change.
 ///
 /// Naming is `<filter>-<address-mode>`. Mipmaps are always enabled (linear
 /// between mip levels for the linear filters, nearest for the nearest one).

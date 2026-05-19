@@ -572,7 +572,7 @@ impl View for LumberCampView {
             &sim.zones,
             &self.templates,
             &mut self.live_objects,
-            |parent, kind_id, _slots, components, instance| match shapes.get(kind_id) {
+            |parent, kind_id, components, instance| match shapes.get(kind_id) {
                 Some(RenderShape::Pawn) => {
                     pawn::update_instance(parent, components, instance, alpha, pawn)
                 }
@@ -597,7 +597,7 @@ impl View for LumberCampView {
             &self.templates,
             &self.live_objects,
             renderer,
-            |parent, _kind, part, world, _slots, hit_id| {
+            |parent, _kind, part, world, hit_id| {
                 let tint = if hovered == Some(parent) && part.material.is_body() {
                     HOVER_TINT
                 } else {
