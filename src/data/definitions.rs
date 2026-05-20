@@ -30,8 +30,9 @@
 //! written by another after a load-order shuffle). Stable namespaced
 //! strings sidestep that entirely.
 
-use std::collections::HashMap;
 use std::fmt;
+
+use indexmap::IndexMap;
 
 use super::path::VfsPath;
 use super::source::AssetError;
@@ -204,7 +205,7 @@ impl std::error::Error for DefError {}
 /// In-memory registry of all kind definitions loaded at startup.
 #[derive(Debug, Default)]
 pub struct Definitions {
-    kinds: HashMap<KindId, KindDef>,
+    kinds: IndexMap<KindId, KindDef>,
 }
 
 impl Definitions {
@@ -460,8 +461,8 @@ mod tests {
 
     #[test]
     fn duplicate_id_surfaces_clear_error() {
-        // Both files in the same layer, parsed in listing order — we can't
-        // predict which comes first, but Duplicate should always fire.
+        // Vfs::list sorts lexicographically, so `kinds/a.ron` is parsed
+        // first and `kinds/b.ron` triggers the Duplicate.
         let vfs = vfs_with(&[
             ("kinds/a.ron", r#"(id: "currawong:oak_tree")"#),
             ("kinds/b.ron", r#"(id: "currawong:oak_tree")"#),
@@ -469,7 +470,8 @@ mod tests {
         match block_on(Definitions::load(&vfs, &p("kinds"))) {
             Err(DefError::Duplicate { id, first, second }) => {
                 assert_eq!(id.as_str(), "currawong:oak_tree");
-                assert_ne!(first, second);
+                assert_eq!(first.as_str(), "kinds/a.ron");
+                assert_eq!(second.as_str(), "kinds/b.ron");
             }
             other => panic!("expected Duplicate, got {other:?}"),
         }
