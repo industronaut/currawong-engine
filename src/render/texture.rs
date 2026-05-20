@@ -296,7 +296,12 @@ fn decode_rgba8_from_path(path: &Path) -> Result<(u32, u32, Vec<u8>), TextureLoa
 /// Decode an in-memory image buffer to RGBA8. Whatever the source pixel
 /// format is, we force-convert to 8-bit RGBA so [`Texture::from_rgba8`]'s
 /// invariants hold.
-fn decode_rgba8_from_bytes(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), TextureLoadError> {
+///
+/// Shared with [`super::yakui_assets`] — yakui's managed-texture path also
+/// needs RGBA8 bytes, so the decode plumbing isn't `Texture`-specific.
+pub(super) fn decode_rgba8_from_bytes(
+    bytes: &[u8],
+) -> Result<(u32, u32, Vec<u8>), TextureLoadError> {
     let img = image::load_from_memory(bytes)?;
     let rgba = img.into_rgba8();
     let (w, h) = rgba.dimensions();

@@ -414,8 +414,8 @@ fn yakui_overlay<V: View>(
     game_ui: &mut GameUi,
     frame: &mut Frame,
 ) {
-    game_ui.run_and_render(renderer, &mut frame.encoder, &frame.view_tex, || {
-        view.game_ui(sim, ctx, cmds);
+    game_ui.run_and_render(renderer, &mut frame.encoder, &frame.view_tex, |yakui_ctx| {
+        view.game_ui(sim, ctx, cmds, yakui_ctx);
     });
 }
 

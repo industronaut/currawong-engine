@@ -3600,7 +3600,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 [[package]]
 name = "yakui"
 version = "0.3.0"
-source = "git+https://github.com/SecondHalfGames/yakui?rev=322a27275f86c4723dbbc86ade075c98512aea1b#322a27275f86c4723dbbc86ade075c98512aea1b"
+source = "git+https://github.com/industronaut/yakui?rev=ae76855905277db5a7cf5e461c35d37433ce8434#ae76855905277db5a7cf5e461c35d37433ce8434"
 dependencies = [
  "yakui-core",
  "yakui-widgets",
@@ -3609,7 +3609,7 @@ dependencies = [
 [[package]]
 name = "yakui-core"
 version = "0.3.0"
-source = "git+https://github.com/SecondHalfGames/yakui?rev=322a27275f86c4723dbbc86ade075c98512aea1b#322a27275f86c4723dbbc86ade075c98512aea1b"
+source = "git+https://github.com/industronaut/yakui?rev=ae76855905277db5a7cf5e461c35d37433ce8434#ae76855905277db5a7cf5e461c35d37433ce8434"
 dependencies = [
  "anymap",
  "bitflags 2.11.1",
@@ -3626,7 +3626,7 @@ dependencies = [
 [[package]]
 name = "yakui-wgpu"
 version = "0.3.0"
-source = "git+https://github.com/SecondHalfGames/yakui?rev=322a27275f86c4723dbbc86ade075c98512aea1b#322a27275f86c4723dbbc86ade075c98512aea1b"
+source = "git+https://github.com/industronaut/yakui?rev=ae76855905277db5a7cf5e461c35d37433ce8434#ae76855905277db5a7cf5e461c35d37433ce8434"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3639,7 +3639,7 @@ dependencies = [
 [[package]]
 name = "yakui-widgets"
 version = "0.3.0"
-source = "git+https://github.com/SecondHalfGames/yakui?rev=322a27275f86c4723dbbc86ade075c98512aea1b#322a27275f86c4723dbbc86ade075c98512aea1b"
+source = "git+https://github.com/industronaut/yakui?rev=ae76855905277db5a7cf5e461c35d37433ce8434#ae76855905277db5a7cf5e461c35d37433ce8434"
 dependencies = [
  "arboard",
  "cosmic-text",
@@ -3652,7 +3652,7 @@ dependencies = [
 [[package]]
 name = "yakui-winit"
 version = "0.3.0"
-source = "git+https://github.com/SecondHalfGames/yakui?rev=322a27275f86c4723dbbc86ade075c98512aea1b#322a27275f86c4723dbbc86ade075c98512aea1b"
+source = "git+https://github.com/industronaut/yakui?rev=ae76855905277db5a7cf5e461c35d37433ce8434#ae76855905277db5a7cf5e461c35d37433ce8434"
 dependencies = [
  "winit",
  "yakui-core",

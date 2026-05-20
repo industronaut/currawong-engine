@@ -53,9 +53,12 @@ egui-wgpu = { version = "0.34.2", optional = true }
 # wgpu 22; main has been on wgpu 29 since the bumping-various-dependencies PR.
 # Move to a real version when 0.4 (or whatever the post-wgpu-29 release is)
 # ships on crates.io.
-yakui = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a27275f86c4723dbbc86ade075c98512aea1b", optional = true }
-yakui-wgpu = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a27275f86c4723dbbc86ade075c98512aea1b", optional = true }
-yakui-winit = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a27275f86c4723dbbc86ade075c98512aea1b", optional = true }
+#yakui = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a27275f86c4723dbbc86ade075c98512aea1b", optional = true }
+#yakui-wgpu = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a27275f86c4723dbbc86ade075c98512aea1b", optional = true }
+#yakui-winit = { git = "https://github.com/SecondHalfGames/yakui", rev = "322a27275f86c4723dbbc86ade075c98512aea1b", optional = true }
+yakui       = { git = "https://github.com/industronaut/yakui", rev = "ae76855905277db5a7cf5e461c35d37433ce8434", optional = true }
+yakui-wgpu  = { git = "https://github.com/industronaut/yakui", rev = "ae76855905277db5a7cf5e461c35d37433ce8434", optional = true }
+yakui-winit = { git = "https://github.com/industronaut/yakui", rev = "ae76855905277db5a7cf5e461c35d37433ce8434", optional = true }
 
 [[example]]
 name = "assets"
@@ -107,3 +110,9 @@ name = "headless"
 [[bin]]
 name = "gen_test_assets"
 required-features = ["render"]
+
+#[patch."https://github.com/industronaut/yakui"]
+#yakui = { path = "../yakui/crates/yakui" }
+##yakui-widgets = { path = "../yakui/crates/yakui-widgets" }
+#yakui-wgpu  = { path = "../yakui/crates/yakui-wgpu" }
+#yakui-winit = { path = "../yakui/crates/yakui-winit" }

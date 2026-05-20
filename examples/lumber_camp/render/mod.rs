@@ -35,6 +35,7 @@
 //! [`LiveRenderObject`], driven by the sim's typed [`Designated`] /
 //! [`Carrying`] components.
 
+mod gameui;
 mod pawn;
 mod tree;
 
@@ -51,7 +52,7 @@ use currawong::{
     PbrAtlasMaterialParams, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
     RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
     TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, Texture, TextureColorSpace, View,
-    ViewConfig, ViewEnvironment, WorldObjectRef, ZoneId, wgpu, winit, yakui,
+    ViewConfig, ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId, wgpu, winit, yakui,
 };
 use serde::Deserialize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -254,6 +255,11 @@ pub struct LumberCampView {
     atlas_materials: MaterialRegistry<PbrAtlasMaterialInstance>,
     samplers: SamplerRegistry,
     asset_server: AssetServer,
+    /// Cache from VFS path → yakui [`ManagedTextureId`](yakui::ManagedTextureId)
+    /// for game-UI imagery (the nineslice window-frame PNGs). Shares the same
+    /// [`Arc<Vfs>`] as [`asset_server`](Self::asset_server) so mods resolve
+    /// identically on the world-asset and UI-asset paths.
+    yakui_assets: YakuiAssets,
 
     /// GPU bundle per drawable part. Looked up by the draw loop after the
     /// per-part bucket has been filled by the engine walk. Refresh runs
@@ -442,6 +448,8 @@ impl View for LumberCampView {
         let terrain_material = TerrainMaterial::new(renderer, camera_binding.layout());
         let terrain_solid = terrain_material.create_instance(renderer, TERRAIN_TINT);
 
+        let yakui_assets = YakuiAssets::new(vfs.clone());
+
         Self {
             camera,
             camera_binding,
@@ -451,6 +459,7 @@ impl View for LumberCampView {
             atlas_materials,
             samplers,
             asset_server,
+            yakui_assets,
             mesh_templates,
             templates,
             shapes,
@@ -716,7 +725,25 @@ impl View for LumberCampView {
         }
     }
 
-    fn game_ui(&mut self, sim: &Game, ctx: &mut EngineCtx, _: &mut CommandQueue<Command>) {
+    fn game_ui(
+        &mut self,
+        sim: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<Command>,
+        yakui_ctx: &mut yakui::Yakui,
+    ) {
+        // Cache-or-load the window-frame nineslice. First call blocks on the
+        // VFS read + decode + upload to yakui; later calls hit the cache.
+        // The PNG is 64×28 with 8-pixel corners; `Pad::all(8.0)` picks out
+        // those corners, leaving the stretchy centre for the panel body.
+        let frame = self
+            .yakui_assets
+            .texture(
+                yakui_ctx,
+                &VfsPath::new("lumber/window_corners.png").expect("valid path"),
+            )
+            .expect("load lumber/window_corners.png");
+
         // Top-left status panel: wood progress + countdown. Always present
         // so the player sees the goal even after winning.
         let wood = sim.wood_count();
@@ -726,8 +753,13 @@ impl View for LumberCampView {
         let remaining = ((TIME_LIMIT_SECS as f32) - elapsed).max(0.0);
         yakui::pad(yakui::widgets::Pad::all(16.0), || {
             yakui::align(yakui::Alignment::TOP_LEFT, || {
-                yakui::colored_box_container(yakui::Color::rgba(20, 24, 32, 220), || {
-                    yakui::pad(yakui::widgets::Pad::all(12.0), || {
+                gameui::panel(
+                    frame,
+                    yakui::widgets::Pad::all(14.0),
+                    yakui::widgets::Pad::all(4.0),
+                    yakui::Color::rgba(220, 244, 232, 255),
+                    yakui::Color::rgba(20, 24, 32, 220),
+                    || {
                         yakui::column(|| {
                             yakui::label(format!("Wood: {wood} / {WOOD_GOAL}"));
                             yakui::label(format!("Time: {}", format_clock(remaining)));
@@ -735,8 +767,8 @@ impl View for LumberCampView {
                                 ctx.event_loop.exit();
                             }
                         });
-                    });
-                });
+                    },
+                );
             });
         });
 
@@ -749,16 +781,21 @@ impl View for LumberCampView {
         };
         if let Some((text, bg)) = banner {
             yakui::align(yakui::Alignment::CENTER, || {
-                yakui::colored_box_container(bg, || {
-                    yakui::pad(yakui::widgets::Pad::all(28.0), || {
+                gameui::panel(
+                    frame,
+                    yakui::widgets::Pad::all(14.0),
+                    yakui::widgets::Pad::all(4.0),
+                    bg,
+                    bg,
+                    || {
                         yakui::column(|| {
                             yakui::label(text);
                             yakui::label("Esc to quit");
                         });
-                    });
-                });
+                    },
+                );
             });
-        }
+        };
     }
 }
 
