@@ -52,11 +52,13 @@ impl Vfs {
         Err(AssetError::NotFound)
     }
 
-    /// Union of every layer's listing, deduplicated by path. Order is
-    /// unspecified — callers that want sorted output should sort
-    /// themselves (the listing here is for "discover all .ron files"
-    /// callers like [`Definitions`](super::Definitions), where order
-    /// doesn't matter).
+    /// Union of every layer's listing, deduplicated by path, sorted
+    /// lexicographically. The sort is load-bearing: per-layer listings
+    /// arrive in OS- and filesystem-defined order (`fs::read_dir` makes no
+    /// guarantees), so without it [`Definitions::load`](super::Definitions)
+    /// would register kinds in a different sequence on different machines
+    /// and the resulting `IndexMap` iteration would no longer be
+    /// reproducible.
     pub fn list(&self) -> Result<Vec<VfsPath>, AssetError> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -67,6 +69,7 @@ impl Vfs {
                 }
             }
         }
+        out.sort();
         Ok(out)
     }
 }
@@ -125,13 +128,12 @@ mod tests {
                 .with("only_in_override.ron", b""),
         );
 
-        let mut listing: Vec<String> = vfs
+        let listing: Vec<String> = vfs
             .list()
             .unwrap()
             .into_iter()
             .map(|p| p.as_str().to_owned())
             .collect();
-        listing.sort();
         assert_eq!(
             listing,
             vec!["only_in_base.ron", "only_in_override.ron", "shared.ron",]
