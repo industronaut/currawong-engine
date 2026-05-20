@@ -45,6 +45,8 @@
 //! - [`vertex`] — closed set of canonical per-vertex layouts.
 //! - [`visibility`] — AABB + view-frustum culling primitives.
 //! - [`live_render_objects`] — live render-object instance reconciler with cull hysteresis.
+//! - [`yakui_assets`] — VFS → yakui [`ManagedTextureId`](yakui::ManagedTextureId)
+//!   cache for game UI (behind the `yakui` feature).
 //!
 //! Submodules are private; their public types are re-exported here so callers
 //! see a flat `currawong::*` surface.
@@ -82,6 +84,8 @@ mod texture;
 mod vertex;
 mod view;
 mod visibility;
+#[cfg(feature = "yakui")]
+mod yakui_assets;
 
 pub use asset_server::{AssetServer, MeshSource, ResolvedMesh, ResolvedTexture, TextureSource};
 pub use camera::{Camera, CameraBinding, CameraUniformData};
@@ -118,3 +122,5 @@ pub use texture::{SamplerKind, SamplerRegistry, Texture, TextureColorSpace, Text
 pub use vertex::PosNormalUv;
 pub use view::{EngineCtx, View, ViewConfig};
 pub use visibility::{Aabb, Frustum};
+#[cfg(feature = "yakui")]
+pub use yakui_assets::{YakuiAssetError, YakuiAssets};

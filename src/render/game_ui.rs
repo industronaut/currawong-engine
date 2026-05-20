@@ -45,15 +45,21 @@ impl GameUi {
 
     /// Run the UI closure, then record yakui's draw calls into `encoder`,
     /// compositing on top of whatever the main pass left in `view_tex`.
+    ///
+    /// The closure receives `&mut yakui::Yakui` so callers can reach
+    /// state-level APIs that the thread-local widget surface doesn't cover —
+    /// chiefly [`Yakui::add_texture`](yakui::Yakui::add_texture) for
+    /// registering yakui-managed images (consumed via
+    /// [`crate::YakuiAssets`]).
     pub(super) fn run_and_render(
         &mut self,
         renderer: &Renderer,
         encoder: &mut wgpu::CommandEncoder,
         view_tex: &wgpu::TextureView,
-        run_ui: impl FnOnce(),
+        run_ui: impl FnOnce(&mut yakui::Yakui),
     ) {
         self.state.start();
-        run_ui();
+        run_ui(&mut self.state);
         self.state.finish();
 
         self.renderer.paint_with_encoder(

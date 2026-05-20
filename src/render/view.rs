@@ -179,6 +179,14 @@ pub trait View: 'static {
     /// Same mutability contract as [`ui`](Self::ui): widgets read sim
     /// state and push commands for any sim-mutating action.
     ///
+    /// `yakui_ctx` is the engine's `&mut yakui::Yakui` — needed for
+    /// state-level APIs that the thread-local widget surface doesn't reach,
+    /// chiefly [`Yakui::add_texture`](yakui::Yakui::add_texture) for
+    /// registering yakui-managed images. The streaming-friendly wrapper
+    /// around that is [`YakuiAssets`](crate::YakuiAssets), which maps
+    /// [`VfsPath`](crate::data::VfsPath)s to
+    /// [`ManagedTextureId`](yakui::ManagedTextureId)s and caches the result.
+    ///
     /// Default no-op; opt in by overriding. Behind the `yakui` feature.
     /// Independent of [`ui`](Self::ui) — both can be implemented when both
     /// `egui` and `yakui` features are enabled.
@@ -188,8 +196,9 @@ pub trait View: 'static {
         sim: &Self::Sim,
         ctx: &mut EngineCtx,
         cmds: &mut CommandQueue<<Self::Sim as Simulation>::Command>,
+        yakui_ctx: &mut yakui::Yakui,
     ) {
-        let _ = (sim, ctx, cmds);
+        let _ = (sim, ctx, cmds, yakui_ctx);
     }
 
     /// Which zone the camera is currently looking at, if any. The engine
