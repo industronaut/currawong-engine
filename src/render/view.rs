@@ -8,13 +8,29 @@ use winit::event_loop::ActiveEventLoop;
 use crate::sim::{CommandQueue, SimClock, Simulation, ZoneId};
 
 use super::environment::ViewEnvironment;
+use super::frame_stats::FrameStats;
+use super::frame_timings::FrameTimings;
 use super::renderer::Renderer;
 
 /// Mutable engine state passed to view callbacks. Use `event_loop` to
 /// request exit and `clock` to read or change sim speed and tick rate.
+///
+/// [`timings`](Self::timings) and [`stats`](Self::stats) carry the previous
+/// frame's per-segment timing breakdown and CPU counters — measured by the
+/// engine, intended for debug overlays.
 pub struct EngineCtx<'a> {
     pub event_loop: &'a ActiveEventLoop,
     pub clock: &'a mut SimClock,
+    /// Snapshot of the previous frame's per-segment timing. Updated by the
+    /// engine before each callback fires. See [`FrameTimings`].
+    pub timings: FrameTimings,
+    /// Snapshot of the previous frame's CPU counters (draws, instances,
+    /// proxies). Updated by the engine before each callback fires; the
+    /// view drives the underlying counters via
+    /// [`Renderer::record_draw`](Renderer::record_draw) and
+    /// [`Renderer::record_proxies`](Renderer::record_proxies). See
+    /// [`FrameStats`].
+    pub stats: FrameStats,
 }
 
 /// Static window + render-target configuration for a [`View`], exposed

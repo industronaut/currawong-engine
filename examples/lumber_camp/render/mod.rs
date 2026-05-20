@@ -35,13 +35,14 @@
 //! [`LiveRenderObject`], driven by the sim's typed [`Designated`] /
 //! [`Carrying`] components.
 
+mod debugui;
 mod gameui;
 mod pawn;
 mod tree;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use currawong::data::{Definitions, KindId, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
@@ -52,7 +53,7 @@ use currawong::{
     PbrAtlasMaterialParams, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
     RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
     TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, Texture, TextureColorSpace, View,
-    ViewConfig, ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId, wgpu, winit, yakui,
+    ViewConfig, ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId, egui, wgpu, winit, yakui,
 };
 use serde::Deserialize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -299,6 +300,17 @@ pub struct LumberCampView {
     /// clock. Read by the per-instance update closure to overwrite
     /// `instance.world_xform`.
     pawn: PawnRenderer,
+
+    /// Wall-clock anchor for the egui FPS overlay. Sampled in `ui()`, so
+    /// frametimes reflect the full frame (sim tick + render + UI) regardless
+    /// of sim pause state.
+    last_frame: Instant,
+    /// Rolling frametime samples feeding the top-right FPS chart.
+    frame_samples: VecDeque<f32>,
+    /// One-line adapter description for the debug-overlay footer. Built at
+    /// init from [`Renderer::adapter_info`] so we don't reformat it every
+    /// frame.
+    adapter_info: String,
 }
 
 impl View for LumberCampView {
@@ -470,6 +482,9 @@ impl View for LumberCampView {
             terrain_solid,
             hovered: None,
             pawn: PawnRenderer::new(),
+            last_frame: Instant::now(),
+            frame_samples: VecDeque::with_capacity(debugui::FRAMETIME_HISTORY),
+            adapter_info: debugui::format_adapter_info(renderer.adapter_info()),
         }
     }
 
@@ -550,6 +565,10 @@ impl View for LumberCampView {
             &mut self.live_objects,
             &frustum,
         );
+        // Surface live-proxy counts to the debug overlay. Cheap walk; only
+        // happens once per frame.
+        let (visible, hysteresis) = self.live_objects.cull_counts();
+        renderer.record_proxies(visible, hysteresis);
 
         // Phase 1.5: reconcile material handles + cache the per-template
         // fallback adjustments. Material `refresh` is cheap when nothing
@@ -690,6 +709,7 @@ impl View for LumberCampView {
                 pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
                 pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..prim.index_count, 0, 0..count);
+                renderer.record_draw(count);
             }
         }
     }
@@ -723,6 +743,31 @@ impl View for LumberCampView {
             } => tree::emit_toggle_designation(cmds, self.hovered),
             _ => {}
         }
+    }
+
+    fn ui(
+        &mut self,
+        _: &Game,
+        ctx: &mut EngineCtx,
+        _: &mut CommandQueue<Command>,
+        egui_ctx: &egui::Context,
+    ) {
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32();
+        self.last_frame = now;
+        if self.frame_samples.len() == debugui::FRAMETIME_HISTORY {
+            self.frame_samples.pop_front();
+        }
+        self.frame_samples.push_back(dt);
+        debugui::show(
+            egui_ctx,
+            debugui::DebugInput {
+                samples: &self.frame_samples,
+                timings: &ctx.timings,
+                stats: &ctx.stats,
+                adapter_info: &self.adapter_info,
+            },
+        );
     }
 
     fn game_ui(

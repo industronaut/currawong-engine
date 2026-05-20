@@ -1,12 +1,15 @@
 //! Window + GPU surface, device, queue, and engine-managed scene resources.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use winit::window::Window;
 
 use crate::sim::{ChunkCoord, WorldObjectId, ZoneId};
 
 use super::environment::ViewEnvironment;
+use super::frame_stats::FrameStats;
+use super::gpu_profiler::GpuProfiler;
 use super::picking_buffer::HitTarget;
 use super::scene_resources::SceneResources;
 
@@ -20,12 +23,102 @@ pub struct Renderer {
     pub(super) surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     scene: SceneResources,
+    /// `Some` when the adapter exposed
+    /// [`wgpu::Features::TIMESTAMP_QUERY`] at device-creation time. Drives
+    /// the GPU column of the debug overlay's
+    /// [`FrameTimings`](super::FrameTimings).
+    gpu_profiler: Option<GpuProfiler>,
+    /// Snapshot of [`wgpu::Adapter::get_info`] from device creation —
+    /// backend, GPU name, vendor / driver strings. Surfaced through
+    /// [`Self::adapter_info`] for debug overlays and crash reports.
+    adapter_info: wgpu::AdapterInfo,
+    /// Atomic counters the view bumps via [`Self::record_draw`] /
+    /// [`Self::record_proxies`] during `render`. Snapshotted + reset by
+    /// the runner at frame boundaries; surfaces through
+    /// [`EngineCtx::stats`](super::EngineCtx).
+    frame_stats: FrameStatsCollector,
+}
+
+/// Atomic backing for [`Renderer::record_draw`] / [`Renderer::record_proxies`].
+/// Interior mutability so the `&Renderer` the view sees during `render` can
+/// still update the counters; the runner takes a snapshot and resets at the
+/// frame boundary.
+struct FrameStatsCollector {
+    draw_calls: AtomicU32,
+    instances: AtomicU32,
+    proxies_visible: AtomicU32,
+    proxies_hysteresis: AtomicU32,
+}
+
+impl FrameStatsCollector {
+    fn new() -> Self {
+        Self {
+            draw_calls: AtomicU32::new(0),
+            instances: AtomicU32::new(0),
+            proxies_visible: AtomicU32::new(0),
+            proxies_hysteresis: AtomicU32::new(0),
+        }
+    }
+
+    fn record_draw(&self, instances: u32) {
+        self.draw_calls.fetch_add(1, Ordering::Relaxed);
+        self.instances.fetch_add(instances, Ordering::Relaxed);
+    }
+
+    fn record_proxies(&self, visible: u32, hysteresis: u32) {
+        self.proxies_visible.store(visible, Ordering::Relaxed);
+        self.proxies_hysteresis.store(hysteresis, Ordering::Relaxed);
+    }
+
+    /// Read all four counters and zero `draw_calls` / `instances` for the
+    /// next frame. Proxy counts are *overwritten* by the next
+    /// `record_proxies` so they stay at their last value if the view skips
+    /// a call (e.g. a frame where the proxy table didn't update).
+    fn take_and_reset(&self) -> FrameStats {
+        FrameStats {
+            draw_calls: self.draw_calls.swap(0, Ordering::Relaxed),
+            instances: self.instances.swap(0, Ordering::Relaxed),
+            proxies_visible: self.proxies_visible.load(Ordering::Relaxed),
+            proxies_hysteresis: self.proxies_hysteresis.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl Renderer {
     /// Format pipelines targeting the swapchain should declare.
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
+    }
+
+    /// GPU adapter snapshot from device creation — backend, device name,
+    /// vendor / driver strings. Useful for debug overlays and crash
+    /// reports; remains stable for the lifetime of the [`Renderer`].
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter_info
+    }
+
+    /// Record one draw call rendering `instances` instances. Bumps the
+    /// per-frame counters surfaced through
+    /// [`EngineCtx::stats`](super::EngineCtx). Call once per
+    /// `pass.draw*`; cost is two relaxed atomic increments.
+    pub fn record_draw(&self, instances: u32) {
+        self.frame_stats.record_draw(instances);
+    }
+
+    /// Record live render-object proxy counts for this frame. `visible` is
+    /// the count inside the frustum; `hysteresis` is the count outside but
+    /// still inside the grace window. Conventional source is
+    /// [`LiveRenderObjects::cull_counts`](super::LiveRenderObjects::cull_counts).
+    /// Counts are stored as-written (not accumulated), so call exactly
+    /// once per frame after culling.
+    pub fn record_proxies(&self, visible: u32, hysteresis: u32) {
+        self.frame_stats.record_proxies(visible, hysteresis);
+    }
+
+    /// Snapshot the per-frame counters and zero the per-draw fields. Called
+    /// by the runner at frame boundaries; not normally needed by views.
+    pub(super) fn take_frame_stats(&self) -> FrameStats {
+        self.frame_stats.take_and_reset()
     }
 
     /// Current swapchain size in pixels. Useful for screen-space rendering
@@ -187,6 +280,59 @@ impl Renderer {
         self.scene.write_scene(&self.queue, env);
     }
 
+    /// Timestamp-writes block for the main world pass, or `None` when the
+    /// GPU profiler is disabled. Used by the runner; not normally needed by
+    /// views.
+    pub(super) fn gpu_profiler_world_pass_timestamps(
+        &self,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        self.gpu_profiler
+            .as_ref()
+            .map(|p| p.world_pass_timestamps())
+    }
+
+    /// Write the overlay-begin timestamp on the encoder, just before yakui
+    /// + egui run. No-op when `TIMESTAMP_QUERY_INSIDE_ENCODERS` is absent.
+    pub(super) fn gpu_profiler_overlay_begin(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(profiler) = self.gpu_profiler.as_ref() {
+            profiler.write_overlay_begin(encoder);
+        }
+    }
+
+    /// Write the overlay-end timestamp on the encoder, just after egui
+    /// finishes. Pairs with [`Self::gpu_profiler_overlay_begin`].
+    pub(super) fn gpu_profiler_overlay_end(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(profiler) = self.gpu_profiler.as_ref() {
+            profiler.write_overlay_end(encoder);
+        }
+    }
+
+    /// Resolve the frame's timestamp pairs into a readback slot. Called
+    /// by the runner after all timestamps have been written (world pass
+    /// closed, overlays done).
+    pub(super) fn gpu_profiler_resolve(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(profiler) = self.gpu_profiler.as_ref() {
+            profiler.resolve(encoder);
+        }
+    }
+
+    /// Kick off `map_async` on the slot just resolved. Must run after the
+    /// encoder has been submitted.
+    pub(super) fn gpu_profiler_schedule_readback(&self) {
+        if let Some(profiler) = self.gpu_profiler.as_ref() {
+            profiler.schedule_readback();
+        }
+    }
+
+    /// Latest per-segment GPU durations from the readback ring. All-`None`
+    /// when the profiler is disabled or no readback has landed yet.
+    pub(super) fn gpu_profiler_latest(&self) -> super::frame_timings::GpuSegments {
+        self.gpu_profiler
+            .as_ref()
+            .map(|p| p.latest())
+            .unwrap_or_default()
+    }
+
     pub(super) async fn new(
         window: Arc<Window>,
         depth_format: Option<wgpu::TextureFormat>,
@@ -206,9 +352,31 @@ impl Renderer {
             .await
             .expect("no suitable GPU adapter found");
 
+        // Opt in to TIMESTAMP_QUERY when the adapter exposes it so the
+        // debug overlay's GPU column can be populated. Backends without it
+        // (some WebGPU contexts, older driver/HW combos) still work — the
+        // profiler stays `None` and the overlay column reads "—".
+        //
+        // TIMESTAMP_QUERY_INSIDE_ENCODERS layers on top: needed for the
+        // overlay segment, because yakui's render pass is owned by
+        // `yakui_wgpu::paint_with_encoder` and we can't pass `timestamp_writes`
+        // to it — we have to bracket the encoder instead.
+        let adapter_features = adapter.features();
+        let timestamp_query_supported = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let overlay_timestamps_supported = adapter_features.contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        );
+        let mut required_features = wgpu::Features::empty();
+        if timestamp_query_supported {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+        if overlay_timestamps_supported {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("currawong device"),
+                required_features,
                 ..Default::default()
             })
             .await
@@ -235,6 +403,9 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let scene = SceneResources::new(&device, config.width, config.height, depth_format);
+        let gpu_profiler = timestamp_query_supported
+            .then(|| GpuProfiler::new(&device, &queue, overlay_timestamps_supported));
+        let adapter_info = adapter.get_info();
 
         Self {
             window,
@@ -243,6 +414,9 @@ impl Renderer {
             surface,
             config,
             scene,
+            gpu_profiler,
+            adapter_info,
+            frame_stats: FrameStatsCollector::new(),
         }
     }
 
