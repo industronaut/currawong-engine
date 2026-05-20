@@ -210,6 +210,7 @@ impl TerrainRenderer {
             buffers.id_binding.write(renderer, base_id);
             pass.set_bind_group(3, &buffers.id_binding.bind_group, &[]);
             mesh.draw(pass);
+            renderer.record_draw(1);
         }
     }
 

@@ -248,6 +248,26 @@ impl<R: Clone + Eq + Hash> LiveRenderObjects<R> {
             .iter_mut()
             .map(|((parent, rid), obj)| (*parent, rid, obj))
     }
+
+    /// `(visible, hysteresis)` proxy counts as of the last
+    /// [`cull`](Self::cull). `visible` are proxies inside the frustum this
+    /// frame; `hysteresis` are proxies outside the frustum but still within
+    /// the hysteresis grace window — drawn, but on borrowed time. Proxies
+    /// fully outside the frustum *and* past the hysteresis window are
+    /// dropped by `cull` and so aren't counted. Engine-cheap walk;
+    /// primarily for debug overlays.
+    pub fn cull_counts(&self) -> (u32, u32) {
+        let mut visible = 0u32;
+        let mut hysteresis = 0u32;
+        for obj in self.objects.values() {
+            if obj.is_visible() {
+                visible += 1;
+            } else {
+                hysteresis += 1;
+            }
+        }
+        (visible, hysteresis)
+    }
 }
 
 #[cfg(test)]

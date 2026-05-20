@@ -13,6 +13,12 @@
 //!   [`TerrainPicker`] for hover/selection feedback.
 //! - [`environment`] — view-side environment (sun, ambient, sky) + the
 //!   engine-managed scene bind group.
+//! - [`frame_stats`] — per-frame CPU counters (draws, instances, proxies)
+//!   surfaced on [`EngineCtx`] for debug overlays.
+//! - [`frame_timings`] — per-frame CPU + GPU timing breakdown surfaced on
+//!   [`EngineCtx`] for debug overlays.
+//! - [`gpu_profiler`] — wgpu timestamp-query ring driving
+//!   [`FrameTimings::gpu`].
 //! - [`renderer`] — window + GPU device/queue/surface + scene resources.
 //! - [`scene_resources`] — engine-managed per-scene GPU state: depth
 //!   attachment, scene-environment binding (and future shadow maps, IBL probes,
@@ -59,8 +65,11 @@ mod cell_highlight;
 mod debug_ui;
 mod emitter;
 mod environment;
+mod frame_stats;
+mod frame_timings;
 #[cfg(feature = "yakui")]
 mod game_ui;
+mod gpu_profiler;
 mod handle;
 mod instance;
 mod live_render_objects;
@@ -93,6 +102,8 @@ pub use camera_rig::{OrbitRig, OrbitRigConfig};
 pub use cell_highlight::CellHighlight;
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
 pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
+pub use frame_stats::FrameStats;
+pub use frame_timings::{FrameTimings, GpuSegments};
 pub use handle::{Handle, HandleError, HandleState};
 pub use instance::{InstanceBuckets, mat4_instance_attributes, u32_id_instance_attribute};
 pub use live_render_objects::{LiveRenderObject, LiveRenderObjects, RenderPartState};

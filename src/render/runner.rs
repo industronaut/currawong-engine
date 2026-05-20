@@ -2,7 +2,7 @@
 //! `winit` window and a [`SimClock`].
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -14,6 +14,8 @@ use crate::sim::{CommandQueue, SimClock, Simulation};
 #[cfg(feature = "egui")]
 use super::debug_ui::DebugUi;
 use super::environment::ViewEnvironment;
+use super::frame_stats::FrameStats;
+use super::frame_timings::FrameTimings;
 #[cfg(feature = "yakui")]
 use super::game_ui::GameUi;
 use super::renderer::Renderer;
@@ -59,6 +61,17 @@ struct RunState<V: View> {
     /// (`copy_texture_to_buffer` at this pixel). Tracked independently from
     /// any view-side picker because the readback is engine-managed.
     cursor_px: Option<(u32, u32)>,
+    /// Previous frame's per-segment timing. Refreshed by `render_frame` and
+    /// snapshotted onto every [`EngineCtx`] the runner hands to user
+    /// callbacks; debug overlays read it via `ctx.timings`. CPU figures
+    /// are wall-clock around the sim tick loop and the main render pass;
+    /// `gpu` reflects whatever the wgpu timestamp-query ring has finished
+    /// reading back (1–3 frames behind the latest submit).
+    timings: FrameTimings,
+    /// Previous frame's CPU counters — draws, instances, proxies — taken
+    /// from [`Renderer::take_frame_stats`] at the end of `render_frame`.
+    /// Mirrored onto every [`EngineCtx`] alongside [`Self::timings`].
+    stats: FrameStats,
     #[cfg(feature = "egui")]
     debug_ui: DebugUi,
     #[cfg(feature = "yakui")]
@@ -94,6 +107,8 @@ impl<V: View> ApplicationHandler for Handler<V> {
             cmds,
             last_redraw: Instant::now(),
             cursor_px: None,
+            timings: FrameTimings::default(),
+            stats: FrameStats::default(),
             #[cfg(feature = "egui")]
             debug_ui,
             #[cfg(feature = "yakui")]
@@ -129,6 +144,8 @@ impl<V: View> ApplicationHandler for Handler<V> {
             let mut ctx = EngineCtx {
                 event_loop,
                 clock: &mut state.clock,
+                timings: state.timings,
+                stats: state.stats,
             };
             state
                 .view
@@ -168,6 +185,7 @@ impl<V: View> ApplicationHandler for Handler<V> {
                 // where external mutations land on `Sim`, mirroring
                 // `Simulation::apply_command`'s contract.
                 let total_after_advance = state.clock.tick();
+                let sim_start = Instant::now();
                 for i in 0..pending {
                     let sim_tick = total_after_advance - pending as u64 + (i + 1) as u64;
                     let sim = &mut state.sim;
@@ -177,6 +195,11 @@ impl<V: View> ApplicationHandler for Handler<V> {
                         .drain_ready(sim_tick, |cmd| sim.apply_command(&cmd));
                     sim.tick(tick_period);
                 }
+                state.timings.sim_cpu = if pending > 0 {
+                    sim_start.elapsed()
+                } else {
+                    Duration::ZERO
+                };
                 // Keep the queue's notion of "now" up to date even on frames
                 // that fired zero ticks, so `push_now` during input events
                 // between frames stamps with the latest known tick.
@@ -188,6 +211,8 @@ impl<V: View> ApplicationHandler for Handler<V> {
                     let mut ctx = EngineCtx {
                         event_loop,
                         clock: &mut state.clock,
+                        timings: state.timings,
+                        stats: state.stats,
                     };
                     state
                         .view
@@ -222,8 +247,11 @@ struct Frame {
 fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, alpha: f32) {
     // Drain any hit-ID readbacks whose GPU writes finished since the last
     // frame. `Poll` is non-blocking — callbacks for not-yet-done buffers
-    // simply don't fire this tick.
+    // simply don't fire this tick. The GPU profiler's map_async callbacks
+    // ride the same poll — pull the latest result *after* polling so this
+    // frame's overlay sees the freshest available measurement.
     let _ = state.renderer.device.poll(wgpu::PollType::Poll);
+    state.timings.gpu = state.renderer.gpu_profiler_latest();
     // Per-frame indirection table is built up fresh inside main_pass via
     // engine-side renderers calling Renderer::reserve_terrain_chunk.
     state.renderer.reset_frame_id_table();
@@ -232,6 +260,7 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         return;
     };
     extract_scene::<V>(&state.view, &state.sim, &state.renderer);
+    let render_start = Instant::now();
     main_pass::<V>(
         &mut state.view,
         &state.sim,
@@ -239,6 +268,7 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         &state.renderer,
         &mut frame,
     );
+    state.timings.render_cpu = render_start.elapsed();
     // Record a 1×1 cursor-pixel copy into the next free readback slot.
     // No-ops if the cursor is outside the window or every slot is in
     // flight; the TerrainPicker's ray-plane path covers the gap. The
@@ -253,6 +283,12 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
             cy,
         );
     }
+    // Start the overlay-timing bracket *after* the world pass and picking
+    // copy so it only covers yakui + egui. No-op when the device doesn't
+    // have TIMESTAMP_QUERY_INSIDE_ENCODERS.
+    state
+        .renderer
+        .gpu_profiler_overlay_begin(&mut frame.encoder);
     // Build the per-frame EngineCtx once and share &mut across both overlay
     // dispatch sites — keeps the construction in one place so new fields on
     // EngineCtx don't have to be threaded through each callback by hand.
@@ -260,6 +296,8 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
     let mut ctx = EngineCtx {
         event_loop,
         clock: &mut state.clock,
+        timings: state.timings,
+        stats: state.stats,
     };
     #[cfg(not(any(feature = "egui", feature = "yakui")))]
     let _ = event_loop;
@@ -283,6 +321,12 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         &mut state.debug_ui,
         &mut frame,
     );
+    // Both overlays have recorded their work — close the overlay-timing
+    // bracket and then resolve all timestamps for the frame in one shot.
+    // Doing the resolve here (rather than right after main_pass) means the
+    // overlay timestamps land in the same readback buffer as the world ones.
+    state.renderer.gpu_profiler_overlay_end(&mut frame.encoder);
+    state.renderer.gpu_profiler_resolve(&mut frame.encoder);
     end_frame(&state.renderer, frame);
     // After submit, register the map_async on the readback slot we
     // copied into. Captures a snapshot of this frame's ID table so the
@@ -293,6 +337,16 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         .renderer
         .id_readback()
         .schedule_readback(table_snapshot);
+    // Same shape for the GPU profiler — schedule the readback for the
+    // timestamp pair we resolved earlier; a future `device.poll` fires
+    // the callback that writes into `latest_duration`.
+    state.renderer.gpu_profiler_schedule_readback();
+    // Snapshot the per-frame CPU counters into `state.stats` so the next
+    // frame's callbacks see them through `ctx.stats`. `take_and_reset`
+    // zeroes the per-draw fields and keeps proxy counts at their last
+    // value, so a view that records proxies only on tick boundaries still
+    // reports the latest snapshot every frame.
+    state.stats = state.renderer.take_frame_stats();
 }
 
 /// Phase 1: acquire the swapchain image and create the frame encoder.
@@ -397,6 +451,10 @@ fn main_pass<V: View>(
                 }),
             ],
             depth_stencil_attachment: depth_attachment,
+            // World-segment timestamps bracket only this pass. `None` when
+            // the adapter lacks TIMESTAMP_QUERY. The overlay segment uses
+            // encoder-level timestamps after this pass closes.
+            timestamp_writes: renderer.gpu_profiler_world_pass_timestamps(),
             ..Default::default()
         });
     view.render(sim, alpha, renderer, &mut pass);
