@@ -36,7 +36,7 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec2, Vec4};
 
-use crate::sim::Grid;
+use crate::grid::Grid;
 
 use super::renderer::Renderer;
 
@@ -278,7 +278,7 @@ impl CellHighlight {
 
 #[cfg(test)]
 mod tests {
-    use crate::sim::{HexGrid, SquareGrid};
+    use crate::grid::{HexGrid, SquareGrid};
 
     use super::*;
 

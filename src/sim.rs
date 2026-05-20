@@ -16,7 +16,6 @@
 //! ## Module layout
 //!
 //! - [`slot_map`] — generic generational slot-map (the storage primitive).
-//! - [`grid`] — tile-grid topology trait + [`SquareGrid`] / (future) `HexGrid`.
 //! - [`units`] — fixed-point [`SimUnit`] / [`SimPos`] / [`SimVec`].
 //! - [`facing`] — yaw-only quantized [`Facing`] + integer atan2.
 //! - [`zone`] — [`WorldTransform`], [`Zone`], [`Zones`], cross-zone refs.
@@ -39,7 +38,6 @@ mod command;
 mod components;
 mod environment;
 mod facing;
-mod grid;
 mod rng;
 mod slot_map;
 mod terrain;
@@ -51,7 +49,6 @@ pub use command::CommandQueue;
 pub use components::Components;
 pub use environment::{SimEnvironment, sun_direction_for};
 pub use facing::Facing;
-pub use grid::{Grid, HexGrid, SquareGrid};
 pub use rng::SimRng;
 pub use slot_map::{SlotKey, SlotMap};
 pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};

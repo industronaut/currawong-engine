@@ -26,6 +26,9 @@ pub use sim::*;
 
 pub mod data;
 
+pub mod grid;
+pub use grid::{Grid, HexGrid, SquareGrid};
+
 #[cfg(feature = "render")]
 pub use pollster;
 #[cfg(feature = "render")]

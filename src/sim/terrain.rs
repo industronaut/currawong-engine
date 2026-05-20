@@ -28,7 +28,7 @@ use indexmap::map as indexmap_map;
 
 use glam::{IVec2, UVec2};
 
-use super::grid::{Grid, SquareGrid};
+use crate::grid::{Grid, SquareGrid};
 
 /// Side length of a chunk, in tiles. A chunk holds `CHUNK_SIZE * CHUNK_SIZE`
 /// tiles in row-major order.

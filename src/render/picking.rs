@@ -29,7 +29,7 @@
 use glam::{IVec2, Vec2, Vec3, Vec4};
 use winit::event::WindowEvent;
 
-use crate::sim::Grid;
+use crate::grid::Grid;
 
 use super::camera::Camera;
 use super::picking_buffer::HitTarget;
@@ -248,7 +248,7 @@ impl<G: Grid> TerrainPicker<G> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sim::{HexGrid, SquareGrid};
+    use crate::grid::{HexGrid, SquareGrid};
 
     use super::*;
 

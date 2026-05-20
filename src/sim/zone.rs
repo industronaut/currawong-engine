@@ -7,10 +7,10 @@
 
 use super::components::Components;
 use super::facing::Facing;
-use super::grid::{Grid, SquareGrid};
 use super::slot_map::{SlotKey, SlotMap};
 use super::terrain::Terrain;
 use super::units::SimPos;
+use crate::grid::{Grid, SquareGrid};
 
 /// Per-object spatial state — position and yaw-only facing.
 ///

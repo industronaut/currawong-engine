@@ -22,7 +22,8 @@
 
 use std::collections::HashMap;
 
-use crate::sim::{ChunkCoord, Grid, LiquidId, Terrain, ZoneId};
+use crate::grid::Grid;
+use crate::sim::{ChunkCoord, LiquidId, Terrain, ZoneId};
 
 use super::renderer::Renderer;
 use super::terrain::{ChunkMeshes, MeshData, TerrainMesher, TerrainVertex};

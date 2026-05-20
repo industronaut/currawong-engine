@@ -30,7 +30,8 @@ use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec2, UVec2, Vec3};
 
-use crate::sim::{CHUNK_SIZE, ChunkCoord, Grid, LiquidId, Terrain};
+use crate::grid::Grid;
+use crate::sim::{CHUNK_SIZE, ChunkCoord, LiquidId, Terrain};
 
 /// One vertex of a terrain mesh. Position is in zone-local world space (Z-up,
 /// matching the engine's camera convention): tile X/Y map to world X/Y,
