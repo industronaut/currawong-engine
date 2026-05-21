@@ -30,7 +30,7 @@ mod vfs;
 #[cfg(test)]
 mod test_helpers;
 
-pub use definitions::{DefError, Definitions, KindId, KindIdError};
+pub use definitions::{DefError, Definitions, KindDef, KindId, KindIdError};
 pub use fs_source::FsSource;
 pub use memory_source::MemorySource;
 pub use path::{VfsPath, VfsPathError};
