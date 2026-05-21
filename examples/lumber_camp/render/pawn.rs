@@ -4,11 +4,13 @@
 //! via [`super::build_body_template`] — today there's only
 //! `currawong:lumberjack`, but additional worker kinds (foreman,
 //! apprentice) drop straight in by adding more RON files with
-//! `render.shape: "pawn"`. The *carried log* is a shared procedural brown
-//! cylinder built once at init and reused across every pawn-kind's
-//! template via [`super::PartKey::CarriedLog`]. Log visibility is a
-//! view-side decision set by [`update_instance`] from the sim's
-//! [`Carrying`] component.
+//! `render.shape: "pawn"`. The *carried log* is a shared streamed glTF
+//! (`lumber/logs.glb`) loaded once at init and reused across every
+//! pawn-kind's template via [`super::PartKey::CarriedLog`]. The glb's
+//! `Lumber` material slot resolves through the lumber atlas registry
+//! (`gltf:lumber`), so the log draws through the stylized atlas pipeline
+//! alongside the camp base. Log visibility is a view-side decision set
+//! by [`update_instance`] from the sim's [`Carrying`] component.
 //!
 //! View-side pawn state lives on [`PawnRenderer`]: tick-boundary position
 //! snapshots for sub-tick interpolation. The idle-bob phase is per-pawn,
@@ -20,13 +22,14 @@
 //! log_local_transform` for the log part automatically.
 
 use std::collections::HashMap;
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::TAU;
 
-use currawong::glam::{Mat4, Quat, Vec3, Vec4};
+use currawong::data::VfsPath;
+use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, EngineCtx, InlineTemplate, LiveRenderObject, MeshTemplate,
-    PbrMaterial, PbrMaterialInstance, PrimitiveMesh, Renderer, SamplerRegistry, WorldObjectId,
-    WorldObjectRef,
+    Aabb, AssetServer, Components, EngineCtx, LiveRenderObject, MeshBacking, MeshTemplate,
+    PbrMaterial, PbrMaterialInstance, PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry,
+    TextureColorSpace, WorldObjectId, WorldObjectRef,
 };
 
 use crate::sim::{Carrying, Game, Idle};
@@ -45,28 +48,55 @@ const IDLE_BOB_AMPLITUDE: f32 = 0.035;
 /// than a hop.
 const IDLE_BOB_HZ: f32 = 1.4;
 
-/// Build the shared carried-log template — a wood-brown horizontal
-/// cylinder. Procedural because the carried log is a "you have an
-/// inventory item" HUD indicator, not authored content.
+/// Build the shared carried-log template — the authored `lumber/logs.glb`
+/// stack, streamed through the asset server like the other lumber-camp
+/// glbs. The glb's `Lumber` material slot resolves via
+/// [`super::LumberCampView::atlas_materials`] (`gltf:lumber`) so the log
+/// draws through the stylized atlas pipeline; the `PbrMaterialInstance`
+/// built here is the fallback the engine binds only if a primitive's
+/// material slot doesn't resolve to a registered atlas instance.
 pub fn new_log_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
     asset_server: &AssetServer,
 ) -> MeshTemplate<PbrMaterialInstance> {
-    material.inline_template(
+    let mesh_handle = asset_server.mesh(VfsPath::new("lumber/logs.glb").expect("valid path"));
+    // Fallback PBR albedo — only bound for primitives whose material slot
+    // doesn't resolve through the atlas registry. Reusing the lumber atlas
+    // PNG keeps the fallback colour in the right ballpark instead of
+    // showing magenta on the rare non-atlas primitive.
+    let albedo_handle = asset_server.texture(
+        VfsPath::new("lumber/gradient_atlas.png").expect("valid path"),
+        TextureColorSpace::Srgb,
+    );
+    let material_instance = material.create_instance(
         renderer,
         samplers,
         asset_server,
-        InlineTemplate {
-            label: "lumber-camp carried log",
-            mesh: &PrimitiveMesh::cylinder(0.07, 0.6, 12, true),
-            bounds: Aabb::new(Vec3::new(-0.30, -0.07, -0.07), Vec3::new(0.30, 0.07, 0.07)),
-            albedo_factor: Vec4::new(0.42, 0.27, 0.16, 1.0), // wood brown
+        PbrMaterialParams {
+            albedo: albedo_handle,
+            sampler: SamplerKind::LinearRepeat,
+            albedo_factor: Vec4::ONE,
             metallic: 0.0,
             roughness: 0.85,
         },
-    )
+    );
+    MeshTemplate {
+        mesh: MeshBacking::Streamed {
+            handle: mesh_handle,
+        },
+        // Mesh-local AABB in engine space (post Y-up → Z-up flip): the glb
+        // sits flat on its base at z=0, extending ±LOG_HALF_X along the
+        // pawn's left-right axis, ±LOG_HALF_Y front-to-back, and up to
+        // LOG_HEIGHT. Used only as fallback sizing while the glb streams
+        // in; the real mesh's own extents take over once loaded.
+        visual_bounds: Aabb::new(
+            Vec3::new(-LOG_HALF_X, -LOG_HALF_Y, 0.0),
+            Vec3::new(LOG_HALF_X, LOG_HALF_Y, LOG_HEIGHT),
+        ),
+        material: material_instance,
+    }
 }
 
 /// Vertical air gap between the pawn body's top and the bottom of the
@@ -74,48 +104,38 @@ pub fn new_log_template(
 /// large enough to clear the body's hemispherical cap at any pawn-kind's
 /// declared bounds.
 const LOG_GAP: f32 = 0.08;
-/// Radius of the carried-log cylinder. Used to centre the log on its
-/// long axis above the head — the cylinder mesh is built around its own
-/// origin, so we lift by `radius + gap` to seat it cleanly. Kept in sync
-/// with [`new_log_template`]'s `PrimitiveMesh::cylinder(0.07, ...)` call.
-const LOG_RADIUS: f32 = 0.07;
-/// Half the cylinder's `height` parameter, i.e. how far the log extends
-/// along its long axis from its centre. Same kept-in-sync caveat as
-/// [`LOG_RADIUS`].
-const LOG_HALF_LENGTH: f32 = 0.30;
+/// Half-extents of `lumber/logs.glb` in engine space (Y-up → Z-up). The
+/// model is authored sitting flat on its base at `z = 0`, with the long
+/// stack of logs running along X, depth along Y, and height along Z.
+/// Used for the placeholder visual AABB while the glb is still streaming
+/// in, and for extending the pawn's visual bounds so frustum culling
+/// includes the carried log.
+const LOG_HALF_X: f32 = 0.175;
+const LOG_HALF_Y: f32 = 0.15;
+const LOG_HEIGHT: f32 = 0.273;
 
 /// Local-frame transform for the carried log, given the pawn's *body*
-/// bounds. Lays the cylinder on its side just above the pawn's head with
-/// a small gap, so the log reads clearly without hiding inside the body
-/// (the previous "shoulder height" placement put the log entirely inside
-/// the body capsule — the cylinder's half-length was equal to the body's
-/// radius, so its tips sat right at the body's surface).
+/// bounds. The glb is authored ready-to-place (long axis along X, base
+/// at z=0), so this is just a Z lift that seats the log on the pawn's
+/// head with a small clearance gap — no rotation needed.
 pub fn log_local_transform(body_bounds: &Aabb) -> Mat4 {
-    let log_centre_z = body_bounds.max.z + LOG_GAP + LOG_RADIUS;
-    Mat4::from_rotation_translation(
-        Quat::from_rotation_x(PI / 2.0),
-        Vec3::new(0.0, 0.0, log_centre_z),
-    )
+    Mat4::from_translation(Vec3::new(0.0, 0.0, body_bounds.max.z + LOG_GAP))
 }
 
 /// Visual AABB for a pawn kind's [`RenderTemplate`](currawong::RenderTemplate),
 /// extending the body's bounds to enclose the carried log so the engine
 /// frustum-cull doesn't pop the pawn when only its log is on-screen.
-///
-/// After the `Quat::from_rotation_x(PI/2)` in [`log_local_transform`], the
-/// cylinder's long axis sits along the pawn's local Y, so Y is the axis
-/// that needs the half-length extension; Z gets the head-clearance lift.
 pub fn extended_bounds(body_bounds: &Aabb) -> Aabb {
-    let log_top_z = body_bounds.max.z + LOG_GAP + 2.0 * LOG_RADIUS;
+    let log_top_z = body_bounds.max.z + LOG_GAP + LOG_HEIGHT;
     Aabb::new(
         Vec3::new(
-            body_bounds.min.x,
-            body_bounds.min.y.min(-LOG_HALF_LENGTH),
+            body_bounds.min.x.min(-LOG_HALF_X),
+            body_bounds.min.y.min(-LOG_HALF_Y),
             body_bounds.min.z,
         ),
         Vec3::new(
-            body_bounds.max.x,
-            body_bounds.max.y.max(LOG_HALF_LENGTH),
+            body_bounds.max.x.max(LOG_HALF_X),
+            body_bounds.max.y.max(LOG_HALF_Y),
             log_top_z,
         ),
     )
