@@ -27,8 +27,8 @@ use std::f32::consts::TAU;
 use currawong::data::VfsPath;
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, EngineCtx, LiveRenderObject, MeshBacking, MeshTemplate,
-    PbrMaterial, PbrMaterialInstance, PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry,
+    Aabb, AssetServer, Components, EngineCtx, MeshBacking, MeshTemplate, PbrMaterial,
+    PbrMaterialInstance, PbrMaterialParams, RenderProxy, Renderer, SamplerKind, SamplerRegistry,
     TextureColorSpace, WorldObjectId, WorldObjectRef,
 };
 
@@ -214,7 +214,7 @@ impl PawnRenderer {
 
 /// Per-instance update for a live pawn proxy. Called by the dispatcher
 /// in [`super`] from inside
-/// [`RenderObjectPass::update_instances`](currawong::RenderObjectPass::update_instances).
+/// [`RenderObjectTraversal::update_instances`](currawong::RenderObjectTraversal::update_instances).
 ///
 /// Owns *every* sim→view decision for pawns:
 /// - overwrites `instance.world_xform` with the interpolated + idle-bobbed
@@ -224,7 +224,7 @@ impl PawnRenderer {
 pub fn update_instance(
     parent: WorldObjectRef,
     components: &Components,
-    instance: &mut LiveRenderObject,
+    instance: &mut RenderProxy,
     alpha: f32,
     state: &PawnRenderer,
 ) {

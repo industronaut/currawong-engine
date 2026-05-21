@@ -13,8 +13,8 @@ use std::f32::consts::PI;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, InlineTemplate, LiveRenderObject, MeshTemplate, PbrMaterial,
-    PbrMaterialInstance, PrimitiveMesh, Renderer, SamplerRegistry, WorldObjectRef,
+    Aabb, AssetServer, Components, InlineTemplate, MeshTemplate, PbrMaterial, PbrMaterialInstance,
+    PrimitiveMesh, RenderProxy, Renderer, SamplerRegistry, WorldObjectRef,
 };
 
 use crate::sim::Designated;
@@ -86,14 +86,14 @@ pub fn extended_bounds(body_bounds: &Aabb) -> Aabb {
 
 /// Per-instance update for a live tree proxy. Called by the dispatcher
 /// in [`super`] from inside
-/// [`RenderObjectPass::update_instances`](currawong::RenderObjectPass::update_instances).
+/// [`RenderObjectTraversal::update_instances`](currawong::RenderObjectTraversal::update_instances).
 ///
 /// Owns every sim→view decision for trees: gates the designation marker
 /// on the [`Designated`] component.
 pub fn update_instance(
     parent: WorldObjectRef,
     components: &Components,
-    instance: &mut LiveRenderObject,
+    instance: &mut RenderProxy,
 ) {
     instance.mesh_parts[MARKER_PART].visible = components.get::<Designated>(parent.id).is_some();
 }

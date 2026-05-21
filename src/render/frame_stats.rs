@@ -31,7 +31,7 @@ pub struct FrameStats {
     /// Reported by the view through
     /// [`Renderer::record_proxies`](super::Renderer::record_proxies); the
     /// numbers usually come from
-    /// [`LiveRenderObjects::cull_counts`](super::LiveRenderObjects::cull_counts).
+    /// [`RenderProxies::cull_counts`](super::RenderProxies::cull_counts).
     pub proxies_visible: u32,
     /// Live render-object proxies *outside* the frustum but still inside
     /// the hysteresis grace window — drawn this frame on borrowed time.
