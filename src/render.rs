@@ -38,6 +38,8 @@
 //! - [`mesh`] — streamable static-mesh asset (`Mesh`) + glTF 2.0 loader.
 //! - [`mesh_primitives`] — CPU-side mesh generators (cube, plane, sphere,
 //!   cylinder, cone) in the canonical [`vertex`] layout.
+//! - [`mesh_template`] — bundled per-part GPU resources (mesh buffers +
+//!   visual bounds + material instance) + [`RenderSpec`] RON projection.
 //! - [`pbr`] — metallic-roughness PBR material; reads scene env + camera.
 //! - [`pbr_atlas`] — stylized PBR material that reads albedo + MRE from two
 //!   atlases; resolves through [`MaterialRegistry`] by glb material name.
@@ -77,6 +79,7 @@ mod material;
 mod material_registry;
 mod mesh;
 mod mesh_primitives;
+mod mesh_template;
 mod pbr;
 mod pbr_atlas;
 mod picking;
@@ -116,6 +119,7 @@ pub use mesh::{
     DecodedMesh, DecodedPrimitive, Mesh, MeshLoadError, MeshPrimitive, decode_gltf_mesh,
 };
 pub use mesh_primitives::PrimitiveMesh;
+pub use mesh_template::{InlineTemplate, MeshBacking, MeshTemplate, RenderSpec};
 pub use pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use pbr_atlas::{PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams};
 pub use picking::{Hover, Ray, TerrainPicker};

@@ -24,11 +24,11 @@ use std::f32::consts::{PI, TAU};
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, EngineCtx, LiveRenderObject, PbrMaterial, PrimitiveMesh,
-    Renderer, SamplerRegistry, WorldObjectId, WorldObjectRef,
+    Aabb, AssetServer, Components, EngineCtx, InlineTemplate, LiveRenderObject, MeshTemplate,
+    PbrMaterial, PbrMaterialInstance, PrimitiveMesh, Renderer, SamplerRegistry, WorldObjectId,
+    WorldObjectRef,
 };
 
-use super::{InlineTemplate, MeshTemplate, new_inline_template};
 use crate::sim::{Carrying, Game, Idle};
 
 /// Index of the carried-log mesh part in every pawn's render template —
@@ -53,10 +53,9 @@ pub fn new_log_template(
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
     asset_server: &AssetServer,
-) -> MeshTemplate {
-    new_inline_template(
+) -> MeshTemplate<PbrMaterialInstance> {
+    material.inline_template(
         renderer,
-        material,
         samplers,
         asset_server,
         InlineTemplate {

@@ -13,11 +13,10 @@ use std::f32::consts::PI;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, LiveRenderObject, PbrMaterial, PrimitiveMesh, Renderer,
-    SamplerRegistry, WorldObjectRef,
+    Aabb, AssetServer, Components, InlineTemplate, LiveRenderObject, MeshTemplate, PbrMaterial,
+    PbrMaterialInstance, PrimitiveMesh, Renderer, SamplerRegistry, WorldObjectRef,
 };
 
-use super::{InlineTemplate, MeshTemplate, new_inline_template};
 use crate::sim::Designated;
 
 /// Index of the designation-marker mesh part in every tree's render
@@ -41,10 +40,9 @@ pub fn new_marker_template(
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
     asset_server: &AssetServer,
-) -> MeshTemplate {
-    new_inline_template(
+) -> MeshTemplate<PbrMaterialInstance> {
+    material.inline_template(
         renderer,
-        material,
         samplers,
         asset_server,
         InlineTemplate {
