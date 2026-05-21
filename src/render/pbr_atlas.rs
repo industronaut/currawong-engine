@@ -36,6 +36,8 @@
 //! instance. Hit-ID picking flows through identically — see that file's
 //! docs.
 
+use std::sync::Mutex;
+
 use super::asset_server::{AssetServer, TextureSource};
 use super::handle::Handle;
 use super::material::{MeshMaterial, build_pbr_style_pipeline};
@@ -259,10 +261,6 @@ impl PbrAtlasMaterial {
         &self.pipeline
     }
 
-    pub(super) fn instance_bgl(&self) -> &wgpu::BindGroupLayout {
-        &self.instance_bgl
-    }
-
     /// Build a material instance bound to a pair of atlas
     /// [`Handle<Texture>`]s.
     ///
@@ -299,12 +297,16 @@ impl PbrAtlasMaterial {
         let last_albedo_source = resolved_albedo.source;
         let last_mre_source = resolved_mre.source;
         PbrAtlasMaterialInstance {
+            pipeline: self.pipeline.clone(),
+            instance_bgl: self.instance_bgl.clone(),
             albedo,
             mre,
             sampler_kind: sampler,
-            bind_group,
-            last_albedo_source,
-            last_mre_source,
+            state: Mutex::new(AtlasInstanceState {
+                bind_group,
+                last_albedo_source,
+                last_mre_source,
+            }),
         }
     }
 }
@@ -339,41 +341,38 @@ fn build_instance_bind_group(
     })
 }
 
-impl MeshMaterial for PbrAtlasMaterial {
-    type Instance = PbrAtlasMaterialInstance;
-
-    fn pipeline(&self) -> &wgpu::RenderPipeline {
-        self.pipeline()
-    }
-}
-
 /// A live atlas-PBR material instance — holds streaming handles to the
 /// two atlas textures + the cached bind group built against their
-/// currently-resolved views. Bind as `@group(2)` when drawing through
-/// [`PbrAtlasMaterial::pipeline`].
+/// currently-resolved views. Implements [`MeshMaterial`], so an
+/// `Arc<PbrAtlasMaterialInstance>` unsizes into `Arc<dyn MeshMaterial>`
+/// and slots into [`MeshTemplate::materials`](super::MeshTemplate) or
+/// [`MaterialRegistry`](super::MaterialRegistry).
 ///
 /// The bound textures flex with the underlying [`Handle<Texture>`]s:
-/// [`refresh`](Self::refresh) checks both handles each frame and rebuilds
-/// the bind group iff either resolved [`TextureSource`] changed
-/// (real ↔ fallback ↔ forced-fallback). Refreshing is cheap when nothing
-/// changes; the rebuild only fires on a transition frame.
+/// [`refresh`](MeshMaterial::refresh) checks both handles each frame and
+/// rebuilds iff either resolved [`TextureSource`] changed (real ↔
+/// fallback ↔ forced-fallback). The mutable bits live behind a `Mutex`
+/// so trait `&self` methods compose with `Arc<dyn MeshMaterial>` shared
+/// ownership.
 pub struct PbrAtlasMaterialInstance {
+    pipeline: wgpu::RenderPipeline,
+    instance_bgl: wgpu::BindGroupLayout,
     albedo: Handle<Texture>,
     mre: Handle<Texture>,
     sampler_kind: SamplerKind,
+    state: Mutex<AtlasInstanceState>,
+}
+
+struct AtlasInstanceState {
     bind_group: wgpu::BindGroup,
     /// Which view each side of the cached `bind_group` is currently
-    /// built against — used by [`refresh`](Self::refresh) to decide
-    /// whether a rebuild is needed.
+    /// built against — used by `refresh` to decide whether a rebuild is
+    /// needed.
     last_albedo_source: TextureSource,
     last_mre_source: TextureSource,
 }
 
 impl PbrAtlasMaterialInstance {
-    pub fn bind_group(&self) -> &wgpu::BindGroup {
-        &self.bind_group
-    }
-
     /// The albedo atlas handle. Cheap to clone — share across instances
     /// that read the same atlas.
     pub fn albedo_handle(&self) -> &Handle<Texture> {
@@ -384,37 +383,40 @@ impl PbrAtlasMaterialInstance {
     pub fn mre_handle(&self) -> &Handle<Texture> {
         &self.mre
     }
+}
 
-    /// Reconcile the cached bind group with both handles' current state.
-    /// Cheap when nothing changed; on a transition (either handle
-    /// finishes loading, or the debug
-    /// [`set_force_loading`](super::AssetServer::set_force_loading) toggle
-    /// flips) the bind group is rebuilt against the new view(s).
-    ///
-    /// Call once per frame for each instance you intend to draw, before
-    /// `pass.set_bind_group(2, instance.bind_group(), ..)`.
-    pub fn refresh(
-        &mut self,
-        renderer: &Renderer,
-        material: &PbrAtlasMaterial,
-        samplers: &SamplerRegistry,
-        asset_server: &AssetServer,
-    ) {
-        let resolved_albedo = asset_server.resolve_texture(&self.albedo);
-        let resolved_mre = asset_server.resolve_texture(&self.mre);
-        if resolved_albedo.source == self.last_albedo_source
-            && resolved_mre.source == self.last_mre_source
+impl MeshMaterial for PbrAtlasMaterialInstance {
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
+    }
+
+    fn bind(&self, pass: &mut wgpu::RenderPass<'_>, group: u32) {
+        let bind_group = self
+            .state
+            .lock()
+            .expect("PbrAtlasMaterial state lock")
+            .bind_group
+            .clone();
+        pass.set_bind_group(group, Some(&bind_group), &[]);
+    }
+
+    fn refresh(&self, renderer: &Renderer, samplers: &SamplerRegistry, assets: &AssetServer) {
+        let resolved_albedo = assets.resolve_texture(&self.albedo);
+        let resolved_mre = assets.resolve_texture(&self.mre);
+        let mut state = self.state.lock().expect("PbrAtlasMaterial state lock");
+        if resolved_albedo.source == state.last_albedo_source
+            && resolved_mre.source == state.last_mre_source
         {
             return;
         }
-        self.bind_group = build_instance_bind_group(
+        state.bind_group = build_instance_bind_group(
             &renderer.device,
-            material.instance_bgl(),
+            &self.instance_bgl,
             resolved_albedo.view,
             resolved_mre.view,
             samplers.get(self.sampler_kind),
         );
-        self.last_albedo_source = resolved_albedo.source;
-        self.last_mre_source = resolved_mre.source;
+        state.last_albedo_source = resolved_albedo.source;
+        state.last_mre_source = resolved_mre.source;
     }
 }

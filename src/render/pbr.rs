@@ -42,6 +42,8 @@
 //! - **Shadow maps / multiple lights** — single directional light, no
 //!   occlusion. Multi-light support means a different scene-uniform shape.
 
+use std::sync::Mutex;
+
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
 
@@ -289,10 +291,6 @@ impl PbrMaterial {
         &self.pipeline
     }
 
-    pub(super) fn instance_bgl(&self) -> &wgpu::BindGroupLayout {
-        &self.instance_bgl
-    }
-
     /// Build a material instance bound to an albedo [`Handle<Texture>`].
     ///
     /// The initial bind group is built against whatever the asset server
@@ -337,11 +335,15 @@ impl PbrMaterial {
         );
         let last_source = resolved.source;
         PbrMaterialInstance {
+            pipeline: self.pipeline.clone(),
+            instance_bgl: self.instance_bgl.clone(),
             buffer,
             handle: albedo,
             sampler_kind: sampler,
-            bind_group,
-            last_source,
+            state: Mutex::new(InstanceState {
+                bind_group,
+                last_source,
+            }),
         }
     }
 }
@@ -376,71 +378,48 @@ fn build_instance_bind_group(
     })
 }
 
-impl MeshMaterial for PbrMaterial {
-    type Instance = PbrMaterialInstance;
-
-    fn pipeline(&self) -> &wgpu::RenderPipeline {
-        self.pipeline()
-    }
-}
-
 /// A live PBR material instance — uniform buffer (factors) + bind group
-/// holding the albedo texture, sampler, and uniform. Bind as `@group(2)`
-/// when drawing through the material's pipeline.
+/// holding the albedo texture, sampler, and uniform. Implements
+/// [`MeshMaterial`], so a single `Arc<PbrMaterialInstance>` unsizes into
+/// `Arc<dyn MeshMaterial>` and slots straight into
+/// [`MeshTemplate::materials`](super::MeshTemplate) or
+/// [`MaterialRegistry`](super::MaterialRegistry).
 ///
-/// The bound albedo flexes with the underlying [`Handle<Texture>`]:
-/// [`refresh`](Self::refresh) checks the handle each frame and rebuilds
-/// the bind group iff the resolved [`TextureSource`] changed (real ↔
-/// fallback ↔ forced-fallback). Refreshing is cheap when nothing changes;
-/// the rebuild only fires on the transition frame.
+/// The cached bind group flexes with the underlying [`Handle<Texture>`]:
+/// [`refresh`](MeshMaterial::refresh) checks the handle each frame and
+/// rebuilds iff the resolved [`TextureSource`] changed (real ↔ fallback ↔
+/// forced-fallback). Refreshing is cheap when nothing changes; the
+/// rebuild only fires on the transition frame. The mutable bits (cached
+/// bind group + last source) live behind a `Mutex` so the trait's
+/// `&self` refresh stays compatible with `Arc<dyn MeshMaterial>` shared
+/// ownership.
+///
+/// The pipeline + instance BGL are cloned from the parent
+/// [`PbrMaterial`] at construction (both Arc-refcounted internally in
+/// wgpu, so the clone is cheap) so the instance is self-contained — the
+/// trait methods never have to reach back to the template.
 pub struct PbrMaterialInstance {
+    pipeline: wgpu::RenderPipeline,
+    instance_bgl: wgpu::BindGroupLayout,
     buffer: wgpu::Buffer,
     handle: Handle<Texture>,
     sampler_kind: SamplerKind,
+    state: Mutex<InstanceState>,
+}
+
+struct InstanceState {
     bind_group: wgpu::BindGroup,
-    /// Which view the cached `bind_group` is currently built against — used
-    /// by [`refresh`](Self::refresh) to decide whether a rebuild is needed.
+    /// Which view the cached `bind_group` is currently built against —
+    /// the rebuild check in `refresh`.
     last_source: TextureSource,
 }
 
 impl PbrMaterialInstance {
-    pub fn bind_group(&self) -> &wgpu::BindGroup {
-        &self.bind_group
-    }
-
     /// The albedo handle this instance is bound to. Cheap to clone — share
     /// the same handle across many instances (e.g. five PBR variants on
     /// one wood-grain texture).
     pub fn handle(&self) -> &Handle<Texture> {
         &self.handle
-    }
-
-    /// Reconcile the cached bind group with the current handle state. Cheap
-    /// when nothing changed; on a state transition (handle finishes loading,
-    /// or the debug [`set_force_loading`](super::AssetServer::set_force_loading)
-    /// toggle flips) the bind group is rebuilt against the new view.
-    ///
-    /// Call once per frame for each instance you intend to draw, before
-    /// `pass.set_bind_group(2, instance.bind_group(), ..)`.
-    pub fn refresh(
-        &mut self,
-        renderer: &Renderer,
-        material: &PbrMaterial,
-        samplers: &SamplerRegistry,
-        asset_server: &AssetServer,
-    ) {
-        let resolved = asset_server.resolve_texture(&self.handle);
-        if resolved.source == self.last_source {
-            return;
-        }
-        self.bind_group = build_instance_bind_group(
-            &renderer.device,
-            material.instance_bgl(),
-            &self.buffer,
-            resolved.view,
-            samplers.get(self.sampler_kind),
-        );
-        self.last_source = resolved.source;
     }
 
     /// Re-upload the factor uniform without rebuilding the bind group.
@@ -459,6 +438,41 @@ impl PbrMaterialInstance {
             _pad1: 0.0,
         };
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&data));
+    }
+}
+
+impl MeshMaterial for PbrMaterialInstance {
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
+    }
+
+    fn bind(&self, pass: &mut wgpu::RenderPass<'_>, group: u32) {
+        // BindGroup is internally Arc-refcounted in wgpu, so cloning it
+        // is cheap; cloning lets us release the Mutex before the
+        // set_bind_group call rather than holding the lock across it.
+        let bind_group = self
+            .state
+            .lock()
+            .expect("PbrMaterial state lock")
+            .bind_group
+            .clone();
+        pass.set_bind_group(group, Some(&bind_group), &[]);
+    }
+
+    fn refresh(&self, renderer: &Renderer, samplers: &SamplerRegistry, assets: &AssetServer) {
+        let resolved = assets.resolve_texture(&self.handle);
+        let mut state = self.state.lock().expect("PbrMaterial state lock");
+        if resolved.source == state.last_source {
+            return;
+        }
+        state.bind_group = build_instance_bind_group(
+            &renderer.device,
+            &self.instance_bgl,
+            &self.buffer,
+            resolved.view,
+            samplers.get(self.sampler_kind),
+        );
+        state.last_source = resolved.source;
     }
 }
 

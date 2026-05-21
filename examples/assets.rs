@@ -38,9 +38,10 @@ use currawong::data::{FsSource, Vfs, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Handle, HandleState, Mesh,
-    MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
-    Renderer, SamplerKind, SamplerRegistry, SimUnit, Simulation, Texture, TextureColorSpace, View,
-    ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    MeshInstanceAttribs, MeshMaterial, PbrMaterial, PbrMaterialInstance, PbrMaterialParams,
+    PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, SimUnit, Simulation, Texture,
+    TextureColorSpace, View, ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, sun_direction_for,
+    wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -329,12 +330,12 @@ impl View for AssetsView {
         // on the frame the texture transitions to `Ready` (or when the
         // user press/releases F to flip the force-loading toggle).
         self.cube_material
-            .refresh(renderer, &self.material, &self.samplers, &self.asset_server);
+            .refresh(renderer, &self.samplers, &self.asset_server);
 
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        pass.set_bind_group(2, self.cube_material.bind_group(), &[]);
+        self.cube_material.bind(pass, 2);
 
         // Inline cube: a single instance at its position. Picking IDs left
         // at the 0 default — neither cube is clickable in this demo.

@@ -219,9 +219,11 @@ impl<I> MaterialRegistry<I> {
         self.instances.iter()
     }
 
-    /// Mutable counterpart to [`iter`](Self::iter). Used by the per-frame
-    /// `instance.refresh(...)` pass that reconciles each [`PbrMaterialInstance`](super::PbrMaterialInstance)'s
-    /// bind group with its underlying texture handle's state.
+    /// Mutable counterpart to [`iter`](Self::iter). Reserved for use
+    /// cases that need to mutate the stored instances in place; today the
+    /// per-frame [`MeshMaterial::refresh`](super::MeshMaterial) pass
+    /// takes `&self` (interior mutability inside each instance) and
+    /// walks through [`iter`](Self::iter) instead.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&MaterialId, &mut I)> {
         self.instances.iter_mut()
     }

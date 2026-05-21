@@ -23,12 +23,13 @@
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;
+use std::sync::Arc;
 
 use currawong::data::VfsPath;
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, EngineCtx, LiveRenderObject, MeshBacking, MeshTemplate,
-    PbrMaterial, PbrMaterialInstance, PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry,
+    Aabb, AssetServer, Components, EngineCtx, LiveRenderObject, MeshBacking, MeshMaterial,
+    MeshTemplate, PbrMaterial, PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry,
     TextureColorSpace, WorldObjectId, WorldObjectRef,
 };
 
@@ -50,27 +51,28 @@ const IDLE_BOB_HZ: f32 = 1.4;
 
 /// Build the shared carried-log template — the authored `lumber/logs.glb`
 /// stack, streamed through the asset server like the other lumber-camp
-/// glbs. The glb's `Lumber` material slot resolves via
-/// [`super::LumberCampView::atlas_materials`] (`gltf:lumber`) so the log
-/// draws through the stylized atlas pipeline; the `PbrMaterialInstance`
-/// built here is the fallback the engine binds only if a primitive's
-/// material slot doesn't resolve to a registered atlas instance.
+/// glbs. The glb's `Lumber` material slot resolves via the unified
+/// [`LumberCampView::materials`](super::LumberCampView) registry
+/// (`gltf:lumber`) so the log draws through the stylized atlas pipeline;
+/// the `PbrMaterialInstance` built here is the template's
+/// `fallback_material` — covering the streaming window and any
+/// primitive whose slot name didn't resolve.
 pub fn new_log_template(
     renderer: &Renderer,
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
     asset_server: &AssetServer,
-) -> MeshTemplate<PbrMaterialInstance> {
+) -> MeshTemplate {
     let mesh_handle = asset_server.mesh(VfsPath::new("lumber/logs.glb").expect("valid path"));
     // Fallback PBR albedo — only bound for primitives whose material slot
-    // doesn't resolve through the atlas registry. Reusing the lumber atlas
-    // PNG keeps the fallback colour in the right ballpark instead of
-    // showing magenta on the rare non-atlas primitive.
+    // doesn't resolve through the unified registry. Reusing the lumber
+    // atlas PNG keeps the fallback colour in the right ballpark instead
+    // of showing magenta on the rare non-atlas primitive.
     let albedo_handle = asset_server.texture(
         VfsPath::new("lumber/gradient_atlas.png").expect("valid path"),
         TextureColorSpace::Srgb,
     );
-    let material_instance = material.create_instance(
+    let fallback = material.create_instance(
         renderer,
         samplers,
         asset_server,
@@ -95,7 +97,10 @@ pub fn new_log_template(
             Vec3::new(-LOG_HALF_X, -LOG_HALF_Y, 0.0),
             Vec3::new(LOG_HALF_X, LOG_HALF_Y, LOG_HEIGHT),
         ),
-        material: material_instance,
+        // Empty until the glb decodes; `MeshTemplate::resolve_materials`
+        // populates it from the unified registry on the transition frame.
+        materials: Vec::new(),
+        fallback_material: Arc::new(fallback) as Arc<dyn MeshMaterial>,
     }
 }
 

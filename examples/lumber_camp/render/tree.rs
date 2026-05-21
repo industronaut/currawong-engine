@@ -14,7 +14,7 @@ use std::f32::consts::PI;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Components, InlineTemplate, LiveRenderObject, MeshTemplate, PbrMaterial,
-    PbrMaterialInstance, PrimitiveMesh, Renderer, SamplerRegistry, WorldObjectRef,
+    PrimitiveMesh, Renderer, SamplerRegistry, WorldObjectRef,
 };
 
 use crate::sim::Designated;
@@ -40,7 +40,7 @@ pub fn new_marker_template(
     material: &PbrMaterial,
     samplers: &SamplerRegistry,
     asset_server: &AssetServer,
-) -> MeshTemplate<PbrMaterialInstance> {
+) -> MeshTemplate {
     material.inline_template(
         renderer,
         samplers,

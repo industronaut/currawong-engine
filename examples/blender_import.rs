@@ -59,7 +59,7 @@ use currawong::data::{FsSource, Vfs, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Handle, MaterialId,
-    MaterialRegistry, Mesh, MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance,
+    MaterialRegistry, Mesh, MeshInstanceAttribs, MeshMaterial, OrbitRig, PbrMaterial,
     PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry, SimUnit, Simulation, Texture, View,
     ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
 };
@@ -122,13 +122,17 @@ struct BlenderImportView {
     /// material under `currawong:mat_lumber` (a warm wood tone). Any glb
     /// primitive whose slot name resolves here binds the real instance;
     /// everything else routes through [`fallback_material`](Self::fallback_material).
-    materials: MaterialRegistry<PbrMaterialInstance>,
+    ///
+    /// Erased to `Arc<dyn MeshMaterial>` so a future variant could
+    /// register (e.g.) an atlas-backed instance alongside the PBR one
+    /// without the registry needing to know.
+    materials: MaterialRegistry<Arc<dyn MeshMaterial>>,
 
     /// Magenta-flavoured PBR instance bound when [`materials`] misses on
     /// a primitive's slot name. Lives outside the registry so misses can
     /// resolve to it unconditionally without polluting the registry's
     /// `iter()`.
-    fallback_material: PbrMaterialInstance,
+    fallback_material: Arc<dyn MeshMaterial>,
 
     mesh_handle: Handle<Mesh>,
     /// Visual bounds used to size the unit-cube fallback while the real
@@ -194,7 +198,7 @@ impl View for BlenderImportView {
         // name on a fresh checkout is `"Lumber"` (no namespace), which
         // misses the registry by construction — the fallback path runs
         // until the artist re-exports as `currawong:mat_lumber`.
-        let mut materials: MaterialRegistry<PbrMaterialInstance> = MaterialRegistry::new();
+        let mut materials: MaterialRegistry<Arc<dyn MeshMaterial>> = MaterialRegistry::new();
         let lumber_albedo = Texture::from_rgba8(
             renderer,
             "lumber albedo 1x1",
@@ -219,7 +223,7 @@ impl View for BlenderImportView {
         );
         materials.register(
             MaterialId::new("currawong:mat_lumber").expect("valid id"),
-            lumber,
+            Arc::new(lumber),
         );
 
         let magenta_albedo = Texture::from_rgba8(
@@ -230,7 +234,7 @@ impl View for BlenderImportView {
             &[255, 0, 255, 255],
             true,
         );
-        let fallback_material = material.create_instance(
+        let fallback_material: Arc<dyn MeshMaterial> = Arc::new(material.create_instance(
             renderer,
             &samplers,
             &asset_server,
@@ -243,7 +247,7 @@ impl View for BlenderImportView {
                 // to recognise as "missing material" than a glossy one.
                 roughness: 0.9,
             },
-        );
+        ));
 
         let instance_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("blender_import instance"),
@@ -322,16 +326,13 @@ impl View for BlenderImportView {
         self.camera_binding.write(&renderer.queue, &self.camera);
 
         // Reconcile both material bind groups with the texture-handle
-        // states. Cheap in steady state.
-        for (_id, instance) in self.materials.iter_mut() {
-            instance.refresh(renderer, &self.material, &self.samplers, &self.asset_server);
+        // states. Cheap in steady state. Trait `refresh(&self)` means
+        // we don't need `iter_mut` — `iter` suffices.
+        for (_id, instance) in self.materials.iter() {
+            instance.refresh(renderer, &self.samplers, &self.asset_server);
         }
-        self.fallback_material.refresh(
-            renderer,
-            &self.material,
-            &self.samplers,
-            &self.asset_server,
-        );
+        self.fallback_material
+            .refresh(renderer, &self.samplers, &self.asset_server);
 
         // Resolve the mesh handle. While loading the fallback is a single-
         // primitive unit cube (material_name = None → registry miss →
@@ -352,15 +353,18 @@ impl View for BlenderImportView {
 
         // Per-primitive draw: bind the material the registry resolves
         // to, then draw. The registry takes the glb material slot name
-        // verbatim; misses fall back to the magenta instance.
+        // verbatim; misses fall back to the magenta instance. Every
+        // primitive routes through the `MeshMaterial::bind` trait
+        // method — same dispatch shape whether the resolved instance is
+        // the registered wood material or the fallback.
         let mut frame_names: Vec<Option<String>> = Vec::with_capacity(resolved.primitives.len());
         for prim in resolved.primitives {
             let raw = prim.material_name.as_deref();
             let resolved_real = (!self.force_registry_miss)
                 .then(|| raw.and_then(|n| self.materials.get_by_name(n)))
                 .flatten();
-            let instance = resolved_real.unwrap_or(&self.fallback_material);
-            pass.set_bind_group(2, instance.bind_group(), &[]);
+            let instance: &Arc<dyn MeshMaterial> = resolved_real.unwrap_or(&self.fallback_material);
+            instance.bind(pass, 2);
             pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
             pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..prim.index_count, 0, 0..1);

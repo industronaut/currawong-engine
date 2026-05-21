@@ -9,12 +9,27 @@
 //! unit a [`RenderTemplate`](super::RenderTemplate) references through its
 //! mesh-part list), keyed by some example-defined `PartKey`. The draw loop
 //! looks up the template, calls [`MeshTemplate::resolve`] to get a primitive
-//! slice + fallback adjustment, and binds the material.
+//! slice + fallback adjustment, and binds each primitive's material from
+//! `template.materials[i]`.
+//!
+//! ## Per-primitive materials
+//!
+//! Templates store one [`Arc<dyn MeshMaterial>`](super::MeshMaterial) per
+//! primitive in [`MeshTemplate::materials`], so a multi-material glb routes
+//! each primitive through the right pipeline + bind group with no per-frame
+//! dispatch. For inline templates the vec is filled at build time. For
+//! streamed templates it stays empty until the glb decodes, then
+//! [`MeshTemplate::resolve_materials`] resolves each primitive's
+//! [`material_name`](super::MeshPrimitive::material_name) against the
+//! application's [`MaterialRegistry`](super::MaterialRegistry); misses fall
+//! back to `fallback_material`.
 //!
 //! The two PBR-flavoured constructors —
 //! [`PbrMaterial::streamed_template`] and [`PbrMaterial::inline_template`] —
 //! are the conventional way to build one. Future material families can add
 //! their own constructors with the same shape.
+
+use std::sync::Arc;
 
 use bytemuck::cast_slice;
 use glam::{Mat4, Vec3, Vec4};
@@ -25,24 +40,42 @@ use crate::data::{KindDef, KindId, VfsPath};
 
 use super::asset_server::{AssetServer, MeshSource, ResolvedMesh};
 use super::handle::Handle;
+use super::material::MeshMaterial;
+use super::material_registry::MaterialRegistry;
 use super::mesh::{Mesh, MeshPrimitive};
 use super::mesh_primitives::PrimitiveMesh;
-use super::pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
+use super::pbr::{PbrMaterial, PbrMaterialParams};
 use super::renderer::Renderer;
 use super::texture::{SamplerKind, SamplerRegistry, Texture, TextureColorSpace};
 use super::visibility::Aabb;
 
 /// Bundled GPU resources for one drawable part: mesh buffers (streamed or
-/// inline), the visual AABB used for fallback sizing and culling, and a live
-/// material instance to draw them with. One per `PartKey` in the render-object
-/// pipeline.
+/// inline), the visual AABB used for fallback sizing and culling, and per-
+/// primitive materials. One per `PartKey` in the render-object pipeline.
 ///
-/// Generic over the material instance type so the same shape works for PBR,
-/// stylized PBR, unlit, or any other material with a per-part instance.
-pub struct MeshTemplate<M> {
+/// `materials[i]` is the resolved [`MeshMaterial`] for the i-th primitive in
+/// the underlying mesh — pre-resolved once (at build time for inline
+/// templates, or on the frame the streamed glb decodes via
+/// [`Self::resolve_materials`]) so the per-frame draw is a uniform
+/// `materials[i].bind(pass, 2)` walk with no concrete-type dispatch.
+///
+/// `fallback_material` covers two cases:
+/// - the streamed glb is still loading and `materials` is empty;
+/// - a resolved primitive's `material_name` didn't match any entry in the
+///   registry (typical for a glb whose author didn't namespace their slot
+///   names, or for the asset server's magenta unit-cube fallback whose
+///   primitive has `material_name = None`).
+pub struct MeshTemplate {
     pub mesh: MeshBacking,
     pub visual_bounds: Aabb,
-    pub material: M,
+    /// Per-primitive resolved materials. Empty for streamed templates
+    /// until the glb decodes (then filled by
+    /// [`Self::resolve_materials`]); pre-filled at build time for inline
+    /// templates.
+    pub materials: Vec<Arc<dyn MeshMaterial>>,
+    /// Material the draw loop falls through to when `materials` is empty
+    /// (streaming) or `materials[i]` was a registry miss. Always present.
+    pub fallback_material: Arc<dyn MeshMaterial>,
 }
 
 /// Where a [`MeshTemplate`] gets its mesh buffers from.
@@ -57,7 +90,7 @@ pub enum MeshBacking {
     Inline { primitives: Vec<MeshPrimitive> },
 }
 
-impl<M> MeshTemplate<M> {
+impl MeshTemplate {
     /// Resolve the template's mesh buffers + fallback adjustment for this
     /// frame's draw. Equivalent shape regardless of backing: a non-empty
     /// [`MeshPrimitive`] slice + a [`Mat4`] to compose inside the per-instance
@@ -74,6 +107,53 @@ impl<M> MeshTemplate<M> {
                 fallback_adjustment: Mat4::IDENTITY,
             },
         }
+    }
+
+    /// Resolve per-primitive material slot names against `registry` and
+    /// populate [`Self::materials`]. No-op when `materials.len()` already
+    /// matches the primitive count — call every frame; the work only
+    /// happens on the frame a streamed glb's
+    /// [`MeshSource`](super::MeshSource) flips to `Real`.
+    ///
+    /// Primitives whose `material_name` is `None` or doesn't resolve in
+    /// the registry get [`fallback_material`](Self::fallback_material) —
+    /// same Arc the empty-materials path uses, so the bind side is
+    /// uniform.
+    pub fn resolve_materials(
+        &mut self,
+        asset_server: &AssetServer,
+        registry: &MaterialRegistry<Arc<dyn MeshMaterial>>,
+    ) {
+        let resolved = self.resolve(asset_server);
+        // Only resolve once the *real* glb has decoded. While the asset
+        // server is still serving the magenta unit-cube fallback, leaving
+        // `materials` empty routes draws through `fallback_material`
+        // which is the intended shape.
+        if resolved.source != MeshSource::Real {
+            return;
+        }
+        if self.materials.len() == resolved.primitives.len() {
+            return;
+        }
+        self.materials = resolved
+            .primitives
+            .iter()
+            .map(|prim| {
+                prim.material_name
+                    .as_deref()
+                    .and_then(|n| registry.get_by_name(n))
+                    .cloned()
+                    .unwrap_or_else(|| Arc::clone(&self.fallback_material))
+            })
+            .collect();
+    }
+
+    /// Material for primitive index `i`. Falls through to
+    /// [`fallback_material`](Self::fallback_material) when `materials`
+    /// hasn't been resolved yet (streamed glb still loading) or `i` is
+    /// out of bounds.
+    pub fn material_for(&self, i: usize) -> &Arc<dyn MeshMaterial> {
+        self.materials.get(i).unwrap_or(&self.fallback_material)
     }
 }
 
@@ -164,6 +244,16 @@ impl PbrMaterial {
     /// loading, the template draws the magenta-flavoured fallback sized to
     /// `spec.visual_bounds()`.
     ///
+    /// The returned template's
+    /// [`fallback_material`](MeshTemplate::fallback_material) is a fresh
+    /// `PbrMaterialInstance` bound to `spec.albedo` — used both for the
+    /// streaming-fallback unit cube and for any primitive whose
+    /// `material_name` doesn't resolve in the application's
+    /// [`MaterialRegistry`](super::MaterialRegistry). Per-primitive
+    /// materials are populated lazily by
+    /// [`MeshTemplate::resolve_materials`] on the frame the real glb
+    /// decodes.
+    ///
     /// Panics if `spec.mesh` or `spec.albedo` isn't a valid [`VfsPath`] — that
     /// is a content authoring bug rather than a runtime condition, and silent
     /// fallback would hide it.
@@ -174,14 +264,14 @@ impl PbrMaterial {
         asset_server: &AssetServer,
         kind_id: &KindId,
         spec: &RenderSpec,
-    ) -> MeshTemplate<PbrMaterialInstance> {
+    ) -> MeshTemplate {
         let mesh_path = VfsPath::new(spec.mesh.clone())
             .unwrap_or_else(|e| panic!("kind {kind_id}: invalid render.mesh path: {e}"));
         let albedo_path = VfsPath::new(spec.albedo.clone())
             .unwrap_or_else(|e| panic!("kind {kind_id}: invalid render.albedo path: {e}"));
         let mesh_handle = asset_server.mesh(mesh_path);
         let albedo_handle = asset_server.texture(albedo_path, TextureColorSpace::Srgb);
-        let material = self.create_instance(
+        let fallback = self.create_instance(
             renderer,
             samplers,
             asset_server,
@@ -198,7 +288,8 @@ impl PbrMaterial {
                 handle: mesh_handle,
             },
             visual_bounds: spec.visual_bounds(),
-            material,
+            materials: Vec::new(),
+            fallback_material: Arc::new(fallback),
         }
     }
 
@@ -207,13 +298,18 @@ impl PbrMaterial {
     /// items, gizmos) that don't go through the asset pipeline — they still
     /// plug into the same PBR material surface streamed bodies use, via a 1×1
     /// white texture wrapped in a ready [`Handle`].
+    ///
+    /// The constructed [`PbrMaterialInstance`](super::PbrMaterialInstance)
+    /// is bound for both the single-primitive `materials` slot and the
+    /// `fallback_material` — they point at the same `Arc` so the inline
+    /// path has no fallback bookkeeping at the draw site.
     pub fn inline_template(
         &self,
         renderer: &Renderer,
         samplers: &SamplerRegistry,
         asset_server: &AssetServer,
         params: InlineTemplate<'_>,
-    ) -> MeshTemplate<PbrMaterialInstance> {
+    ) -> MeshTemplate {
         let vertex_buffer = renderer
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -235,7 +331,7 @@ impl PbrMaterial {
             material_name: None,
         };
         let white = Texture::from_rgba8(renderer, params.label, 1, 1, &[255; 4], true);
-        let material = self.create_instance(
+        let instance = self.create_instance(
             renderer,
             samplers,
             asset_server,
@@ -247,12 +343,14 @@ impl PbrMaterial {
                 roughness: params.roughness,
             },
         );
+        let material: Arc<dyn MeshMaterial> = Arc::new(instance);
         MeshTemplate {
             mesh: MeshBacking::Inline {
                 primitives: vec![primitive],
             },
             visual_bounds: params.bounds,
-            material,
+            materials: vec![Arc::clone(&material)],
+            fallback_material: material,
         }
     }
 }

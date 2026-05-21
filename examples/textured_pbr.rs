@@ -33,7 +33,7 @@ use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, Handle, InstanceBuckets,
-    MaterialInstanceRegistry, MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance,
+    MaterialInstanceRegistry, MeshInstanceAttribs, MeshMaterial, PbrMaterial, PbrMaterialInstance,
     PbrMaterialParams, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, SimEnvironment,
     SimPos, SimUnit, Simulation, Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment,
     WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
@@ -335,8 +335,8 @@ impl View for TexturedPbr {
         // mirrors the canonical streaming-aware draw shape used by
         // `examples/assets.rs`.
         for &mat in ALL_MATERIALS.iter() {
-            if let Some(instance) = self.instances.get_mut(mat) {
-                instance.refresh(renderer, &self.material, &self.samplers, &self.asset_server);
+            if let Some(instance) = self.instances.get(mat) {
+                instance.refresh(renderer, &self.samplers, &self.asset_server);
             }
         }
 
@@ -349,7 +349,7 @@ impl View for TexturedPbr {
             let Some(instance) = self.instances.get(*mat) else {
                 continue;
             };
-            pass.set_bind_group(2, instance.bind_group(), &[]);
+            instance.bind(pass, 2);
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
             pass.draw_indexed(0..self.cube_index_count, 0, 0..count);
         }

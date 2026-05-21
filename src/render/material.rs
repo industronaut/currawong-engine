@@ -4,13 +4,18 @@
 //!
 //! - **Material template** — a concrete Rust struct per material kind, owning
 //!   the compiled pipeline + bind-group layout for the per-material bind
-//!   group. Today: [`UnlitColoredMaterial`] (this file) and
-//!   [`PbrMaterial`](super::PbrMaterial). Both implement the [`MeshMaterial`]
-//!   trait — the shared structural shape.
+//!   group. Today: [`UnlitColoredMaterial`] (this file),
+//!   [`PbrMaterial`](super::PbrMaterial), and
+//!   [`PbrAtlasMaterial`](super::PbrAtlasMaterial). Templates are stateless
+//!   after their pipelines + BGLs are baked into the instances they produce.
 //! - **Material instance** — a bind group + uniform buffer bound to a
 //!   template, holding concrete uniform values. Many sim objects share one
-//!   instance ("red metal," "gold trim"). Stored in a
-//!   [`MaterialInstanceRegistry`].
+//!   instance ("red metal," "gold trim"). Instances implement
+//!   [`MeshMaterial`] so an `Arc<I>` unsizes into `Arc<dyn MeshMaterial>`
+//!   and slots straight into [`MeshTemplate`](super::MeshTemplate) or
+//!   [`MaterialRegistry`](super::MaterialRegistry); the draw loop walks
+//!   them uniformly through `pipeline()` + `bind()` with no concrete-type
+//!   dispatch.
 //! - **Per-instance attribs** — `repr(C)` `Pod` struct packed into a vertex
 //!   buffer with `step_mode = Instance`; varies per drawn copy. Both mesh
 //!   materials read the same [`MeshInstanceAttribs`] layout (84 B: model
@@ -36,7 +41,9 @@ use std::hash::Hash;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec4};
 
+use super::asset_server::AssetServer;
 use super::renderer::Renderer;
+use super::texture::SamplerRegistry;
 use super::vertex::PosNormalUv;
 
 // --- Generic instance registry -------------------------------------------
@@ -76,9 +83,7 @@ where
         self.instances.get(&id)
     }
 
-    /// Mutable variant of [`get`](Self::get). Needed for instances that
-    /// expose a per-frame `refresh` method (e.g. `PbrMaterialInstance` —
-    /// the bind group has to be rebuilt when its handle transitions).
+    /// Mutable variant of [`get`](Self::get).
     pub fn get_mut(&mut self, id: K) -> Option<&mut I> {
         self.instances.get_mut(&id)
     }
@@ -295,28 +300,55 @@ pub(super) fn build_pbr_style_pipeline(
     })
 }
 
-/// Common shape of every mesh-material template — the structural pattern
-/// behind [`UnlitColoredMaterial`] and [`PbrMaterial`](super::PbrMaterial).
+/// Erased mesh-material — the shape every drawable per-primitive material
+/// implements, stored as `Arc<dyn MeshMaterial>` on
+/// [`MeshTemplate`](super::MeshTemplate) and in
+/// [`MaterialRegistry`](super::MaterialRegistry).
 ///
-/// The contract:
-/// - The pipeline reads camera at `@group(0)` and the material-instance bind
-///   group at the material's chosen index (per-kind; PBR adds the scene
-///   environment in between).
+/// Each implementor owns its compiled pipeline and a per-instance bind
+/// group (with whatever uniforms + textures the material needs). The draw
+/// loop is uniform — no switch on concrete material type:
+///
+/// ```text
+/// pass.set_pipeline(mat.pipeline());
+/// mat.bind(pass, 2);
+/// pass.draw_indexed(...);
+/// ```
+///
+/// The contract for every implementor:
+/// - The pipeline reads camera at `@group(0)` and the per-instance bind
+///   group at the index passed to [`bind`](Self::bind) (today `2` for
+///   PBR-shaped materials that also need the scene environment at
+///   `@group(1)`; `1` for unlit materials that skip it).
 /// - Vertex buffer slot 1 carries [`MeshInstanceAttribs`].
 /// - The fragment shader writes per-instance `hit_id` to the engine's
 ///   `R32Uint` hit-ID attachment.
 ///
-/// The trait is deliberately thin today (one accessor + the
-/// [`Instance`](Self::Instance) associated type) — generic draw helpers will
-/// land here when a call site actually needs them.
-pub trait MeshMaterial {
-    /// Concrete material-instance type produced by this template. Each
-    /// material kind owns its own instance shape (uniform layout, sampler /
-    /// texture bindings) — the trait just names it.
-    type Instance;
-
+/// `&self` everywhere — concrete implementors that need to rebuild the
+/// bind group when a streaming handle transitions use interior
+/// mutability (today: `Mutex` around the cached bind group + handle
+/// state). This lets a single `Arc<dyn MeshMaterial>` flow through the
+/// registry and onto every template that references it, without lock
+/// wrapping at the call site.
+pub trait MeshMaterial: Send + Sync {
     /// The compiled render pipeline. Bind via `pass.set_pipeline`.
     fn pipeline(&self) -> &wgpu::RenderPipeline;
+
+    /// Bind this material's per-instance bind group at `group` on `pass`.
+    /// The implementor is responsible for any interior locking needed to
+    /// hand `&BindGroup` to wgpu.
+    fn bind(&self, pass: &mut wgpu::RenderPass<'_>, group: u32);
+
+    /// Reconcile any cached bind group with the current state of the
+    /// material's streaming handles. Cheap when nothing changed; on a
+    /// transition (a handle finishes loading, or the debug
+    /// [`set_force_loading`](super::AssetServer::set_force_loading)
+    /// toggle flips) the bind group is rebuilt against the new view.
+    ///
+    /// Engine calls this once per frame per registered material before
+    /// the draw walk. Materials with no streaming state (the unlit
+    /// material) implement this as a no-op.
+    fn refresh(&self, renderer: &Renderer, samplers: &SamplerRegistry, assets: &AssetServer);
 }
 
 // --- UnlitColored: the first concrete material ----------------------------
@@ -530,24 +562,42 @@ impl UnlitColoredMaterial {
                     resource: buffer.as_entire_binding(),
                 }],
             });
-        UnlitColoredInstance { buffer, bind_group }
-    }
-}
-
-impl MeshMaterial for UnlitColoredMaterial {
-    type Instance = UnlitColoredInstance;
-
-    fn pipeline(&self) -> &wgpu::RenderPipeline {
-        self.pipeline()
+        UnlitColoredInstance {
+            pipeline: self.pipeline.clone(),
+            buffer,
+            bind_group,
+        }
     }
 }
 
 /// A live material instance for [`UnlitColoredMaterial`] — uniform buffer +
 /// bind group. Bind as `@group(1)` when drawing through the material's
 /// pipeline.
+///
+/// Holds a clone of its template's pipeline (cheap — wgpu pipelines are
+/// internally Arc-refcounted) so the instance is self-contained: routing
+/// every `Arc<dyn MeshMaterial>` through the same uniform draw seam needs
+/// the pipeline reachable from the instance alone, without a back-pointer
+/// to the template.
 pub struct UnlitColoredInstance {
+    pipeline: wgpu::RenderPipeline,
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+impl MeshMaterial for UnlitColoredInstance {
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
+    }
+
+    fn bind(&self, pass: &mut wgpu::RenderPass<'_>, group: u32) {
+        pass.set_bind_group(group, Some(&self.bind_group), &[]);
+    }
+
+    /// Unlit instances carry no streaming handles, so reconciliation is a
+    /// no-op. The trait method exists so the engine can refresh every
+    /// `Arc<dyn MeshMaterial>` uniformly without dispatching on type.
+    fn refresh(&self, _: &Renderer, _: &SamplerRegistry, _: &AssetServer) {}
 }
 
 impl UnlitColoredInstance {

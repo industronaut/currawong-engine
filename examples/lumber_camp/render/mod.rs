@@ -49,9 +49,9 @@ use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, Frustum,
     HitTarget, InstanceBuckets, LiveRenderObjects, MaterialId, MaterialRegistry,
-    MeshInstanceAttribs, MeshTemplate, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance,
-    PbrAtlasMaterialParams, PbrMaterial, PbrMaterialInstance, RenderObjectPass, RenderRegistry,
-    RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
+    MeshInstanceAttribs, MeshMaterial, MeshTemplate, OrbitRig, PbrAtlasMaterial,
+    PbrAtlasMaterialParams, PbrMaterial, RenderObjectPass, RenderRegistry, RenderSpec,
+    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
     TerrainMaterialInstance, TerrainRenderer, TextureColorSpace, View, ViewConfig, ViewEnvironment,
     WorldObjectRef, YakuiAssets, ZoneId, egui, wgpu, winit, yakui,
 };
@@ -64,15 +64,6 @@ use crate::sim::{Command, Game, GameState, HEIGHT_UNIT, TILE_SIZE, TIME_LIMIT_SE
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// Which mesh pipeline is currently bound to the pass. Tracked across
-/// the per-primitive loop in [`LumberCampView::render`] so we only call
-/// `set_pipeline` on transitions, not per draw.
-#[derive(PartialEq, Eq)]
-enum ActivePipeline {
-    None,
-    Pbr,
-    Atlas,
-}
 const MAX_INSTANCES_PER_PART: u32 = 64;
 /// 30 frames matches CLAUDE.md's hysteresis recommendation — enough to
 /// hide pop-out at grazing camera angles around the orbit rig.
@@ -149,14 +140,20 @@ pub struct LumberCampView {
     camera_binding: CameraBinding,
     rig: OrbitRig,
 
-    material: PbrMaterial,
-    /// Stylized atlas-PBR material — used by glb primitives whose
-    /// material slot resolves through [`Self::atlas_materials`].
-    atlas_material: PbrAtlasMaterial,
-    /// Registry of atlas-material instances keyed by glb material name.
-    /// Today only `gltf:lumber` is populated (from `assets/lumber/`'s
-    /// albedo + MRE atlases); add a new entry per stylized atlas pair.
-    atlas_materials: MaterialRegistry<PbrAtlasMaterialInstance>,
+    /// Unified, name-keyed registry of material instances erased to
+    /// `Arc<dyn MeshMaterial>`. Today only `gltf:lumber` is populated
+    /// (from `assets/lumber/`'s albedo + MRE atlases); add an entry per
+    /// new authored material. Streamed-glb templates resolve each
+    /// primitive's `material_name` against this registry once, on the
+    /// frame the glb decodes; misses fall through to the template's
+    /// `fallback_material`. The per-frame walk through `materials.iter()`
+    /// is also where each instance's bind group reconciles with its
+    /// streaming texture handles.
+    ///
+    /// The two template helpers (`PbrMaterial`, `PbrAtlasMaterial`) live
+    /// as locals inside `init` — both are stateless after their pipelines
+    /// + bind-group layouts are baked into the instances they produce.
+    materials: MaterialRegistry<Arc<dyn MeshMaterial>>,
     samplers: SamplerRegistry,
     asset_server: AssetServer,
     /// Cache from VFS path → yakui [`ManagedTextureId`](yakui::ManagedTextureId)
@@ -166,11 +163,11 @@ pub struct LumberCampView {
     yakui_assets: YakuiAssets,
 
     /// GPU bundle per drawable part. Looked up by the draw loop after the
-    /// per-part bucket has been filled by the engine walk. Refresh runs
-    /// each frame inside [`Self::render`] to reconcile the texture handles
-    /// (cheap when nothing changed, swaps the bind group on the frame the
-    /// real PNG lands).
-    mesh_templates: HashMap<PartKey, MeshTemplate<PbrMaterialInstance>>,
+    /// per-part bucket has been filled by the engine walk. Materials are
+    /// resolved through `materials` once on the frame each streamed glb
+    /// decodes; fallback handles cover the streaming window and any
+    /// per-primitive name miss.
+    mesh_templates: HashMap<PartKey, MeshTemplate>,
     /// Engine-side render-object registry: maps each `KindId` to a
     /// [`RenderTemplate`] declaring which `PartKey`s make up an instance,
     /// where each sits relative to the parent transform, and the visual
@@ -277,10 +274,15 @@ impl View for LumberCampView {
                 sampler: SamplerKind::NearestClamp,
             },
         );
-        let mut atlas_materials = MaterialRegistry::new();
-        atlas_materials.register(
+        // The unified registry holds every authored material as
+        // `Arc<dyn MeshMaterial>`. Atlas and (future) PBR-streamed
+        // materials live side-by-side here; the per-primitive draw walks
+        // through this one registry rather than enum-dispatching on
+        // concrete type.
+        let mut materials: MaterialRegistry<Arc<dyn MeshMaterial>> = MaterialRegistry::new();
+        materials.register(
             MaterialId::new("gltf:lumber").expect("valid id"),
-            lumber_instance,
+            Arc::new(lumber_instance),
         );
 
         // We also need to re-parse the defs view-side to walk each kind's
@@ -294,8 +296,7 @@ impl View for LumberCampView {
         .expect("view-side definitions load");
 
         // Build the registries by walking the defs.
-        let mut mesh_templates: HashMap<PartKey, MeshTemplate<PbrMaterialInstance>> =
-            HashMap::new();
+        let mut mesh_templates: HashMap<PartKey, MeshTemplate> = HashMap::new();
         let mut templates: Templates = RenderRegistry::new();
         let mut shapes: HashMap<KindId, RenderShape> = HashMap::new();
 
@@ -363,9 +364,7 @@ impl View for LumberCampView {
             camera,
             camera_binding,
             rig,
-            material,
-            atlas_material,
-            atlas_materials,
+            materials,
             samplers,
             asset_server,
             yakui_assets,
@@ -467,30 +466,35 @@ impl View for LumberCampView {
         let (visible, hysteresis) = self.live_objects.cull_counts();
         renderer.record_proxies(visible, hysteresis);
 
-        // Phase 1.5: reconcile material handles + cache the per-template
-        // fallback adjustments. Material `refresh` is cheap when nothing
-        // changed; on the frame a streamed texture transitions Loading →
-        // Ready the bind group is rebuilt against the real view.
-        // `resolve_mesh` follows the same shape for meshes (and returns
-        // a sizing matrix while the real glTF is still in flight).
+        // Phase 1.5: reconcile material handles, resolve per-primitive
+        // materials for any streamed glb that just decoded, and cache the
+        // per-template fallback adjustments. `refresh` is cheap when
+        // nothing changed; on the frame a streamed texture transitions
+        // Loading → Ready the underlying bind group is rebuilt against
+        // the real view. `resolve_materials` is a one-shot per template
+        // — the work happens only on the frame the mesh handle flips to
+        // Real, then the resolved Arcs sit on `template.materials` for
+        // every subsequent frame.
         let asset_server = &self.asset_server;
-        let material = &self.material;
-        let atlas_material = &self.atlas_material;
         let samplers = &self.samplers;
+        let materials_registry = &self.materials;
         let mut adjustments: HashMap<PartKey, Mat4> = HashMap::new();
+        // One pass through the unified registry covers every authored
+        // material; trait `refresh(&self)` doesn't need `&mut`, so this
+        // is a borrow walk rather than the old two-loop atlas-then-PBR
+        // shape.
+        for (_, mat) in materials_registry.iter() {
+            mat.refresh(renderer, samplers, asset_server);
+        }
         for (key, template) in &mut self.mesh_templates {
             template
-                .material
-                .refresh(renderer, material, samplers, asset_server);
+                .fallback_material
+                .refresh(renderer, samplers, asset_server);
+            template.resolve_materials(asset_server, materials_registry);
             adjustments.insert(
                 key.clone(),
                 template.resolve(asset_server).fallback_adjustment,
             );
-        }
-        // Atlas materials reconcile each frame too — same shape, two
-        // handles to flex over instead of one. Cheap when nothing changed.
-        for (_, instance) in self.atlas_materials.iter_mut() {
-            instance.refresh(renderer, atlas_material, samplers, asset_server);
         }
 
         // Phase 1.7: the single sim→view translation seam. Each
@@ -556,53 +560,37 @@ impl View for LumberCampView {
         self.terrain
             .draw_solid(pass, renderer, sim.zone, &self.terrain_solid);
 
-        // Mesh parts: one indexed-instanced call per primitive, resolving
-        // the mesh buffers fresh each draw (cheap — HashMap lookup +
-        // Handle::peek). Camera + scene bind groups (0 + 1) are shared
-        // across both PBR pipelines since both declare the same first two
-        // bind-group layouts; the per-primitive switch only touches the
-        // pipeline + bind group 2 when a primitive's `material_name`
-        // resolves to a registered atlas-material instance.
+        // Mesh parts: one indexed-instanced call per primitive. Camera +
+        // scene bind groups (0 + 1) are shared across every mesh
+        // pipeline since they all declare the same first two bind-group
+        // layouts; per-primitive material dispatch is now uniform
+        // through the `MeshMaterial` trait — one pipeline-pointer
+        // compare to debounce `set_pipeline`, then `mat.bind(pass, 2)`,
+        // no concrete-type switching.
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        // Track the currently-bound pipeline so we only call set_pipeline
-        // on the transition. ActivePipeline::None forces a bind on the
-        // first draw of the frame.
-        let mut active = ActivePipeline::None;
+        // Track the currently-bound pipeline by pointer identity so we
+        // only call set_pipeline on the transition. wgpu pipelines are
+        // Arc-refcounted internally; the pointer comparison is
+        // equivalent to "are we still bound to the same backing
+        // pipeline?" without needing to enumerate the closed set of
+        // pipelines up front.
+        let mut active: Option<*const wgpu::RenderPipeline> = None;
         for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
             let Some(template) = self.mesh_templates.get(part_key) else {
                 continue;
             };
             let resolved = template.resolve(asset_server);
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            // Lumber camp's existing assets are mostly single-primitive,
-            // but post-#80 every glb produces a `Vec<MeshPrimitive>` and
-            // each primitive carries its own `material_name`. Dispatch
-            // per primitive so a multi-material glb (lumber camp body
-            // uses the "Lumber" atlas; ancillary primitives could fall
-            // back to the streamed PBR material) draws through the right
-            // pipeline + bind group 2 for each piece.
-            for prim in resolved.primitives {
-                let atlas = prim
-                    .material_name
-                    .as_deref()
-                    .and_then(|name| self.atlas_materials.get_by_name(name));
-                match atlas {
-                    Some(instance) => {
-                        if active != ActivePipeline::Atlas {
-                            pass.set_pipeline(self.atlas_material.pipeline());
-                            active = ActivePipeline::Atlas;
-                        }
-                        pass.set_bind_group(2, instance.bind_group(), &[]);
-                    }
-                    None => {
-                        if active != ActivePipeline::Pbr {
-                            pass.set_pipeline(self.material.pipeline());
-                            active = ActivePipeline::Pbr;
-                        }
-                        pass.set_bind_group(2, template.material.bind_group(), &[]);
-                    }
+            for (i, prim) in resolved.primitives.iter().enumerate() {
+                let mat = template.material_for(i);
+                let pipeline = mat.pipeline();
+                let pipeline_ptr = pipeline as *const _;
+                if active != Some(pipeline_ptr) {
+                    pass.set_pipeline(pipeline);
+                    active = Some(pipeline_ptr);
                 }
+                mat.bind(pass, 2);
                 pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
                 pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..prim.index_count, 0, 0..count);
