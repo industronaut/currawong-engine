@@ -28,7 +28,7 @@
 //! - [`instance`] — per-key instance bucketing for batched instanced rendering.
 //! - [`emitter`] — declarative emitter reconciliation + particle integration.
 //! - [`render_object`] — render-object templates + registry (mesh + emitter parts).
-//! - [`render_object_pass`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
+//! - [`render_object_traversal`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
 //! - [`material_registry`] — name-keyed [`MaterialRegistry`] resolving glb material
 //!   slot names to [`PbrMaterialInstance`]s (or any other instance type).
@@ -52,7 +52,7 @@
 //! - [`texture`] — `Texture` asset (RGBA8 + CPU mip generation) + canonical samplers.
 //! - [`vertex`] — closed set of canonical per-vertex layouts.
 //! - [`visibility`] — AABB + view-frustum culling primitives.
-//! - [`live_render_objects`] — live render-object instance reconciler with cull hysteresis.
+//! - [`render_proxy`] — live render-object instance reconciler with cull hysteresis.
 //! - [`yakui_assets`] — VFS → yakui [`ManagedTextureId`](yakui::ManagedTextureId)
 //!   cache for game UI (behind the `yakui` feature).
 //!
@@ -74,7 +74,6 @@ mod game_ui;
 mod gpu_profiler;
 mod handle;
 mod instance;
-mod live_render_objects;
 mod material;
 mod material_registry;
 mod mesh;
@@ -85,7 +84,8 @@ mod pbr_atlas;
 mod picking;
 mod picking_buffer;
 mod render_object;
-mod render_object_pass;
+mod render_object_traversal;
+mod render_proxy;
 mod renderer;
 mod runner;
 mod scene_resources;
@@ -109,7 +109,6 @@ pub use frame_stats::FrameStats;
 pub use frame_timings::{FrameTimings, GpuSegments};
 pub use handle::{Handle, HandleError, HandleState};
 pub use instance::{InstanceBuckets, mat4_instance_attributes, u32_id_instance_attribute};
-pub use live_render_objects::{LiveRenderObject, LiveRenderObjects, RenderPartState};
 pub use material::{
     MaterialInstanceRegistry, MeshInstanceAttribs, MeshMaterial, UnlitColoredInstance,
     UnlitColoredMaterial,
@@ -125,7 +124,8 @@ pub use pbr_atlas::{PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterial
 pub use picking::{Hover, Ray, TerrainPicker};
 pub use picking_buffer::{FrameIdTable, HitTarget};
 pub use render_object::{EmitterPart, MeshPart, RenderRegistry, RenderTemplate};
-pub use render_object_pass::RenderObjectPass;
+pub use render_object_traversal::RenderObjectTraversal;
+pub use render_proxy::{RenderPartState, RenderProxies, RenderProxy};
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};
 pub use terrain::{

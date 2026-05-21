@@ -29,10 +29,10 @@
 //!    `HashMap<KindId, RenderShape>` rather than re-matching strings each
 //!    frame — keeps the per-frame seam to one HashMap lookup.
 //!
-//! Sim-vocabulary slot names + view-state-on-`LiveRenderObject` from
+//! Sim-vocabulary slot names + view-state-on-`RenderProxy` from
 //! [`super`]/CLAUDE.md still apply: the marker and the carried log are
 //! view-side visibility decisions on the persistent
-//! [`LiveRenderObject`], driven by the sim's typed [`Designated`] /
+//! [`RenderProxy`], driven by the sim's typed [`Designated`] /
 //! [`Carrying`] components.
 
 mod debugui;
@@ -48,10 +48,10 @@ use currawong::data::{Definitions, KindId, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, Frustum,
-    HitTarget, InstanceBuckets, LiveRenderObjects, MaterialId, MaterialRegistry,
-    MeshInstanceAttribs, MeshTemplate, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance,
-    PbrAtlasMaterialParams, PbrMaterial, PbrMaterialInstance, RenderObjectPass, RenderRegistry,
-    RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
+    HitTarget, InstanceBuckets, MaterialId, MaterialRegistry, MeshInstanceAttribs, MeshTemplate,
+    OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrMaterial,
+    PbrMaterialInstance, RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec,
+    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
     TerrainMaterialInstance, TerrainRenderer, TextureColorSpace, View, ViewConfig, ViewEnvironment,
     WorldObjectRef, YakuiAssets, ZoneId, egui, wgpu, winit, yakui,
 };
@@ -183,7 +183,7 @@ pub struct LumberCampView {
     /// Live render-object proxies with cull hysteresis. Owns the
     /// view-side per-instance state (`world_xform`, per-part visibility)
     /// that the per-instance update closure writes each frame.
-    live_objects: LiveRenderObjects<KindId>,
+    proxies: RenderProxies<KindId>,
     /// Per-part instance-attrib buckets. The extract closure pushes one
     /// [`MeshInstanceAttribs`] per visible part; the draw loop iterates
     /// non-empty buckets and issues one indexed-instanced call each.
@@ -340,7 +340,7 @@ impl View for LumberCampView {
             shapes.insert(kind_id.clone(), shape);
         }
 
-        let live_objects = LiveRenderObjects::<KindId>::new(CULL_HYSTERESIS_FRAMES);
+        let proxies = RenderProxies::<KindId>::new(CULL_HYSTERESIS_FRAMES);
 
         let mut buckets = InstanceBuckets::<PartKey, MeshInstanceAttribs>::new(
             "lumber-camp instances",
@@ -372,7 +372,7 @@ impl View for LumberCampView {
             mesh_templates,
             templates,
             shapes,
-            live_objects,
+            proxies,
             buckets,
             terrain: TerrainRenderer::new(),
             terrain_material,
@@ -456,15 +456,15 @@ impl View for LumberCampView {
         // object carrying a `KindId` matching a registered template;
         // frustum-culled with hysteresis.
         let frustum = Frustum::from_view_proj(self.camera.view_proj());
-        RenderObjectPass::declare_and_cull(
+        RenderObjectTraversal::declare_and_cull(
             &sim.zones,
             &self.templates,
-            &mut self.live_objects,
+            &mut self.proxies,
             &frustum,
         );
         // Surface live-proxy counts to the debug overlay. Cheap walk; only
         // happens once per frame.
-        let (visible, hysteresis) = self.live_objects.cull_counts();
+        let (visible, hysteresis) = self.proxies.cull_counts();
         renderer.record_proxies(visible, hysteresis);
 
         // Phase 1.5: reconcile material handles + cache the per-template
@@ -499,10 +499,10 @@ impl View for LumberCampView {
         // frame seam to one HashMap lookup.
         let pawn = &self.pawn;
         let shapes = &self.shapes;
-        RenderObjectPass::update_instances(
+        RenderObjectTraversal::update_instances(
             &sim.zones,
             &self.templates,
-            &mut self.live_objects,
+            &mut self.proxies,
             |parent, kind_id, components, instance| match shapes.get(kind_id) {
                 Some(RenderShape::Pawn) => {
                     pawn::update_instance(parent, components, instance, alpha, pawn)
@@ -523,10 +523,10 @@ impl View for LumberCampView {
         // constant albedo for legibility.
         let buckets = &mut self.buckets;
         let hovered = self.hovered;
-        RenderObjectPass::for_each_alive_part_with_hit_id(
+        RenderObjectTraversal::for_each_alive_part_with_hit_id(
             &sim.zones,
             &self.templates,
-            &self.live_objects,
+            &self.proxies,
             renderer,
             |parent, _kind, part, world, hit_id| {
                 let tint = if hovered == Some(parent) && part.material.is_body() {

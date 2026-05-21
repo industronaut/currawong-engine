@@ -130,7 +130,7 @@ impl FrameIdTable {
     /// at every pixel the object covers.
     ///
     /// All mesh parts of one sim object should share the same hit ID — see
-    /// [`RenderObjectPass::for_each_alive_with_hit_id`](super::RenderObjectPass::for_each_alive_with_hit_id)
+    /// [`RenderObjectTraversal::for_each_alive_with_hit_id`](super::RenderObjectTraversal::for_each_alive_with_hit_id)
     /// for the engine-driven path that reserves once per parent.
     pub fn reserve_object(&mut self, zone: ZoneId, object_id: WorldObjectId) -> u32 {
         let hit_id = self.next_id;

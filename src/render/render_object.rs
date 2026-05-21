@@ -10,7 +10,7 @@
 //! geometry and [`EmitterPart<E, S>`] for particle emitter attachments.
 //! Each part has a local transform from the template root. Per-instance
 //! state lives on the persistent
-//! [`LiveRenderObject`](super::LiveRenderObject); the per-instance update
+//! [`RenderProxy`](super::RenderProxy); the per-instance update
 //! closure reads sim [`Components`](crate::sim::Components) and writes it
 //! there each frame.
 //!
@@ -87,7 +87,7 @@ impl<E, S> EmitterPart<E, S> {
 /// Static template describing a renderable object. Many sim objects may
 /// reference one template (every oak tree → `tree_oak`); per-instance
 /// variation lives in transforms and in the
-/// [`LiveRenderObject`](super::LiveRenderObject) per-instance state the
+/// [`RenderProxy`](super::RenderProxy) per-instance state the
 /// update closure writes.
 ///
 /// Templates are built with [`Self::new`] then chained
@@ -144,7 +144,7 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
 
     /// Set the template's *visual* AABB — the region of space the template
     /// occupies when rendered, including emitter reach and other effects.
-    /// Used by [`LiveRenderObjects::cull`](super::LiveRenderObjects::cull); a
+    /// Used by [`RenderProxies::cull`](super::RenderProxies::cull); a
     /// template without visual bounds is never culled.
     ///
     /// CLAUDE.md invariant: visual bounds differ from sim bounds. A 0.5 m
