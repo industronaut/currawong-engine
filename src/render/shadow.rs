@@ -105,10 +105,12 @@ impl ShadowMeshPipeline {
             fragment: None,
             primitive: wgpu::PrimitiveState {
                 // Front-face culling lifts the depth-test surface to the
-                // back of each occluder, which together with the constant
-                // bias below kills most self-shadowing acne on convex
-                // meshes. Concave geometry needs additional per-receiver
-                // bias; PBR shader does slope-scale on the receiver side.
+                // back of each occluder, which alone kills most
+                // self-shadowing acne on convex meshes. The small
+                // slope_scale below covers grazing-angle cases without
+                // pushing far enough to detach shadows from casters
+                // (peter-panning). Concave geometry that still acnes is
+                // the trigger to add a receiver-side normal-offset bias.
                 cull_mode: Some(wgpu::Face::Front),
                 ..Default::default()
             },
@@ -119,7 +121,7 @@ impl ShadowMeshPipeline {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
                     constant: 2,
-                    slope_scale: 2.0,
+                    slope_scale: 0.25,
                     clamp: 0.0,
                 },
             }),
