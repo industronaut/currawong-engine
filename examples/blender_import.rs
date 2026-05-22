@@ -223,10 +223,7 @@ impl View for BlenderImportView {
                 roughness: 0.65,
             },
         );
-        materials.register(
-            MaterialId::new("currawong:mat_lumber").expect("valid id"),
-            lumber,
-        );
+        materials.register(MaterialId::new("gltf:lumber").expect("valid id"), lumber);
 
         let magenta_albedo = Texture::from_rgba8(
             renderer,
