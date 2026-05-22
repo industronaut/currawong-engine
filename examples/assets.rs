@@ -158,6 +158,7 @@ impl View for AssetsView {
             a: 1.0,
         },
         depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
     };
 
     fn init(renderer: &Renderer) -> Self {
@@ -257,6 +258,7 @@ impl View for AssetsView {
             sun_color: Vec3::splat(2.0),
             ambient: Vec3::new(0.25, 0.27, 0.32),
             sky_color: Vec3::new(0.45, 0.55, 0.75),
+            ..ViewEnvironment::neutral()
         }
     }
 

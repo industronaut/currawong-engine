@@ -61,6 +61,15 @@ pub struct ViewConfig {
     /// the same format in their `DepthStencilState`. `None` is right for
     /// 2D / UI views that draw in clip space.
     pub depth_format: Option<wgpu::TextureFormat>,
+    /// Per-cascade shadow-map resolution. `Some(2048)` allocates a
+    /// 2048×2048×4 directional-light shadow array and invites the engine to
+    /// run four depth-only passes per frame, calling
+    /// [`View::shadow_pass`](View::shadow_pass) once per cascade so the
+    /// View can record occluder draws. `None` (the default) disables the
+    /// shadow phase entirely; lit shaders then read the
+    /// [`SunCascades::disabled`](super::environment::SunCascades::disabled)
+    /// sentinel and skip sampling.
+    pub shadow_map_resolution: Option<u32>,
 }
 
 impl ViewConfig {
@@ -76,6 +85,7 @@ impl ViewConfig {
             a: 1.0,
         },
         depth_format: None,
+        shadow_map_resolution: None,
     };
 }
 
@@ -130,6 +140,35 @@ pub trait View: 'static {
         pass: &mut wgpu::RenderPass<'_>,
     ) {
         let _ = (sim, alpha, renderer, pass);
+    }
+
+    /// Record occluder draws into the `cascade`-th shadow map. Called by
+    /// the engine once per cascade (four times per frame) when
+    /// [`ViewConfig::shadow_map_resolution`] is `Some`, between
+    /// [`extract_environment`](Self::extract_environment) and
+    /// [`render`](Self::render).
+    ///
+    /// The engine begins a depth-only render pass targeting the `cascade`-th
+    /// array layer of the shadow texture and binds the matching cascade's
+    /// light view-projection at `@group(0)` (see
+    /// [`Renderer::shadow_cascade_bind_group`](crate::Renderer::shadow_cascade_bind_group)),
+    /// so the View just needs to set its shadow pipeline (typically
+    /// [`ShadowMeshPipeline`](crate::ShadowMeshPipeline)) and issue draws.
+    ///
+    /// Per-cascade draws share the same vertex + instance buffers used in
+    /// `render`; the depth-only pipeline reads only position and the
+    /// per-instance model matrix.
+    ///
+    /// `sim` is read-only by signature, mirroring `render`. Default no-op.
+    fn shadow_pass(
+        &mut self,
+        sim: &Self::Sim,
+        alpha: f32,
+        cascade: u32,
+        renderer: &Renderer,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let _ = (sim, alpha, cascade, renderer, pass);
     }
 
     /// Handle a window event. Push

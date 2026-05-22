@@ -267,6 +267,7 @@ impl View for TerrainView {
             sun_color: Vec3::new(1.0, 0.95, 0.85) * 1.2,
             ambient: Vec3::new(0.18, 0.20, 0.24),
             sky_color: Vec3::new(0.45, 0.65, 0.95),
+            ..ViewEnvironment::neutral()
         }
     }
 

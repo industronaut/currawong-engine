@@ -19,6 +19,13 @@ use super::picking_buffer::{FrameIdTable, HitTarget, IdReadback};
 /// See issue #56 for the full HitProxy design.
 pub(super) const ID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 
+/// Format of the directional-light shadow map.
+pub(super) const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Fixed cascaded-shadow-map layer count. Matches the camera-side fit (see
+/// [`Camera::fit_shadow_cascades`](super::Camera::fit_shadow_cascades)).
+pub(super) const SHADOW_CASCADE_COUNT: u32 = 4;
+
 /// Engine-owned per-scene resources. Lives on [`Renderer`](super::Renderer);
 /// pipelines reach in through the renderer's public accessors
 /// ([`scene_layout`](super::Renderer::scene_layout),
@@ -44,6 +51,32 @@ pub(super) struct SceneResources {
     /// per-chunk or per-batch writers can reuse the same layout.
     id_base_layout: wgpu::BindGroupLayout,
     environment: SceneEnvironmentBinding,
+    shadow: ShadowResources,
+}
+
+/// Directional-light shadow map: a 4-layer `Depth32Float` array. When the
+/// View opts in via [`ViewConfig::shadow_map_resolution`](super::ViewConfig)
+/// the texture is allocated at the requested resolution and each layer is
+/// rendered to per frame; otherwise the engine still allocates a 1×1×4
+/// placeholder so the scene bind group is always complete and material
+/// pipelines don't have to branch on shadows-on/off. Sampling is gated
+/// shader-side by the [`SunCascades::disabled`](super::environment::SunCascades::disabled)
+/// sentinel (`splits[0] == 0.0`).
+pub(super) struct ShadowResources {
+    /// `Some` when the View opted in; `None` is the placeholder path.
+    resolution: Option<u32>,
+    array_view: wgpu::TextureView,
+    /// Per-layer views, one per cascade, used as the depth attachment when
+    /// recording each cascade's shadow pass.
+    layer_views: [wgpu::TextureView; SHADOW_CASCADE_COUNT as usize],
+    sampler: wgpu::Sampler,
+    /// One uniform buffer per cascade, each holding a single `mat4x4<f32>`
+    /// (the cascade's light view-projection). The runner writes these from
+    /// the per-frame [`ViewEnvironment::sun_cascades`]; depth-only pipelines
+    /// in the shadow pass bind the matching cascade's bind group at group 0.
+    cascade_uniforms: [wgpu::Buffer; SHADOW_CASCADE_COUNT as usize],
+    cascade_bgl: wgpu::BindGroupLayout,
+    cascade_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT as usize],
 }
 
 struct DepthAttachment {
@@ -63,16 +96,19 @@ struct IdAttachment {
 impl SceneResources {
     pub(super) fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         width: u32,
         height: u32,
         depth_format: Option<wgpu::TextureFormat>,
+        shadow_map_resolution: Option<u32>,
     ) -> Self {
         let depth = depth_format.map(|format| DepthAttachment {
             format,
             view: create_depth_view(device, width, height, format),
         });
         let id = create_id_attachment(device, width, height);
-        let environment = SceneEnvironmentBinding::new(device);
+        let shadow = ShadowResources::new(device, queue, shadow_map_resolution);
+        let environment = SceneEnvironmentBinding::new(device, &shadow.array_view, &shadow.sampler);
         let id_readback = IdReadback::new(device);
         let id_base_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("currawong id-base layout"),
@@ -94,6 +130,7 @@ impl SceneResources {
             id_readback,
             id_base_layout,
             environment,
+            shadow,
         }
     }
 
@@ -134,6 +171,8 @@ impl SceneResources {
 
     pub(super) fn write_scene(&self, queue: &wgpu::Queue, env: &ViewEnvironment) {
         self.environment.write(queue, env);
+        self.shadow
+            .write_cascade_matrices(queue, &env.sun_cascades.matrices);
     }
 
     /// Reserve a chunk's worth of hit IDs in the current frame's table.
@@ -187,6 +226,144 @@ impl SceneResources {
     /// Latest hit target delivered by the readback ring, if any.
     pub(super) fn hit_id_hover(&self) -> Option<HitTarget> {
         self.id_readback.latest()
+    }
+
+    pub(super) fn shadow_map_resolution(&self) -> Option<u32> {
+        self.shadow.resolution
+    }
+
+    pub(super) fn shadow_layer_view(&self, cascade: u32) -> &wgpu::TextureView {
+        &self.shadow.layer_views[cascade as usize]
+    }
+
+    pub(super) fn shadow_cascade_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.shadow.cascade_bgl
+    }
+
+    pub(super) fn shadow_cascade_bind_group(&self, cascade: u32) -> &wgpu::BindGroup {
+        &self.shadow.cascade_bind_groups[cascade as usize]
+    }
+}
+
+impl ShadowResources {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, resolution: Option<u32>) -> Self {
+        let size = resolution.unwrap_or(1);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("currawong shadow map"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: SHADOW_CASCADE_COUNT,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let array_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("currawong shadow array view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let layer_views = std::array::from_fn(|i| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("currawong shadow layer view"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: i as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("currawong shadow comparison sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let cascade_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("currawong shadow cascade bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let cascade_uniforms: [wgpu::Buffer; SHADOW_CASCADE_COUNT as usize] =
+            std::array::from_fn(|_| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("currawong shadow cascade uniform"),
+                    size: 64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+        let cascade_bind_groups: [wgpu::BindGroup; SHADOW_CASCADE_COUNT as usize] =
+            std::array::from_fn(|i| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("currawong shadow cascade bind group"),
+                    layout: &cascade_bgl,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: cascade_uniforms[i].as_entire_binding(),
+                    }],
+                })
+            });
+        // Initialise every layer to "max depth" so the texture is in a
+        // known sample-ready state from the moment the scene bind group is
+        // first used. Without this, wgpu defers an internal "first-use
+        // clear" until the first draw that binds the texture for
+        // sampling — on some backends (notably Metal) that lazy clear
+        // ends up scheduled at a moment that interacts badly with a
+        // simultaneous swapchain resize, producing a frame-loop hang.
+        // The cost is one zero-load clear pass per cascade layer, once.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("currawong shadow init"),
+        });
+        for layer in &layer_views {
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("currawong shadow init clear"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: layer,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+
+        Self {
+            resolution,
+            array_view,
+            layer_views,
+            sampler,
+            cascade_uniforms,
+            cascade_bgl,
+            cascade_bind_groups,
+        }
+    }
+
+    fn write_cascade_matrices(&self, queue: &wgpu::Queue, matrices: &[glam::Mat4; 4]) {
+        for (i, mat) in matrices.iter().enumerate() {
+            let cols = mat.to_cols_array();
+            queue.write_buffer(&self.cascade_uniforms[i], 0, bytemuck::cast_slice(&cols));
+        }
     }
 }
 

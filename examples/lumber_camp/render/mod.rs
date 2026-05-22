@@ -228,6 +228,7 @@ impl View for LumberCampView {
             a: 1.0,
         },
         depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
     };
 
     fn init(renderer: &Renderer) -> Self {
@@ -414,6 +415,7 @@ impl View for LumberCampView {
             sun_color: Vec3::new(1.0, 0.95, 0.85) * 2.2,
             ambient: Vec3::new(0.30, 0.32, 0.38),
             sky_color: Vec3::new(0.45, 0.65, 0.95),
+            ..ViewEnvironment::neutral()
         }
     }
 

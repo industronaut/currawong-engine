@@ -480,6 +480,7 @@ impl View for MultiZoneView {
                 sun_color: Vec3::new(1.0, 0.95, 0.85) * 2.4,
                 ambient: Vec3::new(0.35, 0.40, 0.45),
                 sky_color: Vec3::new(0.45, 0.65, 0.95),
+                ..ViewEnvironment::neutral()
             }
         } else {
             ViewEnvironment {
@@ -487,6 +488,7 @@ impl View for MultiZoneView {
                 sun_color: Vec3::new(0.80, 0.85, 1.0) * 1.2,
                 ambient: Vec3::new(0.18, 0.20, 0.26),
                 sky_color: Vec3::new(0.18, 0.22, 0.30),
+                ..ViewEnvironment::neutral()
             }
         }
     }

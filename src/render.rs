@@ -95,6 +95,7 @@ mod render_proxy;
 mod renderer;
 mod runner;
 mod scene_resources;
+mod shadow;
 mod terrain;
 mod terrain_material;
 mod terrain_renderer;
@@ -110,7 +111,7 @@ pub use camera::{Camera, CameraBinding, CameraUniformData};
 pub use camera_rig::{OrbitRig, OrbitRigConfig};
 pub use cell_highlight::CellHighlight;
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
-pub use environment::{SceneEnvironmentBinding, ViewEnvironment};
+pub use environment::{SceneEnvironmentBinding, SunCascades, ViewEnvironment};
 pub use frame_stats::FrameStats;
 pub use frame_timings::{FrameTimings, GpuSegments};
 pub use handle::{Handle, HandleError, HandleState};
@@ -134,6 +135,7 @@ pub use render_object_traversal::RenderObjectTraversal;
 pub use render_proxy::{RenderPartState, RenderProxies, RenderProxy};
 pub use renderer::Renderer;
 pub use runner::{run, run_with_clock};
+pub use shadow::ShadowMeshPipeline;
 pub use terrain::{
     ChunkMeshes, FlatTopsMesher, MeshData, SlopeMesher, TerrainMesher, TerrainVertex,
 };
