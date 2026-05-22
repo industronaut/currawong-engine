@@ -51,9 +51,9 @@ use currawong::{
     HitTarget, InstanceBuckets, MaterialId, MaterialRegistry, MeshInstanceAttribs, MeshTemplate,
     OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrMaterial,
     PbrMaterialInstance, RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec,
-    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
-    TerrainMaterialInstance, TerrainRenderer, TextureColorSpace, View, ViewConfig, ViewEnvironment,
-    WorldObjectRef, YakuiAssets, ZoneId, egui, wgpu, winit, yakui,
+    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline, SunCascades,
+    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TextureColorSpace, View, ViewConfig,
+    ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId, egui, wgpu, winit, yakui,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -193,6 +193,12 @@ pub struct LumberCampView {
     terrain_material: TerrainMaterial,
     terrain_solid: TerrainMaterialInstance,
 
+    /// Depth-only pipeline used in the four cascade shadow passes per
+    /// frame. Shares the canonical `PosNormalUv` + `MeshInstanceAttribs`
+    /// vertex layout that all mesh draws here use, so the same vertex /
+    /// instance buffers can be re-bound under the depth-only pipeline.
+    shadow_pipeline: ShadowMeshPipeline,
+
     /// Object currently under the cursor, resolved from the GPU hit-ID
     /// readback (1–3 frame lag is invisible at hover-highlight latency).
     /// Stored as `WorldObjectRef` so it lines up with the parent that
@@ -228,11 +234,18 @@ impl View for LumberCampView {
             a: 1.0,
         },
         depth_format: Some(DEPTH_FORMAT),
-        ..ViewConfig::DEFAULT
+        shadow_map_resolution: Some(2048),
     };
 
     fn init(renderer: &Renderer) -> Self {
-        let camera = Camera::default();
+        // Set camera.far once at init — render() used to overwrite it every
+        // frame, but `extract_environment` runs *before* `render` and
+        // computes cascade matrices from `camera.far`, so the value must be
+        // stable from frame zero.
+        let camera = Camera {
+            far: 200.0,
+            ..Camera::default()
+        };
         let camera_binding = CameraBinding::new(&renderer.device);
         // Park the rig over the centre of the map, tilted down enough to see
         // the whole zone at a comfortable pitch.
@@ -358,6 +371,8 @@ impl View for LumberCampView {
         let terrain_material = TerrainMaterial::new(renderer, camera_binding.layout());
         let terrain_solid = terrain_material.create_instance(renderer, TERRAIN_TINT);
 
+        let shadow_pipeline = ShadowMeshPipeline::new(renderer);
+
         let yakui_assets = YakuiAssets::new(vfs.clone());
 
         Self {
@@ -378,6 +393,7 @@ impl View for LumberCampView {
             terrain: TerrainRenderer::new(),
             terrain_material,
             terrain_solid,
+            shadow_pipeline,
             hovered: None,
             pawn: PawnRenderer::new(),
             last_frame: Instant::now(),
@@ -410,27 +426,159 @@ impl View for LumberCampView {
         // Fixed afternoon sun. The slow day/night cycle deliverable in #58
         // replaces this with a time-of-day-driven extract once SimEnvironment
         // is plumbed in.
+        let sun_direction = Vec3::new(0.45, 0.35, 0.8).normalize();
+        let splits = self.camera.cascade_split_distances(0.75);
+        let matrices = self.camera.fit_shadow_cascades(sun_direction, splits);
         ViewEnvironment {
-            sun_direction: Vec3::new(0.45, 0.35, 0.8).normalize(),
+            sun_direction,
             sun_color: Vec3::new(1.0, 0.95, 0.85) * 2.2,
             ambient: Vec3::new(0.30, 0.32, 0.38),
             sky_color: Vec3::new(0.45, 0.65, 0.95),
-            ..ViewEnvironment::neutral()
+            sun_cascades: SunCascades { matrices, splits },
+        }
+    }
+
+    fn shadow_pass(
+        &mut self,
+        sim: &Game,
+        alpha: f32,
+        cascade: u32,
+        renderer: &Renderer,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        // First-cascade work: the per-frame walk that populates the
+        // instance buckets. The other three cascade passes (and `render`)
+        // draw the same buckets, so the walk has to land before any of
+        // them — and the engine calls `shadow_pass` four times before
+        // `render`, so cascade 0 is the right anchor.
+        if cascade == 0 {
+            // Resolve the current hover from the GPU readback. `hit_id_hover`
+            // can lag rendering by 1–3 frames; for hover-highlight that's
+            // invisible. Terrain hits and "no hit" both clear the object
+            // hover.
+            self.hovered = match renderer.hit_id_hover() {
+                Some(HitTarget::Object { zone, id }) => Some(WorldObjectRef { zone, id }),
+                _ => None,
+            };
+
+            self.buckets.begin_frame();
+
+            // Phase 1: engine-driven walk + declare + cull. One proxy per
+            // sim object carrying a `KindId` matching a registered
+            // template; frustum-culled with hysteresis.
+            let frustum = Frustum::from_view_proj(self.camera.view_proj());
+            RenderObjectTraversal::declare_and_cull(
+                &sim.zones,
+                &self.templates,
+                &mut self.proxies,
+                &frustum,
+            );
+            let (visible, hysteresis) = self.proxies.cull_counts();
+            renderer.record_proxies(visible, hysteresis);
+
+            // Phase 1.5: reconcile material handles + cache the per-template
+            // fallback adjustments. Material `refresh` is cheap when nothing
+            // changed; on the frame a streamed texture transitions Loading →
+            // Ready the bind group is rebuilt against the real view.
+            let asset_server = &self.asset_server;
+            let material = &self.material;
+            let atlas_material = &self.atlas_material;
+            let samplers = &self.samplers;
+            let mut adjustments: HashMap<PartKey, Mat4> = HashMap::new();
+            for (key, template) in &mut self.mesh_templates {
+                template
+                    .material
+                    .refresh(renderer, material, samplers, asset_server);
+                adjustments.insert(
+                    key.clone(),
+                    template.resolve(asset_server).fallback_adjustment,
+                );
+            }
+            for (_, instance) in self.atlas_materials.iter_mut() {
+                instance.refresh(renderer, atlas_material, samplers, asset_server);
+            }
+
+            // Phase 1.7: the single sim→view translation seam.
+            let pawn = &self.pawn;
+            let shapes = &self.shapes;
+            RenderObjectTraversal::update_instances(
+                &sim.zones,
+                &self.templates,
+                &mut self.proxies,
+                |parent, kind_id, components, instance| match shapes.get(kind_id) {
+                    Some(RenderShape::Pawn) => {
+                        pawn::update_instance(parent, components, instance, alpha, pawn)
+                    }
+                    Some(RenderShape::Tree) => tree::update_instance(parent, components, instance),
+                    Some(RenderShape::Building) | None => {}
+                },
+            );
+
+            // Phase 2: engine-driven extract — populate per-part buckets
+            // with the hit-ID-aware traversal so a click on any part
+            // resolves to the same `WorldObjectId`.
+            let buckets = &mut self.buckets;
+            let hovered = self.hovered;
+            RenderObjectTraversal::for_each_alive_part_with_hit_id(
+                &sim.zones,
+                &self.templates,
+                &self.proxies,
+                renderer,
+                |parent, _kind, part, world, hit_id| {
+                    let tint = if hovered == Some(parent) && part.material.is_body() {
+                        HOVER_TINT
+                    } else {
+                        Vec4::ONE
+                    };
+                    let adjustment = adjustments
+                        .get(&part.mesh)
+                        .copied()
+                        .unwrap_or(Mat4::IDENTITY);
+                    buckets.push(
+                        part.mesh.clone(),
+                        MeshInstanceAttribs::new(world * adjustment, tint).with_hit_id(hit_id),
+                    );
+                },
+            );
+
+            self.buckets.upload(&renderer.queue);
+        }
+
+        // Same draws every cascade — depth-only pipeline + the bucket
+        // contents the cascade-0 walk filled. Terrain is intentionally
+        // *not* drawn here: it's the main shadow receiver, not a caster
+        // in v1. Hills + cliffs casting would need a depth-only
+        // `TerrainVertex` pipeline; deferred.
+        pass.set_pipeline(self.shadow_pipeline.pipeline());
+        for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
+            let Some(template) = self.mesh_templates.get(part_key) else {
+                continue;
+            };
+            let resolved = template.resolve(&self.asset_server);
+            pass.set_vertex_buffer(1, instance_buffer.slice(..));
+            for prim in resolved.primitives {
+                pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+                pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..prim.index_count, 0, 0..count);
+            }
         }
     }
 
     fn render(
         &mut self,
         sim: &Game,
-        alpha: f32,
+        _alpha: f32,
         renderer: &Renderer,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
+        // Camera aspect refined per frame from the live surface size; stale-
+        // by-one-frame after a resize is acceptable since `extract_environment`
+        // (which builds the cascade matrices) reads `self.camera` and the
+        // bucket walk above already ran with the same value.
         let size = renderer.window.inner_size();
         if size.height > 0 {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
-        self.camera.far = 200.0;
         self.camera_binding.write(&renderer.queue, &self.camera);
 
         // Lazy first-frame terrain upload — init() has no sim handle.
@@ -443,111 +591,6 @@ impl View for LumberCampView {
             };
             self.terrain.rebuild_all(renderer, zone.terrain(), &mesher);
         }
-
-        // Resolve the current hover from the GPU readback. `hit_id_hover`
-        // can lag rendering by 1–3 frames; for hover-highlight that's
-        // invisible. Terrain hits and "no hit" both clear the object hover.
-        self.hovered = match renderer.hit_id_hover() {
-            Some(HitTarget::Object { zone, id }) => Some(WorldObjectRef { zone, id }),
-            _ => None,
-        };
-
-        self.buckets.begin_frame();
-
-        // Phase 1: engine-driven walk + declare + cull. One proxy per sim
-        // object carrying a `KindId` matching a registered template;
-        // frustum-culled with hysteresis.
-        let frustum = Frustum::from_view_proj(self.camera.view_proj());
-        RenderObjectTraversal::declare_and_cull(
-            &sim.zones,
-            &self.templates,
-            &mut self.proxies,
-            &frustum,
-        );
-        // Surface live-proxy counts to the debug overlay. Cheap walk; only
-        // happens once per frame.
-        let (visible, hysteresis) = self.proxies.cull_counts();
-        renderer.record_proxies(visible, hysteresis);
-
-        // Phase 1.5: reconcile material handles + cache the per-template
-        // fallback adjustments. Material `refresh` is cheap when nothing
-        // changed; on the frame a streamed texture transitions Loading →
-        // Ready the bind group is rebuilt against the real view.
-        // `resolve_mesh` follows the same shape for meshes (and returns
-        // a sizing matrix while the real glTF is still in flight).
-        let asset_server = &self.asset_server;
-        let material = &self.material;
-        let atlas_material = &self.atlas_material;
-        let samplers = &self.samplers;
-        let mut adjustments: HashMap<PartKey, Mat4> = HashMap::new();
-        for (key, template) in &mut self.mesh_templates {
-            template
-                .material
-                .refresh(renderer, material, samplers, asset_server);
-            adjustments.insert(
-                key.clone(),
-                template.resolve(asset_server).fallback_adjustment,
-            );
-        }
-        // Atlas materials reconcile each frame too — same shape, two
-        // handles to flex over instead of one. Cheap when nothing changed.
-        for (_, instance) in self.atlas_materials.iter_mut() {
-            instance.refresh(renderer, atlas_material, samplers, asset_server);
-        }
-
-        // Phase 1.7: the single sim→view translation seam. Each
-        // RenderShape's update logic lives in its own kind module —
-        // dispatching on the precomputed `shapes` map keeps the per-
-        // frame seam to one HashMap lookup.
-        let pawn = &self.pawn;
-        let shapes = &self.shapes;
-        RenderObjectTraversal::update_instances(
-            &sim.zones,
-            &self.templates,
-            &mut self.proxies,
-            |parent, kind_id, components, instance| match shapes.get(kind_id) {
-                Some(RenderShape::Pawn) => {
-                    pawn::update_instance(parent, components, instance, alpha, pawn)
-                }
-                Some(RenderShape::Tree) => tree::update_instance(parent, components, instance),
-                // Building: no per-instance view-state mutation; defaults
-                // (all parts visible, world_xform from the engine
-                // declare) stand. Same for unknown shapes that slipped
-                // through (registration would have rejected them).
-                Some(RenderShape::Building) | None => {}
-            },
-        );
-
-        // Phase 2: engine-driven extract. The hit-ID-aware variant reserves
-        // one ID per parent so clicking the log resolves back to the pawn,
-        // and clicking the marker resolves back to the tree (#56 PR 3).
-        // Hover tint stays on body parts; ancillaries keep their own
-        // constant albedo for legibility.
-        let buckets = &mut self.buckets;
-        let hovered = self.hovered;
-        RenderObjectTraversal::for_each_alive_part_with_hit_id(
-            &sim.zones,
-            &self.templates,
-            &self.proxies,
-            renderer,
-            |parent, _kind, part, world, hit_id| {
-                let tint = if hovered == Some(parent) && part.material.is_body() {
-                    HOVER_TINT
-                } else {
-                    Vec4::ONE
-                };
-                let adjustment = adjustments
-                    .get(&part.mesh)
-                    .copied()
-                    .unwrap_or(Mat4::IDENTITY);
-                buckets.push(
-                    part.mesh.clone(),
-                    MeshInstanceAttribs::new(world * adjustment, tint).with_hit_id(hit_id),
-                );
-            },
-        );
-
-        self.buckets.upload(&renderer.queue);
 
         // Terrain first so opaque ground is in the depth buffer before meshes
         // draw on top of it. Same camera + scene env bindings serve both.
@@ -575,7 +618,7 @@ impl View for LumberCampView {
             let Some(template) = self.mesh_templates.get(part_key) else {
                 continue;
             };
-            let resolved = template.resolve(asset_server);
+            let resolved = template.resolve(&self.asset_server);
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
             // Lumber camp's existing assets are mostly single-primitive,
             // but post-#80 every glb produces a `Vec<MeshPrimitive>` and

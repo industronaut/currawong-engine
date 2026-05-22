@@ -52,12 +52,16 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct Scene {
-    sun_direction: vec4<f32>,
-    sun_color:     vec4<f32>,
-    ambient:       vec4<f32>,
-    sky_color:     vec4<f32>,
+    sun_direction:         vec4<f32>,
+    sun_color:             vec4<f32>,
+    ambient:               vec4<f32>,
+    sky_color:             vec4<f32>,
+    sun_cascade_view_proj: array<mat4x4<f32>, 4>,
+    cascade_far_distances: vec4<f32>,
 };
-@group(1) @binding(0) var<uniform> scene: Scene;
+@group(1) @binding(0) var<uniform> scene:          Scene;
+@group(1) @binding(1) var          shadow_map:     texture_depth_2d_array;
+@group(1) @binding(2) var          shadow_sampler: sampler_comparison;
 
 @group(2) @binding(0) var albedo_tex: texture_2d<f32>;
 @group(2) @binding(1) var mre_tex:      texture_2d<f32>;
@@ -130,6 +134,34 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(one_minus, 5.0);
 }
 
+// Cascaded-shadow-map sampling — same shape as `pbr.rs`. See the comment
+// there for the rationale on the three early-out paths (disabled sentinel,
+// past-all-cascades, off-shadow-map UV).
+fn shadow_visibility(world_pos: vec3<f32>, view_z: f32) -> f32 {
+    if (scene.cascade_far_distances.x <= 0.0) {
+        return 1.0;
+    }
+    var cascade: i32 = -1;
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        if (view_z < scene.cascade_far_distances[i]) {
+            cascade = i;
+            break;
+        }
+    }
+    if (cascade < 0) {
+        return 1.0;
+    }
+    let light_clip = scene.sun_cascade_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
+    let ndc = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 ||
+        shadow_uv.y < 0.0 || shadow_uv.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, shadow_uv, cascade, ndc.z);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> FsOut {
     let albedo_sample = textureSample(albedo_tex, atlas_sampler, in.uv);
@@ -163,7 +195,10 @@ fn fs_main(in: VsOut) -> FsOut {
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * albedo / PI;
 
-    let direct = (diffuse + specular) * scene.sun_color.rgb * n_dot_l;
+    let view_z = length(in.world_pos - camera.position.xyz);
+    let visibility = shadow_visibility(in.world_pos, view_z);
+
+    let direct = (diffuse + specular) * scene.sun_color.rgb * n_dot_l * visibility;
     let ambient = scene.ambient.rgb * albedo;
 
     var out: FsOut;

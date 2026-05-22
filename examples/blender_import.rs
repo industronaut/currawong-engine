@@ -60,8 +60,9 @@ use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Handle, MaterialId,
     MaterialRegistry, Mesh, MeshInstanceAttribs, OrbitRig, PbrMaterial, PbrMaterialInstance,
-    PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry, SimUnit, Simulation, Texture, View,
-    ViewConfig, ViewEnvironment, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    PbrMaterialParams, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline, SimUnit,
+    Simulation, SunCascades, Texture, View, ViewConfig, ViewEnvironment, Zone, ZoneId, Zones,
+    sun_direction_for, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -137,6 +138,10 @@ struct BlenderImportView {
     visual_bounds: Aabb,
     instance_buffer: wgpu::Buffer,
 
+    /// Depth-only pipeline for the four cascade shadow passes per frame.
+    /// Reuses the same vertex/instance buffers the lit draws use.
+    shadow_pipeline: ShadowMeshPipeline,
+
     force_registry_miss: bool,
     hint_logged: bool,
     last_resolved_names: Vec<Option<String>>,
@@ -154,7 +159,7 @@ impl View for BlenderImportView {
             a: 1.0,
         },
         depth_format: Some(DEPTH_FORMAT),
-        ..ViewConfig::DEFAULT
+        shadow_map_resolution: Some(2048),
     };
 
     fn init(renderer: &Renderer) -> Self {
@@ -253,6 +258,8 @@ impl View for BlenderImportView {
             mapped_at_creation: false,
         });
 
+        let shadow_pipeline = ShadowMeshPipeline::new(renderer);
+
         Self {
             camera,
             camera_binding,
@@ -265,6 +272,7 @@ impl View for BlenderImportView {
             mesh_handle,
             visual_bounds,
             instance_buffer,
+            shadow_pipeline,
             force_registry_miss: false,
             hint_logged: false,
             last_resolved_names: Vec::new(),
@@ -276,12 +284,21 @@ impl View for BlenderImportView {
     }
 
     fn extract_environment(&self, sim: &Game, _zone: ZoneId) -> ViewEnvironment {
+        let sun_direction = sun_direction_for(sim.time_of_day);
+        let above_horizon = sun_direction.z.max(0.0);
+        let sun_cascades = if above_horizon > 0.05 {
+            let splits = self.camera.cascade_split_distances(0.75);
+            let matrices = self.camera.fit_shadow_cascades(sun_direction, splits);
+            SunCascades { matrices, splits }
+        } else {
+            SunCascades::disabled()
+        };
         ViewEnvironment {
-            sun_direction: sun_direction_for(sim.time_of_day),
+            sun_direction,
             sun_color: Vec3::splat(2.2),
             ambient: Vec3::new(0.30, 0.32, 0.38),
             sky_color: Vec3::new(0.45, 0.55, 0.75),
-            ..ViewEnvironment::neutral()
+            sun_cascades,
         }
     }
 
@@ -307,6 +324,37 @@ impl View for BlenderImportView {
                 self.materials.len()
             );
             self.hint_logged = true;
+        }
+    }
+
+    fn shadow_pass(
+        &mut self,
+        _sim: &Game,
+        _alpha: f32,
+        cascade: u32,
+        renderer: &Renderer,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let resolved = self
+            .asset_server
+            .resolve_mesh(&self.mesh_handle, Some(self.visual_bounds));
+
+        // Update the per-frame instance buffer once on cascade 0 — the
+        // other three shadow passes and `render` reuse the same data.
+        if cascade == 0 {
+            let model = Mat4::from_translation(Vec3::ZERO) * resolved.fallback_adjustment;
+            let attribs = MeshInstanceAttribs::new(model, Vec4::ONE);
+            renderer
+                .queue
+                .write_buffer(&self.instance_buffer, 0, bytemuck::bytes_of(&attribs));
+        }
+
+        pass.set_pipeline(self.shadow_pipeline.pipeline());
+        pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        for prim in resolved.primitives {
+            pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+            pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..prim.index_count, 0, 0..1);
         }
     }
 
@@ -337,15 +385,11 @@ impl View for BlenderImportView {
 
         // Resolve the mesh handle. While loading the fallback is a single-
         // primitive unit cube (material_name = None → registry miss →
-        // magenta fallback).
+        // magenta fallback). Instance-buffer write happens in `shadow_pass`
+        // — the buffer is fresh by the time the main pass runs.
         let resolved = self
             .asset_server
             .resolve_mesh(&self.mesh_handle, Some(self.visual_bounds));
-        let model = Mat4::from_translation(Vec3::ZERO) * resolved.fallback_adjustment;
-        let attribs = MeshInstanceAttribs::new(model, Vec4::ONE);
-        renderer
-            .queue
-            .write_buffer(&self.instance_buffer, 0, bytemuck::bytes_of(&attribs));
 
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
