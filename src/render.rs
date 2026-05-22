@@ -23,6 +23,8 @@
 //! - [`scene_resources`] — engine-managed per-scene GPU state: depth
 //!   attachment, scene-environment binding (and future shadow maps, IBL probes,
 //!   MSAA resolve targets, …).
+//! - [`screenshot`] — engine-driven F12 capture; copies the swapchain image
+//!   into a staging buffer and writes a PNG.
 //! - [`view`] — the [`View`] trait + [`EngineCtx`].
 //! - [`runner`] — event loop integration ([`run`], [`run_with_clock`]).
 //! - [`instance`] — per-key instance bucketing for batched instanced rendering.
@@ -95,6 +97,7 @@ mod render_proxy;
 mod renderer;
 mod runner;
 mod scene_resources;
+mod screenshot;
 mod shadow;
 mod terrain;
 mod terrain_material;
