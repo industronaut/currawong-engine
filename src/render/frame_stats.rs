@@ -20,12 +20,15 @@
 /// `record_*` method.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct FrameStats {
-    /// Number of `pass.draw*` calls the view issued during
-    /// [`View::render`](super::View::render). View code reports each draw
-    /// through [`Renderer::record_draw`](super::Renderer::record_draw).
+    /// Number of `pass.draw*` calls the view issued across every pass in
+    /// the frame — main [`View::render`](super::View::render) *and* the
+    /// per-cascade [`View::shadow_pass`](super::View::shadow_pass) calls.
+    /// With four cascades this number is typically dominated by the
+    /// shadow draws. View code reports each draw through
+    /// [`Renderer::record_draw`](super::Renderer::record_draw).
     pub draw_calls: u32,
     /// Sum of the per-draw instance counts — i.e. total mesh copies sent
-    /// to the GPU. Reported alongside `draw_calls`.
+    /// to the GPU across all passes. Reported alongside `draw_calls`.
     pub instances: u32,
     /// Live render-object proxies inside the camera frustum this frame.
     /// Reported by the view through

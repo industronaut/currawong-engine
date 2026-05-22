@@ -100,7 +100,9 @@ impl Renderer {
     /// Record one draw call rendering `instances` instances. Bumps the
     /// per-frame counters surfaced through
     /// [`EngineCtx::stats`](super::EngineCtx). Call once per
-    /// `pass.draw*`; cost is two relaxed atomic increments.
+    /// `pass.draw*` in every pass — main render *and* each cascade of
+    /// `shadow_pass` — so the counter reflects total per-frame GPU work,
+    /// not just the main pass. Cost is two relaxed atomic increments.
     pub fn record_draw(&self, instances: u32) {
         self.frame_stats.record_draw(instances);
     }

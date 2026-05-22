@@ -583,6 +583,7 @@ impl View for LumberCampView {
                 pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
                 pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..prim.index_count, 0, 0..count);
+                renderer.record_draw(count);
             }
         }
     }
