@@ -405,6 +405,7 @@ impl View for TexturedPbr {
         for (_, instance_buffer, count) in self.buckets.iter_filled() {
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
             pass.draw_indexed(0..self.cube_index_count, 0, 0..count);
+            renderer.record_draw(count);
         }
     }
 
