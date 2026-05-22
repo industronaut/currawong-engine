@@ -1,12 +1,14 @@
 //! Event-loop integration: `run` and `run_with_clock` bind a [`View`] to a
 //! `winit` window and a [`SimClock`].
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::sim::{CommandQueue, SimClock, Simulation};
@@ -19,6 +21,7 @@ use super::frame_timings::FrameTimings;
 #[cfg(feature = "yakui")]
 use super::game_ui::GameUi;
 use super::renderer::Renderer;
+use super::screenshot::ScreenshotRequest;
 use super::view::{EngineCtx, View};
 
 /// Run an application with the given simulation. Uses [`SimClock::new`] —
@@ -72,6 +75,12 @@ struct RunState<V: View> {
     /// from [`Renderer::take_frame_stats`] at the end of `render_frame`.
     /// Mirrored onto every [`EngineCtx`] alongside [`Self::timings`].
     stats: FrameStats,
+    /// F12 was pressed since the last frame finished — capture this frame's
+    /// swapchain image into a screenshot. Cleared after the capture is
+    /// scheduled (regardless of whether the save itself succeeds). The
+    /// engine intercepts F12 before [`View::input`] sees it, so View code
+    /// can't accidentally suppress or duplicate the trigger.
+    pending_screenshot: bool,
     #[cfg(feature = "egui")]
     debug_ui: DebugUi,
     #[cfg(feature = "yakui")]
@@ -113,6 +122,7 @@ impl<V: View> ApplicationHandler for Handler<V> {
             cursor_px: None,
             timings: FrameTimings::default(),
             stats: FrameStats::default(),
+            pending_screenshot: false,
             #[cfg(feature = "egui")]
             debug_ui,
             #[cfg(feature = "yakui")]
@@ -129,6 +139,17 @@ impl<V: View> ApplicationHandler for Handler<V> {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+        // Engine-owned F12 → screenshot. Consumed before either overlay or
+        // View::input sees it so a user holding F12 in a text field doesn't
+        // accidentally suppress capture, and no example has to opt in.
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event
+            && key.state == ElementState::Pressed
+            && key.physical_key == PhysicalKey::Code(KeyCode::F12)
+            && !key.repeat
+        {
+            state.pending_screenshot = true;
+            return;
+        }
         #[cfg(feature = "egui")]
         let egui_consumed = state
             .debug_ui
@@ -343,7 +364,29 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
     // overlay timestamps land in the same readback buffer as the world ones.
     state.renderer.gpu_profiler_overlay_end(&mut frame.encoder);
     state.renderer.gpu_profiler_resolve(&mut frame.encoder);
+    // Screenshot copy must be recorded last so it captures the final
+    // composited image — world pass plus both overlays. Built here rather
+    // than inside `end_frame` so the post-submit blocking save sits in
+    // this function with the rest of the per-frame engine bookkeeping.
+    let screenshot = if state.pending_screenshot {
+        state.pending_screenshot = false;
+        Some(ScreenshotRequest::record(
+            &state.renderer.device,
+            &mut frame.encoder,
+            &frame.surface_texture.texture,
+            state.renderer.surface_format(),
+        ))
+    } else {
+        None
+    };
     end_frame(&state.renderer, frame);
+    if let Some(request) = screenshot {
+        let dir = PathBuf::from("screenshots");
+        match request.save_blocking(&state.renderer.device, &dir) {
+            Ok(path) => println!("screenshot: {}", path.display()),
+            Err(err) => eprintln!("screenshot failed: {err}"),
+        }
+    }
     // After submit, register the map_async on the readback slot we
     // copied into. Captures a snapshot of this frame's ID table so the
     // eventual callback resolves the sampled u32 through *this* frame's

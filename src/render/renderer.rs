@@ -421,7 +421,12 @@ impl Renderer {
             .unwrap_or(caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // `COPY_SRC` lets the engine `copy_texture_to_buffer` from the
+            // swapchain image — the F12 screenshot path reads the rendered
+            // frame back this way. Every backend / format combination wgpu
+            // accepts in `request_adapter` here also accepts `COPY_SRC` on
+            // the surface, so it's safe to declare unconditionally.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
