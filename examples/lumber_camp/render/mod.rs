@@ -53,7 +53,8 @@ use currawong::{
     PbrMaterialInstance, RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec,
     RenderTemplate, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline, SunCascades,
     TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TextureColorSpace, View, ViewConfig,
-    ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId, egui, wgpu, winit, yakui,
+    ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId, egui, sun_direction_for, wgpu, winit,
+    yakui,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -422,19 +423,41 @@ impl View for LumberCampView {
         Some(sim.zone)
     }
 
-    fn extract_environment(&self, _: &Game, _: ZoneId) -> ViewEnvironment {
-        // Fixed afternoon sun. The slow day/night cycle deliverable in #58
-        // replaces this with a time-of-day-driven extract once SimEnvironment
-        // is plumbed in.
-        let sun_direction = Vec3::new(0.45, 0.35, 0.8).normalize();
-        let splits = self.camera.cascade_split_distances(0.75);
-        let matrices = self.camera.fit_shadow_cascades(sun_direction, splits);
+    fn extract_environment(&self, sim: &Game, _: ZoneId) -> ViewEnvironment {
+        // Sun direction tracks `sim.env.time_of_day`; the bottom-right env
+        // panel feeds back into that via `Command::SetTimeOfDay`. Colour
+        // model (intensity falloff + warm-to-cool tint + sky/ambient dim)
+        // mirrors `examples/textured_pbr.rs` so dragging the slider after
+        // sunset visibly darkens the scene.
+        let sun_direction = sun_direction_for(sim.env.time_of_day);
+        let above_horizon = sun_direction.z.max(0.0);
+        let intensity = above_horizon * above_horizon * 2.5;
+        let warm = Vec3::new(1.0, 0.55, 0.30);
+        let cool = Vec3::new(1.0, 0.95, 0.85);
+        let warmth = (1.0 - above_horizon).clamp(0.0, 1.0).powf(2.0);
+        let sun_color = cool.lerp(warm, warmth) * intensity;
+
+        let day = above_horizon.clamp(0.0, 1.0).powf(0.5);
+        let sky_color = Vec3::new(0.45, 0.65, 0.95).lerp(Vec3::new(0.02, 0.03, 0.06), 1.0 - day);
+        let ambient = Vec3::new(0.05, 0.06, 0.09).lerp(Vec3::new(0.30, 0.32, 0.38), day);
+
+        // Only fit cascades while the sun is meaningfully above the horizon
+        // — at night the lit shader skips shadow sampling via the
+        // `splits[0] == 0.0` sentinel.
+        let sun_cascades = if above_horizon > 0.05 {
+            let splits = self.camera.cascade_split_distances(0.75);
+            let matrices = self.camera.fit_shadow_cascades(sun_direction, splits);
+            SunCascades { matrices, splits }
+        } else {
+            SunCascades::disabled()
+        };
+
         ViewEnvironment {
             sun_direction,
-            sun_color: Vec3::new(1.0, 0.95, 0.85) * 2.2,
-            ambient: Vec3::new(0.30, 0.32, 0.38),
-            sky_color: Vec3::new(0.45, 0.65, 0.95),
-            sun_cascades: SunCascades { matrices, splits },
+            sun_color,
+            ambient,
+            sky_color,
+            sun_cascades,
         }
     }
 
@@ -689,9 +712,9 @@ impl View for LumberCampView {
 
     fn ui(
         &mut self,
-        _: &Game,
+        sim: &Game,
         ctx: &mut EngineCtx,
-        _: &mut CommandQueue<Command>,
+        cmds: &mut CommandQueue<Command>,
         egui_ctx: &egui::Context,
     ) {
         let now = Instant::now();
@@ -710,6 +733,7 @@ impl View for LumberCampView {
                 adapter_info: &self.adapter_info,
             },
         );
+        debugui::show_environment(egui_ctx, &sim.env, cmds);
     }
 
     fn game_ui(

@@ -9,7 +9,9 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use currawong::{FrameStats, FrameTimings, egui};
+use currawong::{CommandQueue, FrameStats, FrameTimings, SimEnvironment, egui, sun_direction_for};
+
+use crate::sim::Command;
 
 /// ~4 s of history at 60 fps. Same shape as `examples/trees.rs`.
 pub const FRAMETIME_HISTORY: usize = 240;
@@ -74,6 +76,83 @@ pub fn show(egui_ctx: &egui::Context, input: DebugInput<'_>) {
                     .color(egui::Color32::from_gray(160)),
             );
         });
+}
+
+/// Bottom-right anchored "environment" panel — time-of-day slider, day
+/// length slider, day counter, sun-direction readout. Mutates sim state
+/// through [`Command`] pushes (no `&mut Game` here, per the engine's
+/// sim-mutation seam); the sim converts the float payloads to
+/// [`SimUnit`](currawong::SimUnit) on apply.
+pub fn show_environment(
+    egui_ctx: &egui::Context,
+    env: &SimEnvironment,
+    cmds: &mut CommandQueue<Command>,
+) {
+    egui::Window::new("environment")
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0])
+        .resizable(false)
+        .collapsible(false)
+        .show(egui_ctx, |ui| {
+            // Day counter — incremented by `SimEnvironment::advance` when
+            // `time_of_day` wraps past 1.0. Read-only; dragging the slider
+            // past midnight on a single frame doesn't bump it (apply_command
+            // assigns directly), which is the expected debug shape.
+            ui.label(format!("day: {}", env.day));
+
+            // Time-of-day slider. Local `f32` copy so the closure doesn't
+            // need `&mut sim`; on user change we push a Command and the
+            // sim picks it up at the next tick boundary.
+            let mut time_of_day: f32 = env.time_of_day.to_num();
+            let response = ui.add(
+                egui::Slider::new(&mut time_of_day, 0.0..=1.0)
+                    .text("time of day")
+                    .custom_formatter(|v, _| format_clock_24h(v as f32)),
+            );
+            if response.changed() {
+                cmds.push_now(Command::SetTimeOfDay(time_of_day));
+            }
+
+            // Day length — real-time seconds per in-world day. Logarithmic
+            // so the slider has useful resolution across the 10s..600s
+            // range (10s is "watch the sun race", 600s is the engine
+            // default of one day per ten minutes).
+            let mut seconds_per_day: f32 = env.seconds_per_day.to_num();
+            let response = ui.add(
+                egui::Slider::new(&mut seconds_per_day, 10.0..=600.0)
+                    .text("day length (s)")
+                    .logarithmic(true),
+            );
+            if response.changed() {
+                cmds.push_now(Command::SetSecondsPerDay(seconds_per_day));
+            }
+
+            // Sun direction readout — the view's `extract_environment`
+            // computes this same value and feeds the lit pass. Useful for
+            // cross-checking the slider against the rendered lighting.
+            let sun = sun_direction_for(env.time_of_day);
+            ui.monospace(format!(
+                "sun: ({:+.2}, {:+.2}, {:+.2})",
+                sun.x, sun.y, sun.z
+            ));
+            ui.label(
+                egui::RichText::new(if sun.z > 0.0 {
+                    "above horizon"
+                } else {
+                    "below horizon"
+                })
+                .small()
+                .color(egui::Color32::from_gray(160)),
+            );
+        });
+}
+
+/// `HH:MM` clock formatter for the time-of-day slider. Mirrors the helper
+/// in `examples/textured_pbr.rs` so the two debug panels read alike.
+fn format_clock_24h(t: f32) -> String {
+    let total_minutes = (t.rem_euclid(1.0) * 24.0 * 60.0) as i32;
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    format!("{hours:02}:{minutes:02}")
 }
 
 /// Format a duration as `12.34 ms`, padded to a fixed width so the columns
