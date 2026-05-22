@@ -3,18 +3,18 @@
 //! Pairs with [`RenderTemplate`](super::RenderTemplate) the same way
 //! [`EmitterReconciler`](super::EmitterReconciler) pairs with
 //! [`EmitterTemplate`](super::EmitterTemplate): the View walks the sim
-//! each frame and *declares* one [`LiveRenderObject`] per
+//! each frame and *declares* one [`RenderProxy`] per
 //! `(WorldObjectRef, R)` key, supplying its world transform, visual
 //! AABB, and the template's mesh/emitter part counts. After the sim
-//! walk, [`LiveRenderObjects::cull`] tests each object's AABB against
+//! walk, [`RenderProxies::cull`] tests each object's AABB against
 //! the camera frustum, updates a per-object hysteresis counter, and
 //! drops objects that have been outside the frustum longer than the
 //! configured window.
 //!
 //! Each proxy also carries persistent **view-side per-instance state**:
-//! [`LiveRenderObject::root_visible`] and per-part visibility in
-//! [`mesh_parts`](LiveRenderObject::mesh_parts) /
-//! [`emitter_parts`](LiveRenderObject::emitter_parts). This is where the
+//! [`RenderProxy::root_visible`] and per-part visibility in
+//! [`mesh_parts`](RenderProxy::mesh_parts) /
+//! [`emitter_parts`](RenderProxy::emitter_parts). This is where the
 //! sim→view translation lands each frame: the template's `update` hook
 //! reads slots/components from the parent sim object and mutates these
 //! fields; the extract walk then reads only this state, never the sim
@@ -43,7 +43,7 @@ use crate::sim::WorldObjectRef;
 
 use super::visibility::{Aabb, Frustum};
 
-/// View-side per-part state carried by [`LiveRenderObject`]. Mutated by
+/// View-side per-part state carried by [`RenderProxy`]. Mutated by
 /// the template's `update` hook; read by the extract walk.
 ///
 /// `visible` defaults to `true` on first declare. Setting it `false`
@@ -60,7 +60,7 @@ impl Default for RenderPartState {
     }
 }
 
-/// Per-object state carried by [`LiveRenderObjects`]: world transform,
+/// Per-object state carried by [`RenderProxies`]: world transform,
 /// optional world-space visual AABB, the hysteresis counter, and
 /// persistent view-side per-instance state ([`root_visible`](Self::root_visible)
 /// plus per-part visibility).
@@ -70,7 +70,7 @@ impl Default for RenderPartState {
 /// are sized at declare time from the template's mesh/emitter part
 /// counts and resized in place if those ever change.
 #[derive(Clone, Debug)]
-pub struct LiveRenderObject {
+pub struct RenderProxy {
     /// Composed world transform of the sim object owning this proxy.
     /// World-space transform of a drawn part is
     /// `world_xform * part.local_transform`.
@@ -92,7 +92,7 @@ pub struct LiveRenderObject {
     declared_this_frame: bool,
 }
 
-impl LiveRenderObject {
+impl RenderProxy {
     /// Frames since this proxy was last inside the frustum. `0` means
     /// visible *this frame*; positive values mean within the hysteresis
     /// window. Useful for fade-out shaders or pop-out diagnostics.
@@ -101,7 +101,7 @@ impl LiveRenderObject {
     }
 
     /// True if the proxy was inside the frustum on the most recent
-    /// [`LiveRenderObjects::cull`] call.
+    /// [`RenderProxies::cull`] call.
     pub fn is_visible(&self) -> bool {
         self.frames_since_visible == 0
     }
@@ -114,18 +114,18 @@ impl LiveRenderObject {
 /// camp's namespaced [`KindId`](crate::data::KindId) (a `String` newtype)
 /// can flow through unchanged. Iteration yields `&R` so the per-frame walk
 /// pays no clone cost; callers that need an owned `R` clone it explicitly.
-pub struct LiveRenderObjects<R: Clone + Eq + Hash> {
-    objects: HashMap<(WorldObjectRef, R), LiveRenderObject>,
+pub struct RenderProxies<R: Clone + Eq + Hash> {
+    proxies: HashMap<(WorldObjectRef, R), RenderProxy>,
     hysteresis_frames: u32,
 }
 
-impl<R: Clone + Eq + Hash> LiveRenderObjects<R> {
+impl<R: Clone + Eq + Hash> RenderProxies<R> {
     /// Create an empty reconciler. `hysteresis_frames` is the number of
     /// frames a proxy is kept alive after it leaves the frustum;
     /// CLAUDE.md commits to ~30 as a starting point.
     pub fn new(hysteresis_frames: u32) -> Self {
         Self {
-            objects: HashMap::new(),
+            proxies: HashMap::new(),
             hysteresis_frames,
         }
     }
@@ -135,17 +135,17 @@ impl<R: Clone + Eq + Hash> LiveRenderObjects<R> {
     }
 
     pub fn len(&self) -> usize {
-        self.objects.len()
+        self.proxies.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+        self.proxies.is_empty()
     }
 
     /// Mark every existing proxy as not-yet-seen this frame. Call at
     /// the start of each frame before [`declare`](Self::declare)ing.
     pub fn begin_frame(&mut self) {
-        for obj in self.objects.values_mut() {
+        for obj in self.proxies.values_mut() {
             obj.declared_this_frame = false;
         }
     }
@@ -175,9 +175,9 @@ impl<R: Clone + Eq + Hash> LiveRenderObjects<R> {
     ) {
         let init_frames = self.hysteresis_frames.saturating_add(1);
         let obj = self
-            .objects
+            .proxies
             .entry((parent, render_id))
-            .or_insert_with(|| LiveRenderObject {
+            .or_insert_with(|| RenderProxy {
                 world_xform,
                 world_aabb,
                 root_visible: true,
@@ -209,7 +209,7 @@ impl<R: Clone + Eq + Hash> LiveRenderObjects<R> {
     /// Proxies with no `world_aabb` are treated as always visible.
     pub fn cull(&mut self, frustum: &Frustum) {
         let hysteresis = self.hysteresis_frames;
-        self.objects.retain(|_, obj| {
+        self.proxies.retain(|_, obj| {
             if !obj.declared_this_frame {
                 return false;
             }
@@ -231,20 +231,20 @@ impl<R: Clone + Eq + Hash> LiveRenderObjects<R> {
     /// or within the hysteresis window. Yields `&R` rather than `R` so
     /// non-`Copy` render ids (e.g. [`KindId`](crate::data::KindId)) don't
     /// pay a clone per iteration.
-    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectRef, &R, &LiveRenderObject)> + '_ {
-        self.objects
+    pub fn iter(&self) -> impl Iterator<Item = (WorldObjectRef, &R, &RenderProxy)> + '_ {
+        self.proxies
             .iter()
             .map(|((parent, rid), obj)| (*parent, rid, obj))
     }
 
     /// Mutable variant of [`Self::iter`], for the per-instance update
-    /// pass. Used by `RenderObjectPass::update_instances` to invoke the
-    /// template's `update` hook with `&mut LiveRenderObject`. Same
+    /// pass. Used by `RenderObjectTraversal::update_instances` to invoke the
+    /// template's `update` hook with `&mut RenderProxy`. Same
     /// `&R`-yielding shape as [`Self::iter`].
     pub fn iter_mut(
         &mut self,
-    ) -> impl Iterator<Item = (WorldObjectRef, &R, &mut LiveRenderObject)> + '_ {
-        self.objects
+    ) -> impl Iterator<Item = (WorldObjectRef, &R, &mut RenderProxy)> + '_ {
+        self.proxies
             .iter_mut()
             .map(|((parent, rid), obj)| (*parent, rid, obj))
     }
@@ -259,7 +259,7 @@ impl<R: Clone + Eq + Hash> LiveRenderObjects<R> {
     pub fn cull_counts(&self) -> (u32, u32) {
         let mut visible = 0u32;
         let mut hysteresis = 0u32;
-        for obj in self.objects.values() {
+        for obj in self.proxies.values() {
             if obj.is_visible() {
                 visible += 1;
             } else {
@@ -309,7 +309,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
         live.cull(&always_inside());
@@ -324,7 +324,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
         live.cull(&always_outside());
@@ -339,7 +339,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(5);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(5);
         // Establish visibility.
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
@@ -368,7 +368,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(5);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(5);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
         live.cull(&always_inside());
@@ -395,7 +395,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
         live.cull(&always_inside());
@@ -412,7 +412,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(2);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(2);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, None, 0, 0);
         live.cull(&always_outside()); // would normally drop on first cull
@@ -427,7 +427,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 3, 2);
         live.cull(&always_inside());
@@ -445,7 +445,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 2, 0);
         live.cull(&always_inside());
@@ -478,7 +478,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 1, 1);
 
@@ -497,7 +497,7 @@ mod tests {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
-        let mut live: LiveRenderObjects<Rid> = LiveRenderObjects::new(30);
+        let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
         live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
         live.declare(

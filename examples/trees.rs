@@ -2,7 +2,7 @@
 //!
 //! Sim spawns ~200 trees, each carrying a [`Tree`] component (age + seed).
 //! Every tick increments age; every frame the view feeds the engine's
-//! [`RenderObjectPass`] and runs [`extract_part`] for each alive instance,
+//! [`RenderObjectTraversal`] and runs [`extract_part`] for each alive instance,
 //! turning current age into `height` + `tint` for that frame. Trees visibly
 //! grow and shift colour over ~12 s at speed 1.0; pausing freezes growth.
 //!
@@ -53,8 +53,8 @@ use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, CellHighlight, CommandQueue, EngineCtx, Facing, FlatTopsMesher, Frustum,
-    HitTarget, InstanceBuckets, LiveRenderObjects, MaterialInstanceRegistry, MeshInstanceAttribs,
-    MeshPart, OrbitRig, RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, SimPos, SimRng,
+    HitTarget, InstanceBuckets, MaterialInstanceRegistry, MeshInstanceAttribs, MeshPart, OrbitRig,
+    RenderObjectTraversal, RenderProxies, RenderRegistry, RenderTemplate, Renderer, SimPos, SimRng,
     SimUnit, Simulation, SlotKey, SquareGrid, TerrainMaterial, TerrainMaterialInstance,
     TerrainPicker, TerrainRenderer, TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View,
     ViewConfig, WorldObjectId, WorldTransform, Zone, ZoneId, Zones, sim_tile, wgpu, winit,
@@ -199,7 +199,7 @@ struct Demo {
     material: UnlitColoredMaterial,
     instances: MaterialInstanceRegistry<UnlitColoredInstance, MatKey>,
     templates: Templates,
-    live_objects: LiveRenderObjects<RenderId>,
+    proxies: RenderProxies<RenderId>,
     meshes: HashMap<MeshHandle, GpuMesh>,
     buckets: InstanceBuckets<MeshHandle, MeshInstanceAttribs>,
     terrain_material: TerrainMaterial,
@@ -304,7 +304,7 @@ impl View for Demo {
             material,
             instances,
             templates,
-            live_objects: LiveRenderObjects::new(30),
+            proxies: RenderProxies::new(30),
             meshes,
             buckets,
             terrain_material,
@@ -417,10 +417,10 @@ impl View for Demo {
         // --- Render-object pass ------------------------------------------
 
         let frustum = Frustum::from_view_proj(self.camera.view_proj());
-        RenderObjectPass::declare_and_cull(
+        RenderObjectTraversal::declare_and_cull(
             &sim.zones,
             &self.templates,
-            &mut self.live_objects,
+            &mut self.proxies,
             &frustum,
         );
 
@@ -436,7 +436,7 @@ impl View for Demo {
         // hovered tree gets its per-instance tint overridden by
         // `HOVER_TINT` so the visual feedback matches the title readout.
         self.buckets.begin_frame();
-        for (parent, rid, object) in self.live_objects.iter() {
+        for (parent, rid, object) in self.proxies.iter() {
             let tree = sim
                 .zones
                 .get(parent.zone)

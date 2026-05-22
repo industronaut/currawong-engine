@@ -108,7 +108,7 @@ impl Renderer {
     /// Record live render-object proxy counts for this frame. `visible` is
     /// the count inside the frustum; `hysteresis` is the count outside but
     /// still inside the grace window. Conventional source is
-    /// [`LiveRenderObjects::cull_counts`](super::LiveRenderObjects::cull_counts).
+    /// [`RenderProxies::cull_counts`](super::RenderProxies::cull_counts).
     /// Counts are stored as-written (not accumulated), so call exactly
     /// once per frame after culling.
     pub fn record_proxies(&self, visible: u32, hysteresis: u32) {
@@ -209,7 +209,7 @@ impl Renderer {
     /// the object covers.
     ///
     /// All mesh parts of one sim object should share a single hit ID — see
-    /// [`RenderObjectPass::for_each_alive_with_hit_id`](super::RenderObjectPass::for_each_alive_with_hit_id)
+    /// [`RenderObjectTraversal::for_each_alive_with_hit_id`](super::RenderObjectTraversal::for_each_alive_with_hit_id)
     /// for the engine-driven path that reserves once per parent so a click
     /// on any part resolves to the same `WorldObjectId`. Users walking the
     /// sim by hand should reserve once per parent themselves.

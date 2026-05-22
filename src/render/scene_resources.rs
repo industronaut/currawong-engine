@@ -149,7 +149,7 @@ impl SceneResources {
 
     /// Reserve a single hit ID for a mesh object in the current frame's
     /// table. Called by user code (or
-    /// [`RenderObjectPass::for_each_alive_with_hit_id`](super::RenderObjectPass::for_each_alive_with_hit_id))
+    /// [`RenderObjectTraversal::for_each_alive_with_hit_id`](super::RenderObjectTraversal::for_each_alive_with_hit_id))
     /// once per drawn object; the returned ID is written into the object's
     /// per-instance attributes so every pixel it covers in the opaque pass
     /// carries that ID in the `R32Uint` attachment.

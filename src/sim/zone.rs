@@ -83,7 +83,7 @@ impl SlotKey for ZoneId {
 /// Use [`Zone::remove`] rather than reaching for the inner storage: it's the
 /// only path that keeps the [`Components`] registry in sync.
 pub struct Zone<G: Grid = SquareGrid> {
-    objects: SlotMap<WorldObjectId, WorldTransform>,
+    transforms: SlotMap<WorldObjectId, WorldTransform>,
     components: Components,
     terrain: Terrain<G>,
 }
@@ -108,7 +108,7 @@ impl<G: Grid> Zone<G> {
     /// already has a populated `Terrain` to drop in.
     pub fn with_terrain(terrain: Terrain<G>) -> Self {
         Self {
-            objects: SlotMap::new(),
+            transforms: SlotMap::new(),
             components: Components::new(),
             terrain,
         }
@@ -123,43 +123,43 @@ impl<G: Grid> Zone<G> {
     }
 
     pub fn len(&self) -> usize {
-        self.objects.len()
+        self.transforms.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+        self.transforms.is_empty()
     }
 
     pub fn insert(&mut self, obj: WorldTransform) -> WorldObjectId {
-        self.objects.insert(obj)
+        self.transforms.insert(obj)
     }
 
     /// Remove `id` and every component attached to it. Returns the removed
     /// [`WorldTransform`], or `None` if the id is stale.
     pub fn remove(&mut self, id: WorldObjectId) -> Option<WorldTransform> {
-        let obj = self.objects.remove(id)?;
+        let obj = self.transforms.remove(id)?;
         self.components.remove_all(id);
         Some(obj)
     }
 
     pub fn get(&self, id: WorldObjectId) -> Option<&WorldTransform> {
-        self.objects.get(id)
+        self.transforms.get(id)
     }
 
     pub fn get_mut(&mut self, id: WorldObjectId) -> Option<&mut WorldTransform> {
-        self.objects.get_mut(id)
+        self.transforms.get_mut(id)
     }
 
     pub fn contains(&self, id: WorldObjectId) -> bool {
-        self.objects.contains(id)
+        self.transforms.contains(id)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (WorldObjectId, &WorldTransform)> + '_ {
-        self.objects.iter()
+        self.transforms.iter()
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (WorldObjectId, &mut WorldTransform)> + '_ {
-        self.objects.iter_mut()
+        self.transforms.iter_mut()
     }
 
     pub fn components(&self) -> &Components {
@@ -181,7 +181,7 @@ impl<G: Grid> Zone<G> {
     pub fn split_mut(&mut self) -> (WorldObjectsMut<'_>, &mut Components) {
         (
             WorldObjectsMut {
-                inner: &mut self.objects,
+                inner: &mut self.transforms,
             },
             &mut self.components,
         )

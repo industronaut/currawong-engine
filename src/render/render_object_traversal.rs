@@ -6,8 +6,8 @@
 //! callback) that does the actual draw-attrib push; the engine owns the
 //! traversal.
 //!
-//! Visibility is **view-side state** on [`LiveRenderObject`], set by the
-//! template's update closure via [`RenderObjectPass::update_instances`]
+//! Visibility is **view-side state** on [`RenderProxy`], set by the
+//! template's update closure via [`RenderObjectTraversal::update_instances`]
 //! and read by the extract walk. `root_visible` gates the whole instance
 //! (no mesh / emitter callbacks, no hit-ID reservation); per-part
 //! `mesh_parts[i].visible` / `emitter_parts[i].visible` gate individual
@@ -15,8 +15,8 @@
 //! opinions on visibility are unaffected.
 //!
 //! All sim→view translation happens in the per-instance update closure,
-//! which reads [`Components`] and mutates [`LiveRenderObject`]. Extract
-//! callbacks see only the persistent [`LiveRenderObject`] (plus the
+//! which reads [`Components`] and mutates [`RenderProxy`]. Extract
+//! callbacks see only the persistent [`RenderProxy`] (plus the
 //! template and the proxy's world transform) — they never touch the sim
 //! directly. CLAUDE.md invariant: extract is a pure GPU-attrib write step.
 
@@ -26,32 +26,32 @@ use glam::Mat4;
 
 use crate::sim::{Components, WorldObjectRef, Zones};
 
-use super::live_render_objects::{LiveRenderObject, LiveRenderObjects};
 use super::render_object::{EmitterPart, MeshPart, RenderRegistry};
+use super::render_proxy::{RenderProxies, RenderProxy};
 use super::renderer::Renderer;
 use super::visibility::Frustum;
 
 /// Engine helper that drives the per-frame render-object walk. Stateless;
 /// the associated functions take all dependencies as arguments.
-pub struct RenderObjectPass;
+pub struct RenderObjectTraversal;
 
-impl RenderObjectPass {
-    /// Phase 1: walk `zones` and declare a live proxy on `live_objects` for
+impl RenderObjectTraversal {
+    /// Phase 1: walk `zones` and declare a live proxy on `proxies` for
     /// each object whose components include an `R` render id, then cull
-    /// against `frustum`. Calls [`LiveRenderObjects::begin_frame`] for you.
+    /// against `frustum`. Calls [`RenderProxies::begin_frame`] for you.
     ///
     /// Templates with no `visual_bounds` produce proxies with no AABB,
-    /// which [`LiveRenderObjects::cull`] treats as always-visible — matching
+    /// which [`RenderProxies::cull`] treats as always-visible — matching
     /// CLAUDE.md's "templates without bounds are never culled" rule.
     pub fn declare_and_cull<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_objects: &mut LiveRenderObjects<R>,
+        proxies: &mut RenderProxies<R>,
         frustum: &Frustum,
     ) where
         R: Clone + Eq + Hash + 'static,
     {
-        live_objects.begin_frame();
+        proxies.begin_frame();
         for (zone_id, zone) in zones.iter() {
             for (id, obj) in zone.iter() {
                 let Some(rid) = zone.components().get::<R>(id) else {
@@ -66,7 +66,7 @@ impl RenderObjectPass {
                 let world_aabb = template
                     .visual_bounds()
                     .map(|local| local.transformed(object_xform));
-                live_objects.declare(
+                proxies.declare(
                     WorldObjectRef { zone: zone_id, id },
                     rid.clone(),
                     object_xform,
@@ -76,18 +76,18 @@ impl RenderObjectPass {
                 );
             }
         }
-        live_objects.cull(frustum);
+        proxies.cull(frustum);
     }
 
     /// Phase 1.5: per-instance update. Iterate alive proxies and invoke
     /// `on_instance` so the user can read [`Components`] and mutate the
-    /// view-side [`LiveRenderObject`] — typically `instance.root_visible`,
+    /// view-side [`RenderProxy`] — typically `instance.root_visible`,
     /// `instance.mesh_parts[i].visible`, `instance.emitter_parts[i].visible`,
     /// plus any future cached view-state on the instance.
     ///
     /// Call this between [`Self::declare_and_cull`] and
     /// [`Self::for_each_alive_part`] / [`Self::for_each_alive`]. The
-    /// extract pass reads only `LiveRenderObject` state, so all sim →
+    /// extract pass reads only `RenderProxy` state, so all sim →
     /// view-state translation must land here.
     ///
     /// CLAUDE.md invariants this enforces:
@@ -96,12 +96,12 @@ impl RenderObjectPass {
     pub fn update_instances<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_objects: &mut LiveRenderObjects<R>,
-        mut on_instance: impl FnMut(WorldObjectRef, &R, &Components, &mut LiveRenderObject),
+        proxies: &mut RenderProxies<R>,
+        mut on_instance: impl FnMut(WorldObjectRef, &R, &Components, &mut RenderProxy),
     ) where
         R: Clone + Eq + Hash + 'static,
     {
-        for (parent, rid, obj) in live_objects.iter_mut() {
+        for (parent, rid, obj) in proxies.iter_mut() {
             if templates.get(rid).is_none() {
                 continue;
             }
@@ -121,12 +121,12 @@ impl RenderObjectPass {
     pub fn for_each_alive_part<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_objects: &LiveRenderObjects<R>,
+        proxies: &RenderProxies<R>,
         on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4),
     ) where
         R: Clone + Eq + Hash + 'static,
     {
-        Self::for_each_alive(zones, templates, live_objects, on_part, |_, _, _, _| {});
+        Self::for_each_alive(zones, templates, proxies, on_part, |_, _, _, _| {});
     }
 
     /// Phase 2 (mesh + emitter): iterate alive proxies and invoke
@@ -134,7 +134,7 @@ impl RenderObjectPass {
     /// [`EmitterPart`].
     ///
     /// Visibility is **view-side state** read from the
-    /// [`LiveRenderObject`]: instances with `root_visible == false`
+    /// [`RenderProxy`]: instances with `root_visible == false`
     /// are skipped entirely, and per-part `mesh_parts[i].visible` /
     /// `emitter_parts[i].visible` gate individual callbacks. These
     /// fields are set by the user's update closure passed to
@@ -147,14 +147,14 @@ impl RenderObjectPass {
     pub fn for_each_alive<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_objects: &LiveRenderObjects<R>,
+        proxies: &RenderProxies<R>,
         mut on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4),
         mut on_emitter: impl FnMut(WorldObjectRef, &R, &EmitterPart<E, S>, Mat4),
     ) where
         R: Clone + Eq + Hash + 'static,
     {
         let _ = zones;
-        for (parent, rid, object) in live_objects.iter() {
+        for (parent, rid, object) in proxies.iter() {
             if !object.root_visible {
                 continue;
             }
@@ -197,7 +197,7 @@ impl RenderObjectPass {
     pub fn for_each_alive_with_hit_id<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_objects: &LiveRenderObjects<R>,
+        proxies: &RenderProxies<R>,
         renderer: &Renderer,
         on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4, u32),
         on_emitter: impl FnMut(WorldObjectRef, &R, &EmitterPart<E, S>, Mat4, u32),
@@ -207,7 +207,7 @@ impl RenderObjectPass {
         for_each_alive_reserving(
             zones,
             templates,
-            live_objects,
+            proxies,
             |parent| renderer.reserve_object(parent.zone, parent.id),
             on_part,
             on_emitter,
@@ -219,7 +219,7 @@ impl RenderObjectPass {
     pub fn for_each_alive_part_with_hit_id<R, M, MK, E, S>(
         zones: &Zones,
         templates: &RenderRegistry<R, M, MK, E, S>,
-        live_objects: &LiveRenderObjects<R>,
+        proxies: &RenderProxies<R>,
         renderer: &Renderer,
         on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4, u32),
     ) where
@@ -228,7 +228,7 @@ impl RenderObjectPass {
         Self::for_each_alive_with_hit_id(
             zones,
             templates,
-            live_objects,
+            proxies,
             renderer,
             on_part,
             |_, _, _, _, _| {},
@@ -236,14 +236,14 @@ impl RenderObjectPass {
     }
 }
 
-/// Inner traversal shared by [`RenderObjectPass::for_each_alive_with_hit_id`]
+/// Inner traversal shared by [`RenderObjectTraversal::for_each_alive_with_hit_id`]
 /// and its tests. The `reserve` closure is called once per *visible* parent
 /// — invisible parents short-circuit before reservation, so the hit-ID
 /// counter doesn't advance for objects the user can't click.
 fn for_each_alive_reserving<R, M, MK, E, S>(
     zones: &Zones,
     templates: &RenderRegistry<R, M, MK, E, S>,
-    live_objects: &LiveRenderObjects<R>,
+    proxies: &RenderProxies<R>,
     mut reserve: impl FnMut(WorldObjectRef) -> u32,
     mut on_part: impl FnMut(WorldObjectRef, &R, &MeshPart<M, MK>, Mat4, u32),
     mut on_emitter: impl FnMut(WorldObjectRef, &R, &EmitterPart<E, S>, Mat4, u32),
@@ -251,7 +251,7 @@ fn for_each_alive_reserving<R, M, MK, E, S>(
     R: Clone + Eq + Hash + 'static,
 {
     let _ = zones;
-    for (parent, rid, object) in live_objects.iter() {
+    for (parent, rid, object) in proxies.iter() {
         if !object.root_visible {
             continue;
         }
@@ -299,7 +299,7 @@ mod tests {
     }
 
     fn always_inside() -> Frustum {
-        // Same trick as live_render_objects tests: every plane accepts.
+        // Same trick as render_proxy tests: every plane accepts.
         Frustum {
             planes: [Vec4::new(0.0, 0.0, 0.0, 1.0); 6],
         }
@@ -345,8 +345,8 @@ mod tests {
         let mut templates: RenderRegistry<Rid> = RenderRegistry::new();
         templates.register(Rid::Tree, tree_template());
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
 
         assert_eq!(live.len(), 2);
     }
@@ -361,8 +361,8 @@ mod tests {
         let mut templates: RenderRegistry<Rid> = RenderRegistry::new();
         templates.register(Rid::Tree, tree_template());
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
 
         assert!(live.is_empty());
     }
@@ -375,8 +375,8 @@ mod tests {
         let mut templates: RenderRegistry<Rid> = RenderRegistry::new();
         templates.register(Rid::Tree, tree_template());
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_outside());
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_outside());
 
         // New proxy, never visible → dropped immediately.
         assert!(live.is_empty());
@@ -400,11 +400,11 @@ mod tests {
                 .with_mesh_part(1, 1, Mat4::from_translation(Vec3::Z)),
         );
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
 
         let mut visits = 0usize;
-        RenderObjectPass::for_each_alive_part(
+        RenderObjectTraversal::for_each_alive_part(
             &zones,
             &templates,
             &live,
@@ -436,12 +436,12 @@ mod tests {
             RenderTemplate::<u32, u32>::new("tree").with_mesh_part(0, 0, Mat4::IDENTITY),
         );
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
 
         // Hide any tree without an Appearance — exercises the fallback path
         // (component missing) and the present path together.
-        RenderObjectPass::update_instances(
+        RenderObjectTraversal::update_instances(
             &zones,
             &templates,
             &mut live,
@@ -453,7 +453,7 @@ mod tests {
         );
 
         let mut visits = 0usize;
-        RenderObjectPass::for_each_alive_part(&zones, &templates, &live, |_, _, _, _| {
+        RenderObjectTraversal::for_each_alive_part(&zones, &templates, &live, |_, _, _, _| {
             visits += 1;
         });
         assert_eq!(
@@ -475,15 +475,20 @@ mod tests {
                 .with_mesh_part(1, 1, Mat4::from_translation(Vec3::Z)),
         );
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
         // Translation step: hide the whole instance.
-        RenderObjectPass::update_instances(&zones, &templates, &mut live, |_, _, _, instance| {
-            instance.root_visible = false;
-        });
+        RenderObjectTraversal::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, instance| {
+                instance.root_visible = false;
+            },
+        );
 
         let mut visits = 0usize;
-        RenderObjectPass::for_each_alive_part(&zones, &templates, &live, |_, _, _, _| {
+        RenderObjectTraversal::for_each_alive_part(&zones, &templates, &live, |_, _, _, _| {
             visits += 1;
         });
 
@@ -503,15 +508,20 @@ mod tests {
                 .with_mesh_part(1, 1, Mat4::IDENTITY),
         );
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
-        RenderObjectPass::update_instances(&zones, &templates, &mut live, |_, _, _, instance| {
-            // Hide the second mesh part only.
-            instance.mesh_parts[1].visible = false;
-        });
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        RenderObjectTraversal::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, instance| {
+                // Hide the second mesh part only.
+                instance.mesh_parts[1].visible = false;
+            },
+        );
 
         let mut visited: Vec<u32> = Vec::new();
-        RenderObjectPass::for_each_alive_part(&zones, &templates, &live, |_, _, part, _| {
+        RenderObjectTraversal::for_each_alive_part(&zones, &templates, &live, |_, _, part, _| {
             visited.push(part.mesh);
         });
         assert_eq!(
@@ -534,14 +544,19 @@ mod tests {
                 .with_emitter_part(1, 1, Mat4::IDENTITY),
         );
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
-        RenderObjectPass::update_instances(&zones, &templates, &mut live, |_, _, _, instance| {
-            instance.emitter_parts[0].visible = false;
-        });
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        RenderObjectTraversal::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, instance| {
+                instance.emitter_parts[0].visible = false;
+            },
+        );
 
         let mut visited: Vec<u32> = Vec::new();
-        RenderObjectPass::for_each_alive(
+        RenderObjectTraversal::for_each_alive(
             &zones,
             &templates,
             &live,
@@ -569,13 +584,18 @@ mod tests {
             RenderTemplate::<u32, u32>::new("tree").with_mesh_part(0, 0, Mat4::IDENTITY),
         );
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
-        RenderObjectPass::update_instances(&zones, &templates, &mut live, |_, _, _, instance| {
-            if (instance.world_xform.w_axis.truncate() - hidden_position).length() < 0.01 {
-                instance.root_visible = false;
-            }
-        });
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        RenderObjectTraversal::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, instance| {
+                if (instance.world_xform.w_axis.truncate() - hidden_position).length() < 0.01 {
+                    instance.root_visible = false;
+                }
+            },
+        );
 
         let mut reservations = 0u32;
         let mut next_id = 1u32;
@@ -611,15 +631,20 @@ mod tests {
                 .with_emitter_part(0, 0, Mat4::IDENTITY),
         );
 
-        let mut live = LiveRenderObjects::<Rid>::new(30);
-        RenderObjectPass::declare_and_cull(&zones, &templates, &mut live, &always_inside());
-        RenderObjectPass::update_instances(&zones, &templates, &mut live, |_, _, _, instance| {
-            instance.root_visible = false;
-        });
+        let mut live = RenderProxies::<Rid>::new(30);
+        RenderObjectTraversal::declare_and_cull(&zones, &templates, &mut live, &always_inside());
+        RenderObjectTraversal::update_instances(
+            &zones,
+            &templates,
+            &mut live,
+            |_, _, _, instance| {
+                instance.root_visible = false;
+            },
+        );
 
         let mut mesh_visits = 0usize;
         let mut emitter_visits = 0usize;
-        RenderObjectPass::for_each_alive(
+        RenderObjectTraversal::for_each_alive(
             &zones,
             &templates,
             &live,

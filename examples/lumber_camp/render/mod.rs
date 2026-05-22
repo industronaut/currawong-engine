@@ -29,10 +29,10 @@
 //!    `HashMap<KindId, RenderShape>` rather than re-matching strings each
 //!    frame — keeps the per-frame seam to one HashMap lookup.
 //!
-//! Sim-vocabulary slot names + view-state-on-`LiveRenderObject` from
+//! Sim-vocabulary slot names + view-state-on-`RenderProxy` from
 //! [`super`]/CLAUDE.md still apply: the marker and the carried log are
 //! view-side visibility decisions on the persistent
-//! [`LiveRenderObject`], driven by the sim's typed [`Designated`] /
+//! [`RenderProxy`], driven by the sim's typed [`Designated`] /
 //! [`Carrying`] components.
 
 mod debugui;
@@ -47,15 +47,14 @@ use std::time::{Duration, Instant};
 use currawong::data::{Definitions, KindId, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, Frustum,
-    Handle, HitTarget, InstanceBuckets, LiveRenderObjects, MaterialId, MaterialRegistry,
-    MeshInstanceAttribs, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance,
-    PbrAtlasMaterialParams, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
-    RenderObjectPass, RenderRegistry, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
-    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, Texture, TextureColorSpace, View,
-    ViewConfig, ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId, egui, wgpu, winit, yakui,
+    AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, Frustum,
+    HitTarget, InstanceBuckets, MaterialId, MaterialRegistry, MeshInstanceAttribs, MeshTemplate,
+    OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrMaterial,
+    PbrMaterialInstance, RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec,
+    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, TerrainMaterial,
+    TerrainMaterialInstance, TerrainRenderer, TextureColorSpace, View, ViewConfig, ViewEnvironment,
+    WorldObjectRef, YakuiAssets, ZoneId, egui, wgpu, winit, yakui,
 };
-use serde::Deserialize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -115,102 +114,6 @@ impl PartKey {
     }
 }
 
-// --- Per-template GPU resources -----------------------------------------
-
-/// Mesh buffers + the PBR material instance to draw them with. One per
-/// [`PartKey`]; bound together because the draw loop always swaps both at
-/// once.
-///
-/// `mesh` is either a [`Handle<Mesh>`] (the kind's body, streamed from
-/// the def's `render.mesh` path) or an inline `(vertex, index)` buffer
-/// pair (the procedural ancillary parts). Both end up resolved to
-/// `wgpu::Buffer` slices at draw time via [`Self::resolve`], so the
-/// extract / draw loop is mesh-source-agnostic.
-pub struct MeshTemplate {
-    pub mesh: MeshSource,
-    pub visual_bounds: Aabb,
-    pub material: PbrMaterialInstance,
-}
-
-pub enum MeshSource {
-    /// glTF body part — buffers live behind a streaming handle and we
-    /// pay the per-frame `resolve_mesh` to surface them.
-    Streamed { handle: Handle<currawong::Mesh> },
-    /// Procedural ancillary part — a single owned [`currawong::MeshPrimitive`]
-    /// wrapped in a `Vec` so `ResolvedDraw::primitives` is one shape
-    /// regardless of source. No streaming, no fallback.
-    Inline {
-        primitives: Vec<currawong::MeshPrimitive>,
-    },
-}
-
-/// Per-draw resolution of a [`MeshTemplate`] into a slice of primitives
-/// plus the model-matrix adjustment the caller composes inside their
-/// per-instance world transform. For streamed templates this matches
-/// [`AssetServer::resolve_mesh`] exactly; for inline templates the slice
-/// is a single primitive borrowed from a per-template scratchpad and the
-/// adjustment is identity.
-pub struct ResolvedDraw<'a> {
-    pub primitives: &'a [currawong::MeshPrimitive],
-    pub fallback_adjustment: Mat4,
-}
-
-impl MeshTemplate {
-    pub fn resolve<'a>(&'a self, asset_server: &'a AssetServer) -> ResolvedDraw<'a> {
-        match &self.mesh {
-            MeshSource::Streamed { handle } => {
-                let r = asset_server.resolve_mesh(handle, Some(self.visual_bounds));
-                ResolvedDraw {
-                    primitives: r.primitives,
-                    fallback_adjustment: r.fallback_adjustment,
-                }
-            }
-            MeshSource::Inline { primitives } => ResolvedDraw {
-                primitives,
-                fallback_adjustment: Mat4::IDENTITY,
-            },
-        }
-    }
-}
-
-// --- Def deserialisation -----------------------------------------------
-
-/// The view-side projection of each kind def's `render` block. The sim
-/// has its own per-kind body structs that pick out the sim-relevant
-/// fields — serde silently drops the rest, so the two views stay
-/// independent.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RenderSpec {
-    /// One of the closed set `"tree" | "pawn" | "building"`. Drives which
-    /// view-side factory builds the template.
-    pub shape: String,
-    pub mesh: String,
-    pub albedo: String,
-    pub metallic: f32,
-    pub roughness: f32,
-    pub bounds_min: (f32, f32, f32),
-    pub bounds_max: (f32, f32, f32),
-}
-
-/// Every kind in the lumber-camp content has a `render` block — it
-/// exists because the sim wants to draw the kind. A future "rules-only"
-/// kind (e.g. a recipe, a faction marker) would have no `render`; for
-/// PR4 we make it required and surface a clear parse error if it's
-/// missing rather than silently dropping the kind from the world.
-#[derive(Deserialize)]
-struct KindDefBody {
-    render: RenderSpec,
-}
-
-impl RenderSpec {
-    pub fn visual_bounds(&self) -> Aabb {
-        Aabb::new(
-            Vec3::new(self.bounds_min.0, self.bounds_min.1, self.bounds_min.2),
-            Vec3::new(self.bounds_max.0, self.bounds_max.1, self.bounds_max.2),
-        )
-    }
-}
-
 // --- Render shape tag --------------------------------------------------
 
 /// View-side discriminator chosen from each kind's `render.shape`. Cached
@@ -267,7 +170,7 @@ pub struct LumberCampView {
     /// each frame inside [`Self::render`] to reconcile the texture handles
     /// (cheap when nothing changed, swaps the bind group on the frame the
     /// real PNG lands).
-    mesh_templates: HashMap<PartKey, MeshTemplate>,
+    mesh_templates: HashMap<PartKey, MeshTemplate<PbrMaterialInstance>>,
     /// Engine-side render-object registry: maps each `KindId` to a
     /// [`RenderTemplate`] declaring which `PartKey`s make up an instance,
     /// where each sits relative to the parent transform, and the visual
@@ -280,7 +183,7 @@ pub struct LumberCampView {
     /// Live render-object proxies with cull hysteresis. Owns the
     /// view-side per-instance state (`world_xform`, per-part visibility)
     /// that the per-instance update closure writes each frame.
-    live_objects: LiveRenderObjects<KindId>,
+    proxies: RenderProxies<KindId>,
     /// Per-part instance-attrib buckets. The extract closure pushes one
     /// [`MeshInstanceAttribs`] per visible part; the draw loop iterates
     /// non-empty buckets and issues one indexed-instanced call each.
@@ -391,7 +294,8 @@ impl View for LumberCampView {
         .expect("view-side definitions load");
 
         // Build the registries by walking the defs.
-        let mut mesh_templates: HashMap<PartKey, MeshTemplate> = HashMap::new();
+        let mut mesh_templates: HashMap<PartKey, MeshTemplate<PbrMaterialInstance>> =
+            HashMap::new();
         let mut templates: Templates = RenderRegistry::new();
         let mut shapes: HashMap<KindId, RenderShape> = HashMap::new();
 
@@ -414,14 +318,13 @@ impl View for LumberCampView {
         // sim might still place them, in which case the engine cull will
         // simply not find a template and skip them silently.
         for (kind_id, def) in defs.iter() {
-            let body: KindDefBody = match def.value.clone().into_rust() {
-                Ok(b) => b,
+            let render = match RenderSpec::from_def(def) {
+                Ok(spec) => spec,
                 Err(e) => {
                     eprintln!("lumber_camp: skipping {kind_id}: {e}");
                     continue;
                 }
             };
-            let render = body.render;
             let Some(shape) = RenderShape::from_tag(&render.shape) else {
                 eprintln!(
                     "lumber_camp: kind {kind_id} declares unknown render.shape `{}`; skipping",
@@ -429,21 +332,15 @@ impl View for LumberCampView {
                 );
                 continue;
             };
-            let body_template = build_body_template(
-                renderer,
-                &material,
-                &samplers,
-                &asset_server,
-                kind_id,
-                &render,
-            );
+            let body_template =
+                material.streamed_template(renderer, &samplers, &asset_server, kind_id, &render);
             mesh_templates.insert(PartKey::Body(kind_id.clone()), body_template);
             let template = shape.register_template(kind_id.clone(), &render);
             templates.register(kind_id.clone(), template);
             shapes.insert(kind_id.clone(), shape);
         }
 
-        let live_objects = LiveRenderObjects::<KindId>::new(CULL_HYSTERESIS_FRAMES);
+        let proxies = RenderProxies::<KindId>::new(CULL_HYSTERESIS_FRAMES);
 
         let mut buckets = InstanceBuckets::<PartKey, MeshInstanceAttribs>::new(
             "lumber-camp instances",
@@ -475,7 +372,7 @@ impl View for LumberCampView {
             mesh_templates,
             templates,
             shapes,
-            live_objects,
+            proxies,
             buckets,
             terrain: TerrainRenderer::new(),
             terrain_material,
@@ -559,15 +456,15 @@ impl View for LumberCampView {
         // object carrying a `KindId` matching a registered template;
         // frustum-culled with hysteresis.
         let frustum = Frustum::from_view_proj(self.camera.view_proj());
-        RenderObjectPass::declare_and_cull(
+        RenderObjectTraversal::declare_and_cull(
             &sim.zones,
             &self.templates,
-            &mut self.live_objects,
+            &mut self.proxies,
             &frustum,
         );
         // Surface live-proxy counts to the debug overlay. Cheap walk; only
         // happens once per frame.
-        let (visible, hysteresis) = self.live_objects.cull_counts();
+        let (visible, hysteresis) = self.proxies.cull_counts();
         renderer.record_proxies(visible, hysteresis);
 
         // Phase 1.5: reconcile material handles + cache the per-template
@@ -602,10 +499,10 @@ impl View for LumberCampView {
         // frame seam to one HashMap lookup.
         let pawn = &self.pawn;
         let shapes = &self.shapes;
-        RenderObjectPass::update_instances(
+        RenderObjectTraversal::update_instances(
             &sim.zones,
             &self.templates,
-            &mut self.live_objects,
+            &mut self.proxies,
             |parent, kind_id, components, instance| match shapes.get(kind_id) {
                 Some(RenderShape::Pawn) => {
                     pawn::update_instance(parent, components, instance, alpha, pawn)
@@ -626,10 +523,10 @@ impl View for LumberCampView {
         // constant albedo for legibility.
         let buckets = &mut self.buckets;
         let hovered = self.hovered;
-        RenderObjectPass::for_each_alive_part_with_hit_id(
+        RenderObjectTraversal::for_each_alive_part_with_hit_id(
             &sim.zones,
             &self.templates,
-            &self.live_objects,
+            &self.proxies,
             renderer,
             |parent, _kind, part, world, hit_id| {
                 let tint = if hovered == Some(parent) && part.material.is_body() {
@@ -878,117 +775,6 @@ impl RenderShape {
                 .with_mesh_part(body_key.clone(), body_key, Mat4::IDENTITY)
                 .with_visual_bounds(bounds),
         }
-    }
-}
-
-/// Build the body [`MeshTemplate`] for a kind: streamed glTF mesh +
-/// streamed PNG albedo, sized to the def's bounds. Used by every kind
-/// regardless of shape — the structural difference between shapes is
-/// in the [`RenderTemplate`], not the body template.
-fn build_body_template(
-    renderer: &Renderer,
-    material: &PbrMaterial,
-    samplers: &SamplerRegistry,
-    asset_server: &AssetServer,
-    kind_id: &KindId,
-    render: &RenderSpec,
-) -> MeshTemplate {
-    let mesh_path = VfsPath::new(render.mesh.clone())
-        .unwrap_or_else(|e| panic!("kind {kind_id}: invalid render.mesh path: {e}"));
-    let albedo_path = VfsPath::new(render.albedo.clone())
-        .unwrap_or_else(|e| panic!("kind {kind_id}: invalid render.albedo path: {e}"));
-    let mesh_handle = asset_server.mesh(mesh_path);
-    let albedo_handle = asset_server.texture(albedo_path, TextureColorSpace::Srgb);
-    let material_instance = material.create_instance(
-        renderer,
-        samplers,
-        asset_server,
-        PbrMaterialParams {
-            albedo: albedo_handle,
-            sampler: SamplerKind::LinearRepeat,
-            // Texture sample carries the colour; per-instance tint
-            // multiplier (white) leaves it unchanged unless hover is
-            // overriding.
-            albedo_factor: Vec4::ONE,
-            metallic: render.metallic,
-            roughness: render.roughness,
-        },
-    );
-    MeshTemplate {
-        mesh: MeshSource::Streamed {
-            handle: mesh_handle,
-        },
-        visual_bounds: render.visual_bounds(),
-        material: material_instance,
-    }
-}
-
-/// Parameters describing an inline (procedural) ancillary part — bundled
-/// into a struct because there are enough of them that a positional arg
-/// list crosses clippy's `too_many_arguments` threshold.
-pub struct InlineTemplate<'a> {
-    pub label: &'static str,
-    pub mesh: &'a PrimitiveMesh,
-    pub bounds: Aabb,
-    /// Flat colour multiplier — ancillaries don't stream a texture, so
-    /// this is the only place their colour comes from.
-    pub albedo_factor: Vec4,
-    pub metallic: f32,
-    pub roughness: f32,
-}
-
-/// Build an inline [`MeshTemplate`] from a [`PrimitiveMesh`] + flat
-/// albedo factor. Shared helper for the two procedural ancillary parts
-/// (marker, carried log) that don't go through the asset pipeline — they
-/// still plug into the same PBR material surface the streamed bodies
-/// use, via a 1×1 white texture wrapped in a ready [`Handle`].
-pub fn new_inline_template(
-    renderer: &Renderer,
-    material: &PbrMaterial,
-    samplers: &SamplerRegistry,
-    asset_server: &AssetServer,
-    params: InlineTemplate<'_>,
-) -> MeshTemplate {
-    use wgpu::util::DeviceExt;
-    let vertex_buffer = renderer
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(params.label),
-            contents: bytemuck::cast_slice(&params.mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-    let index_buffer = renderer
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(params.label),
-            contents: bytemuck::cast_slice(&params.mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-    let primitive = currawong::MeshPrimitive {
-        vertex_buffer,
-        index_buffer,
-        index_count: params.mesh.index_count(),
-        material_name: None,
-    };
-    let white = Texture::from_rgba8(renderer, "lumber-camp ancillary", 1, 1, &[255; 4], true);
-    let material_instance = material.create_instance(
-        renderer,
-        samplers,
-        asset_server,
-        PbrMaterialParams {
-            albedo: Handle::ready(white),
-            sampler: SamplerKind::LinearClamp,
-            albedo_factor: params.albedo_factor,
-            metallic: params.metallic,
-            roughness: params.roughness,
-        },
-    );
-    MeshTemplate {
-        mesh: MeshSource::Inline {
-            primitives: vec![primitive],
-        },
-        visual_bounds: params.bounds,
-        material: material_instance,
     }
 }
 
