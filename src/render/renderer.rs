@@ -352,31 +352,22 @@ impl Renderer {
             .await
             .expect("no suitable GPU adapter found");
 
-        // Opt in to TIMESTAMP_QUERY when the adapter exposes it so the
-        // debug overlay's GPU column can be populated. Backends without it
-        // (some WebGPU contexts, older driver/HW combos) still work — the
-        // profiler stays `None` and the overlay column reads "—".
-        //
-        // TIMESTAMP_QUERY_INSIDE_ENCODERS layers on top: needed for the
-        // overlay segment, because yakui's render pass is owned by
-        // `yakui_wgpu::paint_with_encoder` and we can't pass `timestamp_writes`
-        // to it — we have to bracket the encoder instead.
-        let adapter_features = adapter.features();
-        let timestamp_query_supported = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
-        let overlay_timestamps_supported = adapter_features.contains(
-            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-        );
-        let mut required_features = wgpu::Features::empty();
-        if timestamp_query_supported {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY;
-        }
-        if overlay_timestamps_supported {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-        }
+        // GPU profiler is currently disabled. Enabling `TIMESTAMP_QUERY` +
+        // `TIMESTAMP_QUERY_INSIDE_ENCODERS` and wiring `RenderPassTimestampWrites`
+        // / encoder-level `write_timestamp` (the shape implemented in
+        // `super::gpu_profiler::GpuProfiler`) makes the lumber_camp frame
+        // abort every submit under `METAL_DEVICE_WRAPPER_TYPE=1` with
+        // `kIOGPUCommandBufferCallbackErrorOutOfMemory`. Splitting world
+        // and overlay into separate `QuerySet`s (so each MTLCounterSampleBuffer
+        // is single-source) did *not* fix it, ruling out the pass-vs-encoder
+        // sampling-mix hypothesis. Without the device wrapper Metal runs
+        // fine. Until we understand what API Validation is rejecting we
+        // skip the feature request and force `gpu_profiler = None` below,
+        // so the overlay's GPU column reads "—" and no QuerySet is ever
+        // allocated. For one-off profiling, use Xcode's GPU capture.
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("currawong device"),
-                required_features,
                 ..Default::default()
             })
             .await
@@ -403,8 +394,8 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let scene = SceneResources::new(&device, config.width, config.height, depth_format);
-        let gpu_profiler = timestamp_query_supported
-            .then(|| GpuProfiler::new(&device, &queue, overlay_timestamps_supported));
+        // Force-disabled; see the comment on the device-request block above.
+        let gpu_profiler: Option<GpuProfiler> = None;
         let adapter_info = adapter.get_info();
 
         Self {
