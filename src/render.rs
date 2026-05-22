@@ -69,6 +69,12 @@ mod frame_stats;
 mod frame_timings;
 #[cfg(feature = "yakui")]
 mod game_ui;
+// Force-disabled in `Renderer::new` because pass-level + encoder-level
+// timestamp writes trip Metal API Validation
+// (`METAL_DEVICE_WRAPPER_TYPE=1`) into aborting every submit. Code parked
+// here so the wiring can be re-enabled once the Metal validation issue
+// is understood; in the meantime `dead_code` is expected.
+#[allow(dead_code)]
 mod gpu_profiler;
 mod handle;
 mod instance;
