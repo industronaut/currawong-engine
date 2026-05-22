@@ -30,8 +30,8 @@ use std::time::Duration;
 
 use currawong::data::{Definitions, KindId};
 use currawong::{
-    Facing, SimPos, SimUnit, Simulation, TileCoord, WorldObjectId, WorldObjectRef, WorldTransform,
-    Zone, ZoneId, Zones,
+    Facing, SimEnvironment, SimPos, SimUnit, Simulation, TileCoord, WorldObjectId, WorldObjectRef,
+    WorldTransform, Zone, ZoneId, Zones,
 };
 use serde::Deserialize;
 
@@ -195,6 +195,11 @@ pub struct Game {
     pub elapsed: SimUnit,
     /// Resolved kind ids + per-species stats from the [`Definitions`].
     pub stats: GameStats,
+    /// Sim-side environment — drives the moving sun the view extracts each
+    /// frame. Advances every tick (also while `Won`/`Lost` so the world
+    /// keeps animating under the game-over banner). Day length is tuned to
+    /// match the time limit so the sun visibly travels during one run.
+    pub env: SimEnvironment,
 }
 
 impl Game {
@@ -259,6 +264,13 @@ impl Game {
             spawn_tree(zone, x, y, &stats.kinds.pine_tree);
         }
 
+        let mut env = SimEnvironment::new();
+        // One in-world day per real-time game length: the sun rises at start
+        // (default `time_of_day = 0.25`), reaches noon halfway through, sets
+        // as the timer expires. Short enough that the panel's time-of-day
+        // slider has visible work to do even without dragging it.
+        env.seconds_per_day = SimUnit::from_num(TIME_LIMIT_SECS);
+
         Self {
             zones,
             zone: zone_id,
@@ -266,6 +278,7 @@ impl Game {
             state: GameState::Playing,
             elapsed: SimUnit::ZERO,
             stats,
+            env,
         }
     }
 
@@ -305,6 +318,14 @@ pub enum Command {
     /// `apply_command` re-validates so a recorded command stream replays
     /// safely against a possibly-altered sim).
     ToggleDesignation { target: WorldObjectRef },
+    /// Set [`SimEnvironment::time_of_day`] to the given `[0, 1)` value.
+    /// Pushed by the bottom-right debug panel's slider. Float at the
+    /// command boundary (egui speaks `f32`); the sim converts to fixed-
+    /// point on apply.
+    SetTimeOfDay(f32),
+    /// Set [`SimEnvironment::seconds_per_day`] — the real-time length of
+    /// one in-world day. Same float-at-boundary shape as `SetTimeOfDay`.
+    SetSecondsPerDay(f32),
 }
 
 impl Simulation for Game {
@@ -335,15 +356,27 @@ impl Simulation for Game {
                     zone.components_mut().insert(id, Designated);
                 }
             }
+            Command::SetTimeOfDay(t) => {
+                self.env.time_of_day = SimUnit::from_num(t.rem_euclid(1.0));
+            }
+            Command::SetSecondsPerDay(s) => {
+                // Clamp at the boundary — `SimEnvironment::advance` early-
+                // returns on non-positive periods, so this just guards the
+                // slider from making the panel display a paused-sun state
+                // by accident.
+                self.env.seconds_per_day = SimUnit::from_num(s.max(1.0));
+            }
         }
     }
 
     fn tick(&mut self, dt: Duration) {
         if self.state != GameState::Playing {
             // Freeze gameplay on win/lose: no pawn motion, no chop ticks,
-            // no timer advancement. The HUD keeps drawing the banner.
+            // no timer advancement, no sun motion. The HUD keeps drawing
+            // the banner. Time-of-day can still be dragged via Command.
             return;
         }
+        self.env.advance(dt);
         // Convert wall-clock dt to Q16.16 sim-seconds via integer nanos
         // — bit-exact, no float involved.
         let nanos = dt.as_nanos();
