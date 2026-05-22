@@ -154,6 +154,7 @@ impl View for BlenderImportView {
             a: 1.0,
         },
         depth_format: Some(DEPTH_FORMAT),
+        ..ViewConfig::DEFAULT
     };
 
     fn init(renderer: &Renderer) -> Self {
@@ -280,6 +281,7 @@ impl View for BlenderImportView {
             sun_color: Vec3::splat(2.2),
             ambient: Vec3::new(0.30, 0.32, 0.38),
             sky_color: Vec3::new(0.45, 0.55, 0.75),
+            ..ViewEnvironment::neutral()
         }
     }
 

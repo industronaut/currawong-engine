@@ -34,9 +34,10 @@ use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, Handle, InstanceBuckets,
     MaterialInstanceRegistry, MeshInstanceAttribs, PbrMaterial, PbrMaterialInstance,
-    PbrMaterialParams, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, SimEnvironment,
-    SimPos, SimUnit, Simulation, Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment,
-    WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu, winit,
+    PbrMaterialParams, PrimitiveMesh, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline,
+    SimEnvironment, SimPos, SimUnit, Simulation, SunCascades, Texture, TextureColorSpace, View,
+    ViewConfig, ViewEnvironment, WorldTransform, Zone, ZoneId, Zones, sun_direction_for, wgpu,
+    winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -129,6 +130,9 @@ impl Simulation for Game {
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const MAX_INSTANCES: u32 = 16;
+/// Material slot for the ground plane — separate from the cube materials so
+/// the matte ground keeps its own colour while sharing the PBR pipeline.
+const GROUND_MATERIAL: MaterialId = MaterialId::Matte;
 
 struct TexturedPbr {
     camera: Camera,
@@ -140,7 +144,16 @@ struct TexturedPbr {
     cube_vertices: wgpu::Buffer,
     cube_indices: wgpu::Buffer,
     cube_index_count: u32,
+    /// Large flat receiver beneath the cubes so cast shadows have somewhere
+    /// to land. Uses the same PBR pipeline as the cubes.
+    ground_vertices: wgpu::Buffer,
+    ground_indices: wgpu::Buffer,
+    ground_index_count: u32,
+    ground_instance: wgpu::Buffer,
     buckets: InstanceBuckets<MaterialId, MeshInstanceAttribs>,
+    /// Depth-only pipeline used in the shadow cascade passes. Reuses the
+    /// cubes' and ground's vertex/instance layouts.
+    shadow_pipeline: ShadowMeshPipeline,
     started: Instant,
     #[cfg(feature = "egui")]
     frame_samples: VecDeque<f32>,
@@ -162,6 +175,7 @@ impl View for TexturedPbr {
             a: 1.0,
         },
         depth_format: Some(DEPTH_FORMAT),
+        shadow_map_resolution: Some(2048),
     };
 
     fn init(renderer: &Renderer) -> Self {
@@ -224,6 +238,30 @@ impl View for TexturedPbr {
             usage: wgpu::BufferUsages::INDEX,
         });
 
+        // Ground plane built as a flat 30×30 cube at z=-0.5 (so its top
+        // face sits at z=0). Reuses the standard PosNormalUv layout so the
+        // PBR pipeline can draw it without a second vertex layout.
+        let ground_mesh = PrimitiveMesh::cube(Vec3::new(30.0, 30.0, 1.0));
+        let ground_vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground vertices"),
+            contents: bytemuck::cast_slice(&ground_mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ground_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground indices"),
+            contents: bytemuck::cast_slice(&ground_mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let ground_attribs = MeshInstanceAttribs::new(
+            Mat4::from_translation(Vec3::new(0.0, 0.0, -0.5)),
+            Vec4::new(0.5, 0.55, 0.45, 1.0),
+        );
+        let ground_instance = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ground instance"),
+            contents: bytemuck::cast_slice(std::slice::from_ref(&ground_attribs)),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         let mut buckets = InstanceBuckets::<MaterialId, MeshInstanceAttribs>::new(
             "pbr instance attribs",
             MAX_INSTANCES,
@@ -231,6 +269,8 @@ impl View for TexturedPbr {
         for &mat in ALL_MATERIALS.iter() {
             buckets.register(device, mat);
         }
+
+        let shadow_pipeline = ShadowMeshPipeline::new(renderer);
 
         Self {
             camera,
@@ -242,7 +282,12 @@ impl View for TexturedPbr {
             cube_vertices,
             cube_indices,
             cube_index_count: mesh.index_count(),
+            ground_vertices,
+            ground_indices,
+            ground_index_count: ground_mesh.index_count(),
+            ground_instance,
             buckets,
+            shadow_pipeline,
             started: Instant::now(),
             #[cfg(feature = "egui")]
             frame_samples: VecDeque::with_capacity(120),
@@ -253,6 +298,24 @@ impl View for TexturedPbr {
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {
         Some(sim.zone)
+    }
+
+    fn update(
+        &mut self,
+        _sim: &Game,
+        _ctx: &mut EngineCtx,
+        _cmds: &mut CommandQueue<Command>,
+        _dt: Duration,
+    ) {
+        // Wall-clock camera orbit. Driven from `update` (not `render`) so
+        // `extract_environment` — which runs *between* update and render —
+        // sees the same camera state the lit pass eventually sees,
+        // keeping the cascade fit aligned with the rendered frustum.
+        let t = self.started.elapsed().as_secs_f32();
+        let radius = 9.0;
+        let angle = t * 0.25;
+        self.camera.position = Vec3::new(angle.sin() * radius, -angle.cos() * radius, 3.5);
+        self.camera.target = Vec3::new(0.0, 0.0, 0.5);
     }
 
     fn extract_environment(&self, sim: &Game, _zone: ZoneId) -> ViewEnvironment {
@@ -275,11 +338,73 @@ impl View for TexturedPbr {
         let sky = Vec3::new(0.45, 0.65, 0.95).lerp(Vec3::new(0.02, 0.03, 0.06), 1.0 - day);
         let ambient = Vec3::splat(0.05).lerp(Vec3::new(0.35, 0.40, 0.50), day);
 
+        // CSM: split the camera frustum and fit a per-cascade ortho. The
+        // sun must be above the horizon to project meaningful shadows; when
+        // it's below, fall back to the disabled sentinel so the lit shader
+        // skips sampling.
+        let sun_cascades = if above_horizon > 0.05 {
+            let splits = self.camera.cascade_split_distances(0.75);
+            let matrices = self.camera.fit_shadow_cascades(sun, splits);
+            SunCascades { matrices, splits }
+        } else {
+            SunCascades::disabled()
+        };
+
         ViewEnvironment {
             sun_direction: sun,
             sun_color,
             ambient,
             sky_color: sky,
+            sun_cascades,
+        }
+    }
+
+    fn shadow_pass(
+        &mut self,
+        sim: &Game,
+        _alpha: f32,
+        cascade: u32,
+        renderer: &Renderer,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        // First-cascade work: write the camera uniform + populate instance
+        // buckets once per frame. The other three cascade passes just draw
+        // the buckets that this one filled.
+        if cascade == 0 {
+            self.camera_binding.write(&renderer.queue, &self.camera);
+
+            let t = self.started.elapsed().as_secs_f32();
+            let cube_yaw = Quat::from_rotation_z(t * 0.4);
+
+            self.buckets.begin_frame();
+            for (zone_id, zone) in sim.zones.iter() {
+                for (id, obj) in zone.iter() {
+                    let Some(&mat) = zone.components().get::<MaterialId>(id) else {
+                        continue;
+                    };
+                    let model = Mat4::from_rotation_translation(
+                        obj.facing.to_quat() * cube_yaw,
+                        obj.position.to_vec3(),
+                    );
+                    let hit_id = renderer.reserve_object(zone_id, id);
+                    self.buckets.push(
+                        mat,
+                        MeshInstanceAttribs::new(model, Vec4::ONE).with_hit_id(hit_id),
+                    );
+                }
+            }
+            self.buckets.upload(&renderer.queue);
+        }
+
+        // Same draws repeat across every cascade. Ground plane is
+        // intentionally *not* drawn here — it's the receiver, not an
+        // occluder, and drawing it would only add self-shadowing acne.
+        pass.set_pipeline(self.shadow_pipeline.pipeline());
+        pass.set_vertex_buffer(0, self.cube_vertices.slice(..));
+        pass.set_index_buffer(self.cube_indices.slice(..), wgpu::IndexFormat::Uint32);
+        for (_, instance_buffer, count) in self.buckets.iter_filled() {
+            pass.set_vertex_buffer(1, instance_buffer.slice(..));
+            pass.draw_indexed(0..self.cube_index_count, 0, 0..count);
         }
     }
 
@@ -290,44 +415,13 @@ impl View for TexturedPbr {
         renderer: &Renderer,
         pass: &mut wgpu::RenderPass<'_>,
     ) {
+        // Camera aspect is refined per-frame from the live surface size;
+        // stale-by-one-frame after a resize is fine for the cascade fit
+        // that already ran above.
         let size = renderer.window.inner_size();
         if size.height > 0 {
             self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
         }
-
-        // Wall-clock camera orbit so the cubes are visible from changing
-        // angles even when the sim is paused.
-        let t = self.started.elapsed().as_secs_f32();
-        let radius = 9.0;
-        let angle = t * 0.25;
-        self.camera.position = Vec3::new(angle.sin() * radius, -angle.cos() * radius, 3.5);
-        self.camera.target = Vec3::new(0.0, 0.0, 0.5);
-        self.camera_binding.write(&renderer.queue, &self.camera);
-
-        // Slow yaw on the cubes themselves so the lighting varies per-face.
-        let cube_yaw = Quat::from_rotation_z(t * 0.4);
-
-        self.buckets.begin_frame();
-        for (zone_id, zone) in sim.zones.iter() {
-            for (id, obj) in zone.iter() {
-                let Some(&mat) = zone.components().get::<MaterialId>(id) else {
-                    continue;
-                };
-                let model = Mat4::from_rotation_translation(
-                    obj.facing.to_quat() * cube_yaw,
-                    obj.position.to_vec3(),
-                );
-                // Reserve a per-cube hit ID so the GPU readback can resolve
-                // a cursor over any of these cubes back to its sim
-                // `WorldObjectId` (#56 PR 3).
-                let hit_id = renderer.reserve_object(zone_id, id);
-                self.buckets.push(
-                    mat,
-                    MeshInstanceAttribs::new(model, Vec4::ONE).with_hit_id(hit_id),
-                );
-            }
-        }
-        self.buckets.upload(&renderer.queue);
 
         // Reconcile every material instance with its handle's current state.
         // No-op here (the cubes were built with `Handle::ready`, so the
@@ -339,6 +433,7 @@ impl View for TexturedPbr {
                 instance.refresh(renderer, &self.material, &self.samplers, &self.asset_server);
             }
         }
+        let _ = sim;
 
         pass.set_pipeline(self.material.pipeline());
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
@@ -352,6 +447,17 @@ impl View for TexturedPbr {
             pass.set_bind_group(2, instance.bind_group(), &[]);
             pass.set_vertex_buffer(1, instance_buffer.slice(..));
             pass.draw_indexed(0..self.cube_index_count, 0, 0..count);
+        }
+
+        // Ground plane — same pipeline, its own vertex/index/instance
+        // buffers. Draws as the matte material so it receives shadows
+        // through the same PBR fragment shader.
+        if let Some(ground) = self.instances.get(GROUND_MATERIAL) {
+            pass.set_bind_group(2, ground.bind_group(), &[]);
+            pass.set_vertex_buffer(0, self.ground_vertices.slice(..));
+            pass.set_index_buffer(self.ground_indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(1, self.ground_instance.slice(..));
+            pass.draw_indexed(0..self.ground_index_count, 0, 0..1);
         }
     }
 

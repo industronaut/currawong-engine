@@ -89,7 +89,11 @@ impl<V: View> ApplicationHandler for Handler<V> {
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
-        let renderer = pollster::block_on(Renderer::new(window, V::CONFIG.depth_format));
+        let renderer = pollster::block_on(Renderer::new(
+            window,
+            V::CONFIG.depth_format,
+            V::CONFIG.shadow_map_resolution,
+        ));
         #[cfg(feature = "egui")]
         let debug_ui = DebugUi::new(&renderer);
         #[cfg(feature = "yakui")]
@@ -260,6 +264,18 @@ fn render_frame<V: View>(state: &mut RunState<V>, event_loop: &ActiveEventLoop, 
         return;
     };
     extract_scene::<V>(&state.view, &state.sim, &state.renderer);
+    if V::CONFIG.shadow_map_resolution.is_some() {
+        for cascade in 0..4u32 {
+            shadow_pass::<V>(
+                &mut state.view,
+                &state.sim,
+                alpha,
+                cascade,
+                &state.renderer,
+                &mut frame,
+            );
+        }
+    }
     let render_start = Instant::now();
     main_pass::<V>(
         &mut state.view,
@@ -400,6 +416,39 @@ fn extract_scene<V: View>(view: &V, sim: &V::Sim, renderer: &Renderer) {
         None => ViewEnvironment::neutral(),
     };
     renderer.write_scene(&env);
+}
+
+/// Phase 2.5: directional-light shadow cascade pass. Engine-driven; runs
+/// `ViewConfig::shadow_map_resolution` is `Some` and `View::shadow_pass`
+/// records depth-only occluder draws into the cascade's array layer. The
+/// per-cascade light view-projection is pre-bound at `@group(0)` so the
+/// View just needs to set its depth-only pipeline + vertex/instance buffers
+/// and call `draw_indexed`.
+fn shadow_pass<V: View>(
+    view: &mut V,
+    sim: &V::Sim,
+    alpha: f32,
+    cascade: u32,
+    renderer: &Renderer,
+    frame: &mut Frame,
+) {
+    let mut pass = frame
+        .encoder
+        .begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("currawong shadow cascade pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: renderer.shadow_layer_view(cascade),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+    pass.set_bind_group(0, renderer.shadow_cascade_bind_group(cascade), &[]);
+    view.shadow_pass(sim, alpha, cascade, renderer, &mut pass);
 }
 
 /// Phase 3: main world pass — clear, optional depth attach, `View::render`.

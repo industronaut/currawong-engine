@@ -280,6 +280,44 @@ impl Renderer {
         self.scene.write_scene(&self.queue, env);
     }
 
+    /// Per-cascade resolution the engine allocated, or `None` when the View
+    /// didn't opt into shadows. Used by the runner to drive the shadow-pass
+    /// phase and by Views building depth-only pipelines that need the
+    /// viewport size.
+    pub fn shadow_map_resolution(&self) -> Option<u32> {
+        self.scene.shadow_map_resolution()
+    }
+
+    /// Texture view targeting the `cascade`-th array layer of the shadow
+    /// map. Used by the engine's frame loop as the depth attachment for
+    /// each cascade's shadow pass; not normally needed by views.
+    pub(super) fn shadow_layer_view(&self, cascade: u32) -> &wgpu::TextureView {
+        self.scene.shadow_layer_view(cascade)
+    }
+
+    /// Format of the directional-light shadow map. Pipelines that record
+    /// into the shadow pass must declare this format in their
+    /// `DepthStencilState`.
+    pub fn shadow_map_format(&self) -> wgpu::TextureFormat {
+        super::scene_resources::SHADOW_FORMAT
+    }
+
+    /// Bind-group layout for the per-cascade light view-projection uniform.
+    /// Pipelines recording into the shadow pass declare this at
+    /// `@group(0)`; the engine binds the right cascade's uniform via
+    /// [`Self::shadow_cascade_bind_group`] before calling `View::shadow_pass`.
+    /// One `mat4x4<f32>` entry.
+    pub fn shadow_cascade_layout(&self) -> &wgpu::BindGroupLayout {
+        self.scene.shadow_cascade_layout()
+    }
+
+    /// Bind group carrying the `cascade`-th cascade's light view-projection
+    /// matrix. The engine refreshes the underlying buffer every frame from
+    /// [`ViewEnvironment::sun_cascades`](super::ViewEnvironment).
+    pub fn shadow_cascade_bind_group(&self, cascade: u32) -> &wgpu::BindGroup {
+        self.scene.shadow_cascade_bind_group(cascade)
+    }
+
     /// Timestamp-writes block for the main world pass, or `None` when the
     /// GPU profiler is disabled. Used by the runner; not normally needed by
     /// views.
@@ -336,6 +374,7 @@ impl Renderer {
     pub(super) async fn new(
         window: Arc<Window>,
         depth_format: Option<wgpu::TextureFormat>,
+        shadow_map_resolution: Option<u32>,
     ) -> Self {
         let size = window.inner_size();
 
@@ -393,7 +432,14 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
-        let scene = SceneResources::new(&device, config.width, config.height, depth_format);
+        let scene = SceneResources::new(
+            &device,
+            &queue,
+            config.width,
+            config.height,
+            depth_format,
+            shadow_map_resolution,
+        );
         // Force-disabled; see the comment on the device-request block above.
         let gpu_profiler: Option<GpuProfiler> = None;
         let adapter_info = adapter.get_info();

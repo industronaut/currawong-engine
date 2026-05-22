@@ -61,12 +61,20 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct Scene {
-    sun_direction: vec4<f32>,
-    sun_color:     vec4<f32>,
-    ambient:       vec4<f32>,
-    sky_color:     vec4<f32>,
+    sun_direction:         vec4<f32>,
+    sun_color:             vec4<f32>,
+    ambient:               vec4<f32>,
+    sky_color:             vec4<f32>,
+    sun_cascade_view_proj: array<mat4x4<f32>, 4>,
+    // .x .y .z .w are the four cascade far depths in view space (positive
+    // distance from camera). `cascade_far_distances[0] == 0.0` is the
+    // "shadows disabled" sentinel; the shadow_visibility helper short-circuits
+    // to fully lit on that.
+    cascade_far_distances: vec4<f32>,
 };
-@group(1) @binding(0) var<uniform> scene: Scene;
+@group(1) @binding(0) var<uniform> scene:           Scene;
+@group(1) @binding(1) var          shadow_map:      texture_depth_2d_array;
+@group(1) @binding(2) var          shadow_sampler:  sampler_comparison;
 
 struct MaterialFactors {
     albedo:    vec4<f32>,
@@ -154,6 +162,42 @@ fn f_schlick(v_dot_h: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(one_minus, 5.0);
 }
 
+// --- Cascaded-shadow-map sampling ----------------------------------------
+//
+// Returns 1.0 = fully lit, 0.0 = fully occluded. Picks the first cascade
+// whose far distance covers the fragment's view-space depth, projects into
+// that cascade's shadow-map clip space, then samples the array layer through
+// the comparison sampler. Three early-out paths fall back to "fully lit":
+//
+// 1. Shadows disabled (`scene.cascade_far_distances[0] == 0.0`).
+// 2. Fragment past every cascade's far depth (very-distant geometry).
+// 3. Projected coords fall outside the [0, 1] UV box for the cascade.
+
+fn shadow_visibility(world_pos: vec3<f32>, view_z: f32) -> f32 {
+    if (scene.cascade_far_distances.x <= 0.0) {
+        return 1.0;
+    }
+    var cascade: i32 = -1;
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        if (view_z < scene.cascade_far_distances[i]) {
+            cascade = i;
+            break;
+        }
+    }
+    if (cascade < 0) {
+        return 1.0;
+    }
+    let light_clip = scene.sun_cascade_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
+    let ndc = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 ||
+        shadow_uv.y < 0.0 || shadow_uv.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, shadow_uv, cascade, ndc.z);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> FsOut {
     let albedo = textureSample(albedo_tex, albedo_sampler, in.uv).rgb
@@ -186,7 +230,16 @@ fn fs_main(in: VsOut) -> FsOut {
     let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     let diffuse = kd * albedo / PI;
 
-    let direct = (diffuse + specular) * scene.sun_color.rgb * n_dot_l;
+    // View-space z = distance from camera along -view-forward. The
+    // camera's forward is the third row of view_proj's view component, but
+    // we don't pass view alone; an equivalent (and simpler) form is
+    // length(world_pos - camera) projected onto the camera-forward axis,
+    // which for the common case of a centered look-at reduces to the
+    // distance from the camera. Distance is the cheap and stable proxy.
+    let view_z = length(in.world_pos - camera.position.xyz);
+    let visibility = shadow_visibility(in.world_pos, view_z);
+
+    let direct = (diffuse + specular) * scene.sun_color.rgb * n_dot_l * visibility;
     let ambient = scene.ambient.rgb * albedo;
 
     var out: FsOut;
