@@ -57,12 +57,16 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 struct Scene {
-    sun_direction: vec4<f32>,
-    sun_color:     vec4<f32>,
-    ambient:       vec4<f32>,
-    sky_color:     vec4<f32>,
+    sun_direction:         vec4<f32>,
+    sun_color:             vec4<f32>,
+    ambient:               vec4<f32>,
+    sky_color:             vec4<f32>,
+    sun_cascade_view_proj: array<mat4x4<f32>, 4>,
+    cascade_far_distances: vec4<f32>,
 };
-@group(1) @binding(0) var<uniform> scene: Scene;
+@group(1) @binding(0) var<uniform> scene:          Scene;
+@group(1) @binding(1) var          shadow_map:     texture_depth_2d_array;
+@group(1) @binding(2) var          shadow_sampler: sampler_comparison;
 
 struct Material {
     tint: vec4<f32>,
@@ -89,11 +93,15 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position)             clip:    vec4<f32>,
-    @location(0)                   n:       vec3<f32>,
-    @location(1)                   color:   vec4<f32>,
+    @builtin(position)             clip:      vec4<f32>,
+    @location(0)                   n:         vec3<f32>,
+    @location(1)                   color:     vec4<f32>,
     // Integer values must be flat-interpolated through vertex→fragment.
-    @location(2) @interpolate(flat) cell_id: u32,
+    @location(2) @interpolate(flat) cell_id:  u32,
+    // World position passed through so the fragment shader can sample
+    // cascaded shadow maps. Terrain has no model matrix — `in.pos` is
+    // already in world space.
+    @location(3)                   world_pos: vec3<f32>,
 };
 
 struct FsOut {
@@ -107,13 +115,44 @@ struct FsOut {
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip    = camera.view_proj * vec4<f32>(in.pos, 1.0);
+    out.clip      = camera.view_proj * vec4<f32>(in.pos, 1.0);
     // Terrain has no model matrix — vertex positions and normals are already
     // in world space, so the normal passes through untouched.
-    out.n       = in.normal;
-    out.color   = in.color * material.tint;
-    out.cell_id = in.cell_id_in_chunk + id_base.base_id;
+    out.n         = in.normal;
+    out.color     = in.color * material.tint;
+    out.cell_id   = in.cell_id_in_chunk + id_base.base_id;
+    out.world_pos = in.pos;
     return out;
+}
+
+// Cascaded-shadow-map sampling — same shape as `pbr.rs` / `pbr_atlas.rs`.
+// Terrain is a receiver only in v1: hills don't cast shadows because
+// terrain meshes aren't recorded in `View::shadow_pass`. Hills + cliffs
+// casting onto lower ground would need a depth-only `TerrainVertex`
+// pipeline, a follow-up.
+fn shadow_visibility(world_pos: vec3<f32>, view_z: f32) -> f32 {
+    if (scene.cascade_far_distances.x <= 0.0) {
+        return 1.0;
+    }
+    var cascade: i32 = -1;
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        if (view_z < scene.cascade_far_distances[i]) {
+            cascade = i;
+            break;
+        }
+    }
+    if (cascade < 0) {
+        return 1.0;
+    }
+    let light_clip = scene.sun_cascade_view_proj[cascade] * vec4<f32>(world_pos, 1.0);
+    let ndc = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    if (shadow_uv.x < 0.0 || shadow_uv.x > 1.0 ||
+        shadow_uv.y < 0.0 || shadow_uv.y > 1.0 ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, shadow_uv, cascade, ndc.z);
 }
 
 @fragment
@@ -121,7 +160,10 @@ fn fs_main(in: VsOut) -> FsOut {
     let n          = normalize(in.n);
     let l          = normalize(scene.sun_direction.xyz);
     let n_dot_l    = max(dot(n, l), 0.0);
-    let lit        = scene.sun_color.rgb * n_dot_l + scene.ambient.rgb;
+    let view_z     = length(in.world_pos - camera.position.xyz);
+    let visibility = shadow_visibility(in.world_pos, view_z);
+    let direct     = scene.sun_color.rgb * n_dot_l * visibility;
+    let lit        = direct + scene.ambient.rgb;
     var out: FsOut;
     out.color  = vec4<f32>(in.color.rgb * lit, in.color.a);
     out.hit_id = in.cell_id;
