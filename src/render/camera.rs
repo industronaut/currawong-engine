@@ -71,6 +71,99 @@ impl Camera {
         let view_inv = self.view_matrix().inverse();
         (view_inv.x_axis.truncate(), view_inv.y_axis.truncate())
     }
+
+    /// View-space depths (positive distances along the camera's forward axis)
+    /// where each of four CSM cascades ends. Cascade `i` covers the
+    /// camera-frustum slice from `splits[i-1]` (or `Camera::near` for `i == 0`)
+    /// to `splits[i]`. `splits[3]` always equals `Camera::far`.
+    ///
+    /// `lambda` blends between *uniform* splits (`0.0`) and *logarithmic*
+    /// splits (`1.0`); `0.75` is the standard "practical" value documented in
+    /// the GPU Gems 3 CSM article — it gives near cascades enough resolution
+    /// without crushing the far ones.
+    pub fn cascade_split_distances(&self, lambda: f32) -> [f32; 4] {
+        let n = self.near;
+        let f = self.far;
+        let ratio = f / n;
+        let mut splits = [0.0; 4];
+        for i in 1..=4usize {
+            let frac = i as f32 / 4.0;
+            let p_log = n * ratio.powf(frac);
+            let p_uniform = n + (f - n) * frac;
+            splits[i - 1] = lambda * p_log + (1.0 - lambda) * p_uniform;
+        }
+        splits
+    }
+
+    /// Fit four orthographic light-space view-projection matrices, one per
+    /// CSM cascade, each containing the camera-frustum slice it's
+    /// responsible for. The matrices map world-space positions into wgpu
+    /// clip space (xy ∈ [-1, 1], z ∈ [0, 1]) and are stored straight into
+    /// the scene uniform for lit shaders to sample.
+    ///
+    /// `sun_direction` is a unit vector pointing *from the world toward the
+    /// sun* — same convention as
+    /// [`ViewEnvironment::sun_direction`](super::environment::ViewEnvironment::sun_direction).
+    /// `splits` is the output of [`Camera::cascade_split_distances`].
+    ///
+    /// Texel-grid snapping (to eliminate edge shimmer under camera motion) is
+    /// a future-direction refinement; this routine performs a clean ortho
+    /// fit only.
+    pub fn fit_shadow_cascades(&self, sun_direction: Vec3, splits: [f32; 4]) -> [Mat4; 4] {
+        let view_inv = self.view_matrix().inverse();
+        let tan_half_fov = (self.fov_y_radians * 0.5).tan();
+        // Sun-direction can be aligned with world up (Z). Pick a non-parallel
+        // up vector to avoid look_at_rh degeneracy.
+        let up = if sun_direction.z.abs() > 0.9 {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        };
+
+        std::array::from_fn(|i| {
+            let near_d = if i == 0 { self.near } else { splits[i - 1] };
+            let far_d = splits[i];
+
+            let half_h_n = near_d * tan_half_fov;
+            let half_w_n = half_h_n * self.aspect;
+            let half_h_f = far_d * tan_half_fov;
+            let half_w_f = half_h_f * self.aspect;
+
+            // Eight slice corners in view space (camera looks down -Z in RH
+            // view space, so z is negative).
+            let corners_view = [
+                Vec3::new(-half_w_n, -half_h_n, -near_d),
+                Vec3::new(half_w_n, -half_h_n, -near_d),
+                Vec3::new(-half_w_n, half_h_n, -near_d),
+                Vec3::new(half_w_n, half_h_n, -near_d),
+                Vec3::new(-half_w_f, -half_h_f, -far_d),
+                Vec3::new(half_w_f, -half_h_f, -far_d),
+                Vec3::new(-half_w_f, half_h_f, -far_d),
+                Vec3::new(half_w_f, half_h_f, -far_d),
+            ];
+
+            let corners_world: [Vec3; 8] =
+                std::array::from_fn(|k| view_inv.transform_point3(corners_view[k]));
+
+            let focus = corners_world.iter().copied().sum::<Vec3>() / 8.0;
+            let light_view = Mat4::look_at_rh(focus + sun_direction, focus, up);
+
+            let mut min = Vec3::splat(f32::INFINITY);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for p_w in &corners_world {
+                let p_l = light_view.transform_point3(*p_w);
+                min = min.min(p_l);
+                max = max.max(p_l);
+            }
+
+            // glam orthographic_rh maps view-space z in [-near, -far] to NDC
+            // z [0, 1]. Light-space z is negative in front of the eye; the
+            // nearest corner has the *largest* z (least negative), so
+            // ortho-near = -max.z and ortho-far = -min.z.
+            let ortho = Mat4::orthographic_rh(min.x, max.x, min.y, max.y, -max.z, -min.z);
+            ortho * light_view
+        })
+    }
 }
 
 /// Engine-standard camera uniform layout — view-projection matrix, the
@@ -179,5 +272,122 @@ impl CameraBinding {
     /// The bind group, for `pass.set_bind_group(N, ..., &[])` each frame.
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_camera() -> Camera {
+        Camera {
+            position: Vec3::new(10.0, -10.0, 5.0),
+            target: Vec3::ZERO,
+            up: Vec3::Z,
+            fov_y_radians: 60_f32.to_radians(),
+            aspect: 16.0 / 9.0,
+            near: 0.1,
+            far: 100.0,
+            zone: None,
+        }
+    }
+
+    fn slice_corners_world(camera: &Camera, near_d: f32, far_d: f32) -> [Vec3; 8] {
+        let view_inv = camera.view_matrix().inverse();
+        let tan_half_fov = (camera.fov_y_radians * 0.5).tan();
+        let half_h_n = near_d * tan_half_fov;
+        let half_w_n = half_h_n * camera.aspect;
+        let half_h_f = far_d * tan_half_fov;
+        let half_w_f = half_h_f * camera.aspect;
+        let corners_view = [
+            Vec3::new(-half_w_n, -half_h_n, -near_d),
+            Vec3::new(half_w_n, -half_h_n, -near_d),
+            Vec3::new(-half_w_n, half_h_n, -near_d),
+            Vec3::new(half_w_n, half_h_n, -near_d),
+            Vec3::new(-half_w_f, -half_h_f, -far_d),
+            Vec3::new(half_w_f, -half_h_f, -far_d),
+            Vec3::new(-half_w_f, half_h_f, -far_d),
+            Vec3::new(half_w_f, half_h_f, -far_d),
+        ];
+        std::array::from_fn(|i| view_inv.transform_point3(corners_view[i]))
+    }
+
+    #[test]
+    fn cascade_split_distances_endpoints_and_monotonic() {
+        let camera = test_camera();
+        let splits = camera.cascade_split_distances(0.75);
+        assert!((splits[3] - camera.far).abs() < 1e-3);
+        for i in 1..4 {
+            assert!(
+                splits[i] > splits[i - 1],
+                "splits not monotonically increasing: {:?}",
+                splits
+            );
+        }
+        for s in splits {
+            assert!(s >= camera.near - 1e-3 && s <= camera.far + 1e-3);
+        }
+    }
+
+    #[test]
+    fn cascade_splits_uniform_at_lambda_zero() {
+        let camera = test_camera();
+        let splits = camera.cascade_split_distances(0.0);
+        // At lambda=0 splits are pure uniform spacing.
+        let step = (camera.far - camera.near) / 4.0;
+        for (i, s) in splits.iter().enumerate() {
+            let expected = camera.near + step * (i + 1) as f32;
+            assert!((s - expected).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn fit_shadow_cascades_contains_frustum_corners() {
+        let camera = test_camera();
+        let sun = Vec3::new(0.3, -0.2, 0.9).normalize();
+        let splits = camera.cascade_split_distances(0.75);
+        let mats = camera.fit_shadow_cascades(sun, splits);
+
+        for i in 0..4 {
+            let near_d = if i == 0 { camera.near } else { splits[i - 1] };
+            let far_d = splits[i];
+            let corners_world = slice_corners_world(&camera, near_d, far_d);
+
+            for c_world in corners_world {
+                let clip = mats[i] * c_world.extend(1.0);
+                let ndc = clip.truncate() / clip.w;
+                let eps = 1e-3;
+                assert!(
+                    ndc.x >= -1.0 - eps && ndc.x <= 1.0 + eps,
+                    "cascade {} ndc.x = {}",
+                    i,
+                    ndc.x
+                );
+                assert!(
+                    ndc.y >= -1.0 - eps && ndc.y <= 1.0 + eps,
+                    "cascade {} ndc.y = {}",
+                    i,
+                    ndc.y
+                );
+                assert!(
+                    ndc.z >= -eps && ndc.z <= 1.0 + eps,
+                    "cascade {} ndc.z = {}",
+                    i,
+                    ndc.z
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fit_shadow_cascades_handles_vertical_sun() {
+        // Sun straight overhead — exercises the up-vector fallback branch.
+        let camera = test_camera();
+        let sun = Vec3::Z;
+        let splits = camera.cascade_split_distances(0.75);
+        let mats = camera.fit_shadow_cascades(sun, splits);
+        for (i, m) in mats.iter().enumerate() {
+            assert!(m.is_finite(), "cascade {} matrix not finite", i);
+        }
     }
 }
