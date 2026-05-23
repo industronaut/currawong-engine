@@ -48,13 +48,13 @@ use currawong::data::{Definitions, KindId, VfsPath};
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, FlatTopsMesher, Frustum,
-    HitTarget, InstanceBuckets, MaterialId, MaterialRegistry, MeshInstanceAttribs, MeshTemplate,
-    OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrMaterial,
-    PbrMaterialInstance, RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec,
-    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline, SunCascades,
-    TerrainMaterial, TerrainMaterialInstance, TerrainRenderer, TextureColorSpace, View, ViewConfig,
-    ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId, egui, sun_direction_for, wgpu, winit,
-    yakui,
+    HitTarget, InstanceBuckets, MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs,
+    MeshTemplate, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams,
+    PbrAtlasMaterials, PbrMaterial, PbrMaterialInstance, RenderObjectTraversal, RenderProxies,
+    RenderRegistry, RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
+    ShadowMeshPipeline, SunCascades, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer,
+    TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId,
+    egui, sun_direction_for, wgpu, winit, yakui,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -65,15 +65,6 @@ use crate::sim::{Command, Game, GameState, HEIGHT_UNIT, TILE_SIZE, TIME_LIMIT_SE
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// Which mesh pipeline is currently bound to the pass. Tracked across
-/// the per-primitive loop in [`LumberCampView::render`] so we only call
-/// `set_pipeline` on transitions, not per draw.
-#[derive(PartialEq, Eq)]
-enum ActivePipeline {
-    None,
-    Pbr,
-    Atlas,
-}
 const MAX_INSTANCES_PER_PART: u32 = 64;
 /// 30 frames matches CLAUDE.md's hysteresis recommendation — enough to
 /// hide pop-out at grazing camera angles around the orbit rig.
@@ -572,20 +563,14 @@ impl View for LumberCampView {
         // *not* drawn here: it's the main shadow receiver, not a caster
         // in v1. Hills + cliffs casting would need a depth-only
         // `TerrainVertex` pipeline; deferred.
-        pass.set_pipeline(self.shadow_pipeline.pipeline());
-        for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
-            let Some(template) = self.mesh_templates.get(part_key) else {
-                continue;
-            };
-            let resolved = template.resolve(&self.asset_server);
-            pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            for prim in resolved.primitives {
-                pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
-                pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..prim.index_count, 0, 0..count);
-                renderer.record_draw(count);
-            }
-        }
+        MeshDraw::depth_only(
+            pass,
+            renderer,
+            &self.asset_server,
+            &self.shadow_pipeline,
+            &self.mesh_templates,
+            &self.buckets,
+        );
     }
 
     fn render(
@@ -625,59 +610,26 @@ impl View for LumberCampView {
         self.terrain
             .draw_solid(pass, renderer, sim.zone, &self.terrain_solid);
 
-        // Mesh parts: one indexed-instanced call per primitive, resolving
-        // the mesh buffers fresh each draw (cheap — HashMap lookup +
-        // Handle::peek). Camera + scene bind groups (0 + 1) are shared
-        // across both PBR pipelines since both declare the same first two
-        // bind-group layouts; the per-primitive switch only touches the
-        // pipeline + bind group 2 when a primitive's `material_name`
-        // resolves to a registered atlas-material instance.
+        // Mesh parts: one indexed-instanced call per primitive. The atlas
+        // dispatch + PBR/atlas pipeline-switching loop is the same shape
+        // every kind→template view needs, so the engine helper owns it;
+        // we just pass the registries and the buckets. Camera + scene
+        // bind groups (0 + 1) carry across both PBR pipelines so the
+        // helper only has to touch bind group 2.
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        // Track the currently-bound pipeline so we only call set_pipeline
-        // on the transition. ActivePipeline::None forces a bind on the
-        // first draw of the frame.
-        let mut active = ActivePipeline::None;
-        for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
-            let Some(template) = self.mesh_templates.get(part_key) else {
-                continue;
-            };
-            let resolved = template.resolve(&self.asset_server);
-            pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            // Lumber camp's existing assets are mostly single-primitive,
-            // but post-#80 every glb produces a `Vec<MeshPrimitive>` and
-            // each primitive carries its own `material_name`. Dispatch
-            // per primitive so a multi-material glb (lumber camp body
-            // uses the "Lumber" atlas; ancillary primitives could fall
-            // back to the streamed PBR material) draws through the right
-            // pipeline + bind group 2 for each piece.
-            for prim in resolved.primitives {
-                let atlas = prim
-                    .material_name
-                    .as_deref()
-                    .and_then(|name| self.atlas_materials.get_by_name(name));
-                match atlas {
-                    Some(instance) => {
-                        if active != ActivePipeline::Atlas {
-                            pass.set_pipeline(self.atlas_material.pipeline());
-                            active = ActivePipeline::Atlas;
-                        }
-                        pass.set_bind_group(2, instance.bind_group(), &[]);
-                    }
-                    None => {
-                        if active != ActivePipeline::Pbr {
-                            pass.set_pipeline(self.material.pipeline());
-                            active = ActivePipeline::Pbr;
-                        }
-                        pass.set_bind_group(2, template.material.bind_group(), &[]);
-                    }
-                }
-                pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
-                pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..prim.index_count, 0, 0..count);
-                renderer.record_draw(count);
-            }
-        }
+        MeshDraw::pbr_with_atlas(
+            pass,
+            renderer,
+            &self.asset_server,
+            PbrAtlasMaterials {
+                pbr: &self.material,
+                atlas: &self.atlas_material,
+                atlas_instances: &self.atlas_materials,
+            },
+            &self.mesh_templates,
+            &self.buckets,
+        );
     }
 
     fn input(

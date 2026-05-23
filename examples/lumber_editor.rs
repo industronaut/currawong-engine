@@ -37,13 +37,13 @@ use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
 use currawong::glam::{Mat4, UVec2, Vec2, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, Frustum, Handle,
-    InstanceBuckets, MaterialId, MaterialRegistry, MeshInstanceAttribs, MeshTemplate, OrbitRig,
-    PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrMaterial,
-    PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh, RenderObjectTraversal, RenderProxies,
-    RenderRegistry, RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
-    ShadowMeshPipeline, SimPos, SimUnit, Simulation, SunCascades, Texture, TextureColorSpace, View,
-    ViewConfig, ViewEnvironment, WorldObjectId, WorldTransform, Zone, ZoneId, Zones, egui,
-    pollster, wgpu, winit,
+    InstanceBuckets, MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs, MeshTemplate,
+    OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams,
+    PbrAtlasMaterials, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
+    RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec, RenderTemplate, Renderer,
+    SamplerKind, SamplerRegistry, ShadowMeshPipeline, SimPos, SimUnit, Simulation, SunCascades,
+    Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldObjectId, WorldTransform,
+    Zone, ZoneId, Zones, egui, pollster, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -143,16 +143,6 @@ const MAX_INSTANCES_PER_PART: u32 = 4;
 
 /// `PartKey` collapses to `KindId`: each kind is exactly one body part.
 type Templates = RenderRegistry<KindId, KindId, KindId>;
-
-/// Whether the PBR-or-atlas pipeline is currently bound, tracked across the
-/// draw loop so we only flip on transitions (same pattern as lumber_camp).
-/// `None` isn't needed: the ground plane draws first with the PBR pipeline,
-/// so the kind-body loop starts already in [`Self::Pbr`].
-#[derive(PartialEq, Eq)]
-enum ActivePipeline {
-    Pbr,
-    Atlas,
-}
 
 struct LumberEditorView {
     camera: Camera,
@@ -491,20 +481,14 @@ impl View for LumberEditorView {
         // Depth-only pass against the bucket contents cascade 0 populated.
         // The ground plane is the shadow *receiver* — deliberately not
         // drawn here, so it doesn't shadow itself.
-        pass.set_pipeline(self.shadow_pipeline.pipeline());
-        for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
-            let Some(template) = self.mesh_templates.get(part_key) else {
-                continue;
-            };
-            let resolved = template.resolve(&self.asset_server);
-            pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            for prim in resolved.primitives {
-                pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
-                pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..prim.index_count, 0, 0..count);
-                renderer.record_draw(count);
-            }
-        }
+        MeshDraw::depth_only(
+            pass,
+            renderer,
+            &self.asset_server,
+            &self.shadow_pipeline,
+            &self.mesh_templates,
+            &self.buckets,
+        );
     }
 
     fn render(
@@ -544,40 +528,18 @@ impl View for LumberEditorView {
         pass.draw_indexed(0..self.ground.index_count, 0, 0..1);
         renderer.record_draw(1);
 
-        let mut active = ActivePipeline::Pbr;
-        for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
-            let Some(template) = self.mesh_templates.get(part_key) else {
-                continue;
-            };
-            let resolved = template.resolve(&self.asset_server);
-            pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            for prim in resolved.primitives {
-                let atlas = prim
-                    .material_name
-                    .as_deref()
-                    .and_then(|name| self.atlas_materials.get_by_name(name));
-                match atlas {
-                    Some(instance) => {
-                        if active != ActivePipeline::Atlas {
-                            pass.set_pipeline(self.atlas_material.pipeline());
-                            active = ActivePipeline::Atlas;
-                        }
-                        pass.set_bind_group(2, instance.bind_group(), &[]);
-                    }
-                    None => {
-                        if active != ActivePipeline::Pbr {
-                            pass.set_pipeline(self.material.pipeline());
-                            active = ActivePipeline::Pbr;
-                        }
-                        pass.set_bind_group(2, template.material.bind_group(), &[]);
-                    }
-                }
-                pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
-                pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..prim.index_count, 0, 0..count);
-                renderer.record_draw(count);
-            }
-        }
+        MeshDraw::pbr_with_atlas(
+            pass,
+            renderer,
+            &self.asset_server,
+            PbrAtlasMaterials {
+                pbr: &self.material,
+                atlas: &self.atlas_material,
+                atlas_instances: &self.atlas_materials,
+            },
+            &self.mesh_templates,
+            &self.buckets,
+        );
     }
 }
 

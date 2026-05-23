@@ -85,6 +85,7 @@ mod instance;
 mod material;
 mod material_registry;
 mod mesh;
+mod mesh_draw;
 mod mesh_primitives;
 mod mesh_template;
 mod pbr;
@@ -127,6 +128,7 @@ pub use material_registry::{MaterialId, MaterialIdError, MaterialRegistry};
 pub use mesh::{
     DecodedMesh, DecodedPrimitive, Mesh, MeshLoadError, MeshPrimitive, decode_gltf_mesh,
 };
+pub use mesh_draw::{MeshDraw, PbrAtlasMaterials};
 pub use mesh_primitives::PrimitiveMesh;
 pub use mesh_template::{InlineTemplate, MeshBacking, MeshTemplate, RenderSpec};
 pub use pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
