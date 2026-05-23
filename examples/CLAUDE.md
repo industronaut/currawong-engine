@@ -45,9 +45,10 @@ in-game restart.
 debug overlays. Started life as a glb/texture viewer (#120); now also the
 visualisation surface for kind metadata. Current state:
 
-- **Kind list + auto-framing.** Left egui panel lists every kind with a
-  `render` block; selecting one swaps the displayed object and re-frames
-  the orbit camera to that kind's `bounds_min`/`bounds_max` AABB.
+- **Kind dropdown + auto-framing.** Left egui panel has an `egui::ComboBox`
+  over every kind with a `render` block; selecting one swaps the displayed
+  object and re-frames the orbit camera to that kind's
+  `bounds_min`/`bounds_max` AABB.
 - **Checkerboard ground + shadows** (#121). Same `ShadowMeshPipeline` /
   `SunCascades` as `lumber_camp`; the ground plane is a procedural
   `Texture` baked at init.
@@ -56,6 +57,9 @@ visualisation surface for kind metadata. Current state:
 - **Green interaction-tiles overlay** (#124). One fat-line square per tile
   in `Interaction::tiles(transform)`. Kinds whose def omits `interaction:`
   parse to `Interaction::None` and draw zero tiles.
+- **Visibility checkboxes** in the same left panel toggle the main item
+  mesh (and its shadow), the bounding-box overlay, and the
+  interaction-tiles overlay independently.
 
 Sim is one zone with one object at the origin; sole mutation is
 `Command::SelectKind`. `Game::render_specs` and `Game::interactions` cache
