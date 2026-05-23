@@ -31,6 +31,14 @@
 //! - [`emitter`] — declarative emitter reconciliation + particle integration.
 //! - [`render_object`] — render-object templates + registry (mesh + emitter parts).
 //! - [`render_object_traversal`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
+//! - [`line_material`] — unlit `LineList`-topology material for debug
+//!   gizmos (bounding boxes, axis overlays). Parallel in shape to
+//!   [`material::UnlitColoredMaterial`]. Fixed 1 px width; cheaper than
+//!   [`fat_line_material`] for dense overlays where stylization isn't needed.
+//! - [`fat_line_material`] — quad-expanded thick lines with screen-space
+//!   pixel width. The right tool when line width matters visually
+//!   (bounding boxes at viewing distance, gameplay overlays). Slightly
+//!   more expensive per segment than [`line_material`].
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
 //! - [`material_registry`] — name-keyed [`MaterialRegistry`] resolving glb material
 //!   slot names to [`PbrMaterialInstance`]s (or any other instance type).
@@ -69,6 +77,7 @@ mod cell_highlight;
 mod debug_ui;
 mod emitter;
 mod environment;
+mod fat_line_material;
 mod frame_stats;
 mod frame_timings;
 #[cfg(feature = "yakui")]
@@ -82,6 +91,7 @@ mod game_ui;
 mod gpu_profiler;
 mod handle;
 mod instance;
+mod line_material;
 mod material;
 mod material_registry;
 mod mesh;
@@ -116,10 +126,15 @@ pub use camera_rig::{OrbitRig, OrbitRigConfig};
 pub use cell_highlight::CellHighlight;
 pub use emitter::{EmitterReconciler, EmitterTemplate, Particle, ParticleLifecycle};
 pub use environment::{SceneEnvironmentBinding, SunCascades, ViewEnvironment};
+pub use fat_line_material::{
+    FatLineMaterial, FatLineMaterialInstance, FatLineMaterialParams, FatLineVertex,
+    unit_cube_fat_line_geometry,
+};
 pub use frame_stats::FrameStats;
 pub use frame_timings::{FrameTimings, GpuSegments};
 pub use handle::{Handle, HandleError, HandleState};
 pub use instance::{InstanceBuckets, mat4_instance_attributes, u32_id_instance_attribute};
+pub use line_material::{LineMaterial, LineMaterialInstance, unit_cube_line_geometry};
 pub use material::{
     MaterialInstanceRegistry, MeshInstanceAttribs, MeshMaterial, UnlitColoredInstance,
     UnlitColoredMaterial,
