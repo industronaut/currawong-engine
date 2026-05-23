@@ -20,6 +20,8 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
+use glam::Mat4;
+
 use super::asset_server::AssetServer;
 use super::instance::InstanceBuckets;
 use super::material::MeshInstanceAttribs;
@@ -29,6 +31,7 @@ use super::pbr::{PbrMaterial, PbrMaterialInstance};
 use super::pbr_atlas::{PbrAtlasMaterial, PbrAtlasMaterialInstance};
 use super::renderer::Renderer;
 use super::shadow::ShadowMeshPipeline;
+use super::texture::SamplerRegistry;
 
 /// Which pipeline is currently bound across the per-primitive draw loop in
 /// [`MeshDraw::pbr_with_atlas`]. `None` forces a bind on the first draw of
@@ -55,6 +58,51 @@ pub struct PbrAtlasMaterials<'a> {
 pub struct MeshDraw;
 
 impl MeshDraw {
+    /// Reconcile every template's [`PbrMaterialInstance`] and every atlas
+    /// instance in `atlas_instances` with the [`AssetServer`]'s current
+    /// handle state, and cache each template's resolved fallback
+    /// adjustment as a `K → Mat4` map.
+    ///
+    /// Refresh is a no-op when nothing changed; on the frame a streamed
+    /// texture transitions Loading → Ready (or the debug
+    /// [`AssetServer::set_force_loading`](super::AssetServer::set_force_loading)
+    /// toggle flips), the affected bind group is rebuilt against the new
+    /// view. Returned adjustments map each part key to the
+    /// [`MeshTemplate::resolve`]-derived fallback adjustment the extract
+    /// step composes into the per-instance world transform —
+    /// `world * adjustments[part.mesh]`.
+    ///
+    /// Call once per frame after [`RenderObjectTraversal::declare_and_cull`](super::RenderObjectTraversal::declare_and_cull)
+    /// and before the extract walk. The returned map's `K` is the same
+    /// part-key the extract closure pushes into the buckets.
+    pub fn refresh_pbr_atlas_materials<K>(
+        renderer: &Renderer,
+        asset_server: &AssetServer,
+        samplers: &SamplerRegistry,
+        pbr: &PbrMaterial,
+        atlas: &PbrAtlasMaterial,
+        atlas_instances: &mut MaterialRegistry<PbrAtlasMaterialInstance>,
+        mesh_templates: &mut HashMap<K, MeshTemplate<PbrMaterialInstance>>,
+    ) -> HashMap<K, Mat4>
+    where
+        K: Clone + Eq + Hash,
+    {
+        let mut adjustments: HashMap<K, Mat4> = HashMap::with_capacity(mesh_templates.len());
+        for (key, template) in mesh_templates.iter_mut() {
+            template
+                .material
+                .refresh(renderer, pbr, samplers, asset_server);
+            adjustments.insert(
+                key.clone(),
+                template.resolve(asset_server).fallback_adjustment,
+            );
+        }
+        for (_, instance) in atlas_instances.iter_mut() {
+            instance.refresh(renderer, atlas, samplers, asset_server);
+        }
+        adjustments
+    }
+
     /// Issue one indexed-instanced draw per primitive across every filled
     /// bucket, dispatching each primitive between the PBR pipeline and the
     /// stylized atlas pipeline by its `material_name`.

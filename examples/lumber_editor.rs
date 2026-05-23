@@ -427,30 +427,25 @@ impl View for LumberEditorView {
                 &frustum,
             );
 
-            let asset_server = &self.asset_server;
-            let material = &self.material;
-            let atlas_material = &self.atlas_material;
-            let samplers = &self.samplers;
-            let mut adjustments: HashMap<KindId, Mat4> = HashMap::new();
-            for (key, template) in &mut self.mesh_templates {
-                template
-                    .material
-                    .refresh(renderer, material, samplers, asset_server);
-                adjustments.insert(
-                    key.clone(),
-                    template.resolve(asset_server).fallback_adjustment,
-                );
-            }
-            for (_, instance) in self.atlas_materials.iter_mut() {
-                instance.refresh(renderer, atlas_material, samplers, asset_server);
-            }
+            let adjustments = MeshDraw::refresh_pbr_atlas_materials(
+                renderer,
+                &self.asset_server,
+                &self.samplers,
+                &self.material,
+                &self.atlas_material,
+                &mut self.atlas_materials,
+                &mut self.mesh_templates,
+            );
             // Ground material refreshed alongside the body materials so a
             // late-arriving texture (the checker is `Handle::ready` today,
             // but future debug-toggle paths might force-loading it) flips
             // through the same once-per-frame hook.
-            self.ground
-                .material
-                .refresh(renderer, material, samplers, asset_server);
+            self.ground.material.refresh(
+                renderer,
+                &self.material,
+                &self.samplers,
+                &self.asset_server,
+            );
 
             // No sim→view per-part state for the editor; the engine already
             // wrote `world_xform`.

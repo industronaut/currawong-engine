@@ -491,23 +491,15 @@ impl View for LumberCampView {
             // fallback adjustments. Material `refresh` is cheap when nothing
             // changed; on the frame a streamed texture transitions Loading →
             // Ready the bind group is rebuilt against the real view.
-            let asset_server = &self.asset_server;
-            let material = &self.material;
-            let atlas_material = &self.atlas_material;
-            let samplers = &self.samplers;
-            let mut adjustments: HashMap<PartKey, Mat4> = HashMap::new();
-            for (key, template) in &mut self.mesh_templates {
-                template
-                    .material
-                    .refresh(renderer, material, samplers, asset_server);
-                adjustments.insert(
-                    key.clone(),
-                    template.resolve(asset_server).fallback_adjustment,
-                );
-            }
-            for (_, instance) in self.atlas_materials.iter_mut() {
-                instance.refresh(renderer, atlas_material, samplers, asset_server);
-            }
+            let adjustments = MeshDraw::refresh_pbr_atlas_materials(
+                renderer,
+                &self.asset_server,
+                &self.samplers,
+                &self.material,
+                &self.atlas_material,
+                &mut self.atlas_materials,
+                &mut self.mesh_templates,
+            );
 
             // Phase 1.7: the single sim→view translation seam.
             let pawn = &self.pawn;
