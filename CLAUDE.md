@@ -34,6 +34,8 @@ cargo run --example headless --no-default-features   # proves headless excludes 
 
 A successful build under `--no-default-features` is the primary architectural test — it proves the simulation layer compiles without any rendering dependencies.
 
+Per-example state (what `lumber_camp` and `lumber_editor` currently demonstrate, plus a short index of the others) lives in [`examples/CLAUDE.md`](examples/CLAUDE.md) — auto-loaded when working under that directory.
+
 ## Setup
 
 Activate the in-repo git hooks once per clone:
@@ -122,12 +124,14 @@ Drawable content is organised view-side into **render objects** — templates an
 - *Material instance* — a bind group + uniform buffer bound to a template, cached or per-frame.
 - *Per-instance attributes* — model matrix, tint, anything varying per drawn copy, packed into the instance buffer (the existing `mat4_instance_attributes` helper is the right shape).
 
-Four materials exist today, with a thin shared `MeshMaterial` trait (associated `Instance` type + `pipeline()` accessor; one accessor only, generic draw helpers land when a call site needs them):
+Six materials exist today, with a thin shared `MeshMaterial` trait (associated `Instance` type + `pipeline()` accessor; one accessor only, generic draw helpers land when a call site needs them):
 
 - `UnlitColoredMaterial` — position-only vertex, no lighting; the minimal template/instance/per-instance-attrib reference.
 - `PbrMaterial` — metallic-roughness, single directional light, albedo texture + scalar metallic/roughness; Cook-Torrance specular + Lambertian diffuse.
 - `PbrAtlasMaterial` — stylized PBR variant that reads albedo + metallic/roughness/emissive from two shared atlas textures and resolves a per-instance atlas tile from a glb material slot; paired with `MaterialRegistry` (name-keyed `MaterialId` lookup, `namespace:name` grammar matching `KindId`, magenta-style fallback on miss).
 - `TerrainMaterial` — opaque + transparent terrain pipelines over the canonical `TerrainVertex`. Not a `MeshMaterial` impl because it doesn't take the standard mesh-instance attribute layout.
+- `LineMaterial` — LineList topology, no lighting; 1 px debug gizmos where the per-segment overhead of fat lines isn't worth it.
+- `FatLineMaterial` — screen-space-pixel-width lines via per-segment quad expansion in the vertex shader. The right tool when line width is part of the visual (wgpu has no `lineWidth` knob beyond 1.0). Used today for the `lumber_editor` visual-bounds + interaction-tiles overlays.
 
 Materials are not subclassed by what they draw beyond that mesh/terrain split — the contract with mesh geometry is the `MeshInstanceAttribs` layout, declared once and shared.
 
