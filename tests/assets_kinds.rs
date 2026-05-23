@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
-use currawong::Interaction;
 use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
+use currawong::{Footprint, Interaction};
 
 /// Single-threaded executor for driving `Definitions::load` to completion.
 /// `pollster` is render-feature-gated, so duplicate the tiny stand-in here
@@ -107,4 +107,32 @@ fn lumberjack_has_no_interaction() {
     let def = defs.get(&kind("currawong:lumberjack")).unwrap();
     let interaction = Interaction::from_def(def).unwrap();
     assert_eq!(interaction, Interaction::None);
+}
+
+#[test]
+fn lumber_camp_declares_two_by_two_footprint() {
+    let defs = load_assets();
+    let def = defs.get(&kind("currawong:lumber_camp")).unwrap();
+    let footprint = Footprint::from_def(def).unwrap();
+    assert_eq!(footprint, Footprint(vec![(0, 0), (1, 0), (0, 1), (1, 1)]));
+}
+
+#[test]
+fn trees_declare_single_tile_footprint() {
+    let defs = load_assets();
+    for id in ["currawong:oak_tree", "currawong:pine_tree"] {
+        let def = defs.get(&kind(id)).unwrap();
+        let footprint = Footprint::from_def(def).unwrap();
+        assert_eq!(footprint, Footprint(vec![(0, 0)]), "{id} footprint");
+    }
+}
+
+#[test]
+fn lumberjack_has_no_footprint() {
+    // Pawns aren't placed on the grid — the implicit-default empty-footprint
+    // path (no `footprint:` field in the def).
+    let defs = load_assets();
+    let def = defs.get(&kind("currawong:lumberjack")).unwrap();
+    let footprint = Footprint::from_def(def).unwrap();
+    assert!(footprint.is_empty());
 }
