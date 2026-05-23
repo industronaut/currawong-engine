@@ -31,6 +31,9 @@
 //! - [`emitter`] — declarative emitter reconciliation + particle integration.
 //! - [`render_object`] — render-object templates + registry (mesh + emitter parts).
 //! - [`render_object_traversal`] — engine-driven per-frame walk: sim → declare → cull → fan-out.
+//! - [`line_material`] — unlit `LineList`-topology material for debug
+//!   gizmos (bounding boxes, axis overlays). Parallel in shape to
+//!   [`material::UnlitColoredMaterial`].
 //! - [`material`] — material template/instance/per-instance-attribs primitives.
 //! - [`material_registry`] — name-keyed [`MaterialRegistry`] resolving glb material
 //!   slot names to [`PbrMaterialInstance`]s (or any other instance type).
@@ -82,6 +85,7 @@ mod game_ui;
 mod gpu_profiler;
 mod handle;
 mod instance;
+mod line_material;
 mod material;
 mod material_registry;
 mod mesh;
@@ -120,6 +124,7 @@ pub use frame_stats::FrameStats;
 pub use frame_timings::{FrameTimings, GpuSegments};
 pub use handle::{Handle, HandleError, HandleState};
 pub use instance::{InstanceBuckets, mat4_instance_attributes, u32_id_instance_attribute};
+pub use line_material::{LineMaterial, LineMaterialInstance, unit_cube_line_geometry};
 pub use material::{
     MaterialInstanceRegistry, MeshInstanceAttribs, MeshMaterial, UnlitColoredInstance,
     UnlitColoredMaterial,
