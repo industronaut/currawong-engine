@@ -27,6 +27,8 @@
 //!   mutations reach the simulation (input handlers, UI, scripts).
 //! - [`environment`] — sim-side environment state (time of day) + the trivial
 //!   sun-direction model.
+//! - [`interaction`] — [`Interaction`]: where pawns stand to interact with
+//!   an object; authored on kind defs, consumed by pathing.
 //! - [`rng`] — [`SimRng`], the single seeded sim PRNG.
 //!
 //! Submodules are private; their public types are re-exported here so callers
@@ -40,6 +42,7 @@ mod components;
 mod environment;
 mod facing;
 mod grid;
+mod interaction;
 mod rng;
 mod slot_map;
 mod terrain;
@@ -52,6 +55,7 @@ pub use components::Components;
 pub use environment::{SimEnvironment, sun_direction_for};
 pub use facing::Facing;
 pub use grid::{Grid, HexGrid, SquareGrid};
+pub use interaction::Interaction;
 pub use rng::SimRng;
 pub use slot_map::{SlotKey, SlotMap};
 pub use terrain::{CHUNK_SIZE, Chunk, ChunkCoord, Liquid, LiquidId, Terrain, Tile, TileCoord};
