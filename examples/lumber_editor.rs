@@ -34,14 +34,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
-use currawong::glam::{Mat4, Vec3, Vec4};
+use currawong::glam::{Mat4, UVec2, Vec2, Vec3, Vec4};
 use currawong::{
-    AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, Frustum, InstanceBuckets,
-    MaterialId, MaterialRegistry, MeshInstanceAttribs, MeshTemplate, OrbitRig, PbrAtlasMaterial,
-    PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrMaterial, PbrMaterialInstance,
-    RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec, RenderTemplate, Renderer,
-    SamplerKind, SamplerRegistry, SimPos, SimUnit, Simulation, SunCascades, TextureColorSpace,
-    View, ViewConfig, ViewEnvironment, WorldObjectId, WorldTransform, Zone, ZoneId, Zones, egui,
+    AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, Frustum, Handle,
+    InstanceBuckets, MaterialId, MaterialRegistry, MeshInstanceAttribs, MeshTemplate, OrbitRig,
+    PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrMaterial,
+    PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh, RenderObjectTraversal, RenderProxies,
+    RenderRegistry, RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
+    ShadowMeshPipeline, SimPos, SimUnit, Simulation, SunCascades, Texture, TextureColorSpace, View,
+    ViewConfig, ViewEnvironment, WorldObjectId, WorldTransform, Zone, ZoneId, Zones, egui,
     pollster, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
@@ -145,9 +146,10 @@ type Templates = RenderRegistry<KindId, KindId, KindId>;
 
 /// Whether the PBR-or-atlas pipeline is currently bound, tracked across the
 /// draw loop so we only flip on transitions (same pattern as lumber_camp).
+/// `None` isn't needed: the ground plane draws first with the PBR pipeline,
+/// so the kind-body loop starts already in [`Self::Pbr`].
 #[derive(PartialEq, Eq)]
 enum ActivePipeline {
-    None,
     Pbr,
     Atlas,
 }
@@ -168,9 +170,31 @@ struct LumberEditorView {
     proxies: RenderProxies<KindId>,
     buckets: InstanceBuckets<KindId, MeshInstanceAttribs>,
 
+    /// Depth-only pipeline for the four cascade shadow passes per frame.
+    /// Shares the canonical `PosNormalUv` + `MeshInstanceAttribs` layout, so
+    /// the same instance buckets we draw in `render` are re-bound under the
+    /// depth-only pipeline.
+    shadow_pipeline: ShadowMeshPipeline,
+
+    /// Static checkerboard ground plane that catches the kind's shadow.
+    /// Single fixed-instance draw issued at the top of `render`; not part of
+    /// the proxy/template pipeline because it isn't tied to a sim object.
+    ground: GroundPlane,
+
     /// Previous frame's selection; auto-frame fires when this differs from
     /// the sim's current `KindId` component on `subject`.
     last_selected: Option<KindId>,
+}
+
+/// GPU resources for the editor's static checkerboard floor. One quad, one
+/// instance, one PBR material — sized large enough to fill the camera for
+/// every kind, so its model matrix is identity and never updates.
+struct GroundPlane {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    instance_buffer: wgpu::Buffer,
+    material: PbrMaterialInstance,
 }
 
 impl View for LumberEditorView {
@@ -185,7 +209,10 @@ impl View for LumberEditorView {
             a: 1.0,
         },
         depth_format: Some(DEPTH_FORMAT),
-        shadow_map_resolution: None,
+        // Shadows make the displayed kind read as a real object sitting on
+        // the ground plane. Single-subject scene; one 2k cascade map is
+        // plenty.
+        shadow_map_resolution: Some(2048),
     };
 
     fn init(renderer: &Renderer) -> Self {
@@ -275,6 +302,9 @@ impl View for LumberEditorView {
             buckets.register(&renderer.device, key);
         }
 
+        let shadow_pipeline = ShadowMeshPipeline::new(renderer);
+        let ground = build_ground_plane(renderer, &material, &samplers, &asset_server);
+
         Self {
             camera,
             camera_binding,
@@ -288,6 +318,8 @@ impl View for LumberEditorView {
             templates,
             proxies,
             buckets,
+            shadow_pipeline,
+            ground,
             last_selected: None,
         }
     }
@@ -366,20 +398,118 @@ impl View for LumberEditorView {
 
     fn extract_environment(&self, _sim: &Game, _zone: ZoneId) -> ViewEnvironment {
         // Static lighting — an editor wants a stable presentation. Sun from
-        // upper-right, modest ambient, neutral sky. `SunCascades::disabled`
-        // pairs with `shadow_map_resolution: None` to skip the shadow phase.
+        // upper-right; cascades fitted every frame so shadows track the
+        // orbit-rig camera.
+        let sun_direction = Vec3::new(0.4, 0.3, 0.8).normalize();
+        let splits = self.camera.cascade_split_distances(0.75);
+        let matrices = self.camera.fit_shadow_cascades(sun_direction, splits);
         ViewEnvironment {
-            sun_direction: Vec3::new(0.4, 0.3, 0.8).normalize(),
+            sun_direction,
             sun_color: Vec3::splat(2.5),
             ambient: Vec3::new(0.25, 0.27, 0.32),
             sky_color: Vec3::new(0.6, 0.7, 0.85),
-            sun_cascades: SunCascades::disabled(),
+            sun_cascades: SunCascades { matrices, splits },
+        }
+    }
+
+    fn shadow_pass(
+        &mut self,
+        sim: &Game,
+        _alpha: f32,
+        cascade: u32,
+        renderer: &Renderer,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        // Cascade 0 owns the per-frame walk that fills the instance buckets;
+        // cascades 1–3 (and `render`) draw the same buffers, so the walk has
+        // to land before any of them. The engine calls `shadow_pass` four
+        // times *before* `render`, so cascade 0 is the right anchor.
+        if cascade == 0 {
+            self.buckets.begin_frame();
+
+            let frustum = Frustum::from_view_proj(self.camera.view_proj());
+            RenderObjectTraversal::declare_and_cull(
+                &sim.zones,
+                &self.templates,
+                &mut self.proxies,
+                &frustum,
+            );
+
+            let asset_server = &self.asset_server;
+            let material = &self.material;
+            let atlas_material = &self.atlas_material;
+            let samplers = &self.samplers;
+            let mut adjustments: HashMap<KindId, Mat4> = HashMap::new();
+            for (key, template) in &mut self.mesh_templates {
+                template
+                    .material
+                    .refresh(renderer, material, samplers, asset_server);
+                adjustments.insert(
+                    key.clone(),
+                    template.resolve(asset_server).fallback_adjustment,
+                );
+            }
+            for (_, instance) in self.atlas_materials.iter_mut() {
+                instance.refresh(renderer, atlas_material, samplers, asset_server);
+            }
+            // Ground material refreshed alongside the body materials so a
+            // late-arriving texture (the checker is `Handle::ready` today,
+            // but future debug-toggle paths might force-loading it) flips
+            // through the same once-per-frame hook.
+            self.ground
+                .material
+                .refresh(renderer, material, samplers, asset_server);
+
+            // No sim→view per-part state for the editor; the engine already
+            // wrote `world_xform`.
+            RenderObjectTraversal::update_instances(
+                &sim.zones,
+                &self.templates,
+                &mut self.proxies,
+                |_parent, _kind, _components, _instance| {},
+            );
+
+            let buckets = &mut self.buckets;
+            RenderObjectTraversal::for_each_alive_part(
+                &sim.zones,
+                &self.templates,
+                &self.proxies,
+                |_parent, _kind, part, world| {
+                    let adjustment = adjustments
+                        .get(&part.mesh)
+                        .copied()
+                        .unwrap_or(Mat4::IDENTITY);
+                    buckets.push(
+                        part.mesh.clone(),
+                        MeshInstanceAttribs::new(world * adjustment, Vec4::ONE),
+                    );
+                },
+            );
+            self.buckets.upload(&renderer.queue);
+        }
+
+        // Depth-only pass against the bucket contents cascade 0 populated.
+        // The ground plane is the shadow *receiver* — deliberately not
+        // drawn here, so it doesn't shadow itself.
+        pass.set_pipeline(self.shadow_pipeline.pipeline());
+        for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
+            let Some(template) = self.mesh_templates.get(part_key) else {
+                continue;
+            };
+            let resolved = template.resolve(&self.asset_server);
+            pass.set_vertex_buffer(1, instance_buffer.slice(..));
+            for prim in resolved.primitives {
+                pass.set_vertex_buffer(0, prim.vertex_buffer.slice(..));
+                pass.set_index_buffer(prim.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..prim.index_count, 0, 0..count);
+                renderer.record_draw(count);
+            }
         }
     }
 
     fn render(
         &mut self,
-        sim: &Game,
+        _sim: &Game,
         _alpha: f32,
         renderer: &Renderer,
         pass: &mut wgpu::RenderPass<'_>,
@@ -390,76 +520,31 @@ impl View for LumberEditorView {
         }
         self.camera_binding.write(&renderer.queue, &self.camera);
 
-        self.buckets.begin_frame();
+        // Bucket population, material refresh, and the cull walk all live
+        // in `shadow_pass` (cascade 0) — that runs before `render`, so by
+        // now the buckets hold the kind body's instance attrib and the
+        // shadow maps are populated for the PBR shader to sample.
 
-        // Phase 1: declare + cull. One proxy for the single sim object
-        // carrying a `KindId` matching a registered template.
-        let frustum = Frustum::from_view_proj(self.camera.view_proj());
-        RenderObjectTraversal::declare_and_cull(
-            &sim.zones,
-            &self.templates,
-            &mut self.proxies,
-            &frustum,
-        );
-
-        // Phase 1.5: refresh streamed material handles. Cheap when nothing
-        // changed; rebuilds the bind group on the frame an asset finishes
-        // loading.
-        let asset_server = &self.asset_server;
-        let material = &self.material;
-        let atlas_material = &self.atlas_material;
-        let samplers = &self.samplers;
-        let mut adjustments: HashMap<KindId, Mat4> = HashMap::new();
-        for (key, template) in &mut self.mesh_templates {
-            template
-                .material
-                .refresh(renderer, material, samplers, asset_server);
-            adjustments.insert(
-                key.clone(),
-                template.resolve(asset_server).fallback_adjustment,
-            );
-        }
-        for (_, instance) in self.atlas_materials.iter_mut() {
-            instance.refresh(renderer, atlas_material, samplers, asset_server);
-        }
-
-        // Phase 1.7: per-instance update. No sim → view state translation
-        // needed here — the engine already wrote `world_xform` from the
-        // sim object's transform, and the editor has no per-part
-        // visibility toggling. Still invoked so the engine's state writes
-        // land.
-        RenderObjectTraversal::update_instances(
-            &sim.zones,
-            &self.templates,
-            &mut self.proxies,
-            |_parent, _kind, _components, _instance| {},
-        );
-
-        // Phase 2: extract — push one instance attrib per alive part.
-        let buckets = &mut self.buckets;
-        RenderObjectTraversal::for_each_alive_part(
-            &sim.zones,
-            &self.templates,
-            &self.proxies,
-            |_parent, _kind, part, world| {
-                let adjustment = adjustments
-                    .get(&part.mesh)
-                    .copied()
-                    .unwrap_or(Mat4::IDENTITY);
-                buckets.push(
-                    part.mesh.clone(),
-                    MeshInstanceAttribs::new(world * adjustment, Vec4::ONE),
-                );
-            },
-        );
-        self.buckets.upload(&renderer.queue);
-
-        // Draw. Camera + scene bind groups (0 + 1) are shared across both
-        // PBR pipelines; per-primitive switch only touches bind group 2
-        // and the pipeline itself when the glb names an atlas slot.
+        // Camera + scene bind groups (0 + 1) are shared across the PBR /
+        // atlas / shadow-receiver pipelines; the per-primitive switch only
+        // touches bind group 2 and the pipeline.
         pass.set_bind_group(0, self.camera_binding.bind_group(), &[]);
         pass.set_bind_group(1, renderer.scene_bind_group(), &[]);
-        let mut active = ActivePipeline::None;
+
+        // Ground plane first — opaque shadow receiver under everything else.
+        // One instanced draw, identity model matrix.
+        pass.set_pipeline(self.material.pipeline());
+        pass.set_bind_group(2, self.ground.material.bind_group(), &[]);
+        pass.set_vertex_buffer(0, self.ground.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, self.ground.instance_buffer.slice(..));
+        pass.set_index_buffer(
+            self.ground.index_buffer.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        pass.draw_indexed(0..self.ground.index_count, 0, 0..1);
+        renderer.record_draw(1);
+
+        let mut active = ActivePipeline::Pbr;
         for (part_key, instance_buffer, count) in self.buckets.iter_filled() {
             let Some(template) = self.mesh_templates.get(part_key) else {
                 continue;
@@ -523,6 +608,111 @@ impl LumberEditorView {
         }
         self.last_selected = current;
     }
+}
+
+// --- Ground plane ------------------------------------------------------
+
+/// Edge length of the ground plane in metres. Bigger than any kind the
+/// editor is likely to show (lumber-camp's biggest is ~6 m) so the floor
+/// always reaches past the visible orbit-rig frustum.
+const GROUND_SIZE: f32 = 100.0;
+/// World-space size of one checkerboard cell. 25 cm reads as a fine-grained
+/// scale reference for sub-metre kinds without becoming visual noise on the
+/// larger ones.
+const GROUND_CELL_SIZE: f32 = 0.25;
+
+fn build_ground_plane(
+    renderer: &Renderer,
+    material: &PbrMaterial,
+    samplers: &SamplerRegistry,
+    asset_server: &AssetServer,
+) -> GroundPlane {
+    use wgpu::util::DeviceExt;
+
+    // A 2×2 checker baked into a 64×64 texture, tiled across the plane
+    // with `LinearRepeat`. UV scale is chosen so each repeat covers two
+    // cells (one light + one dark) at `GROUND_CELL_SIZE` metres each.
+    let texture = make_checker_texture(renderer);
+    let albedo = Handle::ready(texture);
+    let ground_material = material.create_instance(
+        renderer,
+        samplers,
+        asset_server,
+        PbrMaterialParams {
+            albedo,
+            sampler: SamplerKind::LinearRepeat,
+            albedo_factor: Vec4::ONE,
+            // Matte dielectric — the surface should look like rough painted
+            // concrete, not a polished display table; keeps the kind's
+            // specular highlights the obvious figure-ground signal.
+            metallic: 0.0,
+            roughness: 0.95,
+        },
+    );
+
+    // One-quad plane on XY at z=0; UV scaled so `LinearRepeat` tiles the
+    // 2×2 checker `GROUND_SIZE / (2 * GROUND_CELL_SIZE)` times per axis.
+    let mut mesh = PrimitiveMesh::plane(Vec2::splat(GROUND_SIZE), UVec2::ONE);
+    let uv_scale = GROUND_SIZE / (2.0 * GROUND_CELL_SIZE);
+    for v in &mut mesh.vertices {
+        v.uv[0] *= uv_scale;
+        v.uv[1] *= uv_scale;
+    }
+    let vertex_buffer = renderer
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lumber-editor ground vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+    let index_buffer = renderer
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lumber-editor ground indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+    // Static one-instance buffer — identity model, no tint, no hit ID.
+    // Never rewritten, so we don't need a separate scratch + upload path.
+    let instance = MeshInstanceAttribs::new(Mat4::IDENTITY, Vec4::ONE);
+    let instance_buffer = renderer
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lumber-editor ground instance"),
+            contents: bytemuck::bytes_of(&instance),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+    GroundPlane {
+        vertex_buffer,
+        index_buffer,
+        index_count: mesh.index_count(),
+        instance_buffer,
+        material: ground_material,
+    }
+}
+
+/// Bake a 64×64 RGBA8 checkerboard intended for `LinearRepeat` tiling. Two
+/// soft greys keep the floor reading as a backdrop rather than competing
+/// with the displayed kind. Sharp cell edges at 32-px boundaries mean the
+/// mip chain handles distant cells cleanly without bleeding the two tones
+/// together.
+fn make_checker_texture(renderer: &Renderer) -> Texture {
+    const SIZE: u32 = 64;
+    const CELL_PX: u32 = SIZE / 2;
+    const LIGHT: [u8; 4] = [220, 220, 220, 255];
+    const DARK: [u8; 4] = [160, 160, 160, 255];
+    let mut bytes = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let cx = (x / CELL_PX) & 1;
+            let cy = (y / CELL_PX) & 1;
+            let c = if cx == cy { LIGHT } else { DARK };
+            bytes.extend_from_slice(&c);
+        }
+    }
+    Texture::from_rgba8(renderer, "lumber-editor checker", SIZE, SIZE, &bytes, true)
 }
 
 // --- Entry point -------------------------------------------------------
