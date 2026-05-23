@@ -209,6 +209,13 @@ struct LumberEditorView {
     /// Previous frame's selection; auto-frame fires when this differs from
     /// the sim's current `KindId` component on `subject`.
     last_selected: Option<KindId>,
+
+    /// View-side visibility toggles driven by the left-panel checkboxes.
+    /// Each gates the matching draw block in `render` (and the body's
+    /// `depth_only` shadow pass so hidden meshes don't leave a shadow).
+    show_main_mesh: bool,
+    show_bounding_box: bool,
+    show_interaction_tiles: bool,
 }
 
 /// GPU resources for the editor's static checkerboard floor. One quad, one
@@ -386,6 +393,9 @@ impl View for LumberEditorView {
             bounds_overlay,
             interaction_overlay,
             last_selected: None,
+            show_main_mesh: true,
+            show_bounding_box: true,
+            show_interaction_tiles: true,
         }
     }
 
@@ -443,17 +453,30 @@ impl View for LumberEditorView {
             .resizable(false)
             .default_size(260.0)
             .show(egui_ctx, |ui| {
-                ui.heading("Kinds");
+                ui.heading("Kind");
                 ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for kind in &sim.available {
-                        let selected = current.as_ref() == Some(kind);
-                        let label = ui.selectable_label(selected, kind.as_str());
-                        if label.clicked() && !selected {
-                            cmds.push_now(Command::SelectKind(kind.clone()));
+                let selected_text = current
+                    .as_ref()
+                    .map(|k| k.as_str().to_string())
+                    .unwrap_or_else(|| "Select…".to_string());
+                egui::ComboBox::from_id_salt("kind-select")
+                    .selected_text(selected_text)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for kind in &sim.available {
+                            let selected = current.as_ref() == Some(kind);
+                            if ui.selectable_label(selected, kind.as_str()).clicked() && !selected {
+                                cmds.push_now(Command::SelectKind(kind.clone()));
+                            }
                         }
-                    }
-                });
+                    });
+
+                ui.add_space(8.0);
+                ui.heading("Visibility");
+                ui.separator();
+                ui.checkbox(&mut self.show_main_mesh, "Main item mesh");
+                ui.checkbox(&mut self.show_bounding_box, "Bounding box");
+                ui.checkbox(&mut self.show_interaction_tiles, "Interaction tiles");
             });
     }
 
@@ -551,14 +574,18 @@ impl View for LumberEditorView {
         // Depth-only pass against the bucket contents cascade 0 populated.
         // The ground plane is the shadow *receiver* — deliberately not
         // drawn here, so it doesn't shadow itself.
-        MeshDraw::depth_only(
-            pass,
-            renderer,
-            &self.asset_server,
-            &self.shadow_pipeline,
-            &self.mesh_templates,
-            &self.buckets,
-        );
+        // Gated on `show_main_mesh` so hiding the body also hides its
+        // shadow — otherwise an invisible kind still casts a silhouette.
+        if self.show_main_mesh {
+            MeshDraw::depth_only(
+                pass,
+                renderer,
+                &self.asset_server,
+                &self.shadow_pipeline,
+                &self.mesh_templates,
+                &self.buckets,
+            );
+        }
     }
 
     fn render(
@@ -598,18 +625,20 @@ impl View for LumberEditorView {
         pass.draw_indexed(0..self.ground.index_count, 0, 0..1);
         renderer.record_draw(1);
 
-        MeshDraw::pbr_with_atlas(
-            pass,
-            renderer,
-            &self.asset_server,
-            PbrAtlasMaterials {
-                pbr: &self.material,
-                atlas: &self.atlas_material,
-                atlas_instances: &self.atlas_materials,
-            },
-            &self.mesh_templates,
-            &self.buckets,
-        );
+        if self.show_main_mesh {
+            MeshDraw::pbr_with_atlas(
+                pass,
+                renderer,
+                &self.asset_server,
+                PbrAtlasMaterials {
+                    pbr: &self.material,
+                    atlas: &self.atlas_material,
+                    atlas_instances: &self.atlas_materials,
+                },
+                &self.mesh_templates,
+                &self.buckets,
+            );
+        }
 
         // Interaction-tiles overlay — green fat-line square outlines on
         // the ground, one per tile returned by the selected kind's
@@ -622,7 +651,8 @@ impl View for LumberEditorView {
             .and_then(|z| z.components().get::<KindId>(sim.subject))
             .cloned();
         let subject_transform = zone.and_then(|z| z.get(sim.subject)).copied();
-        if let (Some(kind), Some(transform)) = (subject_kind.as_ref(), subject_transform)
+        if self.show_interaction_tiles
+            && let (Some(kind), Some(transform)) = (subject_kind.as_ref(), subject_transform)
             && let Some(interaction) = sim.interactions.get(kind)
         {
             let tiles = interaction.tiles(&transform);
@@ -660,7 +690,9 @@ impl View for LumberEditorView {
             .and_then(|z| z.components().get::<KindId>(sim.subject))
             .and_then(|kind| sim.render_specs.get(kind))
             .map(|spec| spec.visual_bounds());
-        if let Some(aabb) = current_aabb {
+        if self.show_bounding_box
+            && let Some(aabb) = current_aabb
+        {
             write_bounds_instance(&renderer.queue, &self.bounds_overlay.instance_buffer, aabb);
             self.bounds_overlay
                 .color
