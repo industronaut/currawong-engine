@@ -29,6 +29,8 @@
 //!   sun-direction model.
 //! - [`interaction`] — [`Interaction`]: where pawns stand to interact with
 //!   an object; authored on kind defs, consumed by pathing.
+//! - [`footprint`] — [`Footprint`]: the ground tiles an object occupies
+//!   when placed; authored on kind defs.
 //! - [`rng`] — [`SimRng`], the single seeded sim PRNG.
 //!
 //! Submodules are private; their public types are re-exported here so callers
@@ -41,6 +43,7 @@ mod command;
 mod components;
 mod environment;
 mod facing;
+mod footprint;
 mod grid;
 mod interaction;
 mod rng;
@@ -54,6 +57,7 @@ pub use command::CommandQueue;
 pub use components::Components;
 pub use environment::{SimEnvironment, sun_direction_for};
 pub use facing::Facing;
+pub use footprint::Footprint;
 pub use grid::{Grid, HexGrid, SquareGrid};
 pub use interaction::Interaction;
 pub use rng::SimRng;

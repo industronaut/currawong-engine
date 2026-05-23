@@ -9,13 +9,18 @@
     // the camp and the lumberjacks' workspace. `Facing` so the offset
     // rotates with the building if/when the example reorients it.
     interaction: (type: "Facing", offsets: [(-1, 0, 0)]),
+    // Placement footprint — the 2×2 block of ground tiles the building
+    // occupies when placed. Visualised in `lumber_editor` as orange
+    // X-marked squares; sim consumers (terrain reservation, picking) will
+    // follow.
+    footprint: [(0, 0), (1, 0), (0, 1), (1, 1)],
     render: (
         shape: "building",
         mesh: "lumber/base.glb",
         albedo: "textures/buildings/wood_planks.png",
         metallic: 0.0,
         roughness: 0.85,
-        bounds_min: (-1.0, -1.0, 0.0),
-        bounds_max: (1.0, 1.0, 1.25),
+        bounds_min: (-0.5, -0.5, 0.0),
+        bounds_max: (1.5, 1.5, 1.25),
     ),
 )

@@ -57,9 +57,15 @@ visualisation surface for kind metadata. Current state:
 - **Green interaction-tiles overlay** (#124). One fat-line square per tile
   in `Interaction::tiles(transform)`. Kinds whose def omits `interaction:`
   parse to `Interaction::None` and draw zero tiles.
+- **Orange footprint-tiles overlay.** Same shape as the interaction
+  overlay but with two diagonals across each square, one per tile in
+  `Footprint::tiles(transform)`. Kinds whose def omits `footprint:` parse
+  to an empty `Footprint` and draw zero tiles. The 2×2 placement
+  footprint on `currawong:lumber_camp` is the canonical multi-tile demo;
+  the trees declare a 1×1 footprint.
 - **Visibility checkboxes** in the same left panel toggle the main item
-  mesh (and its shadow), the bounding-box overlay, and the
-  interaction-tiles overlay independently.
+  mesh (and its shadow), the bounding-box overlay, the interaction-tiles
+  overlay, and the footprint-tiles overlay independently.
 
 Sim is one zone with one object at the origin; sole mutation is
 `Command::SelectKind`. `Game::render_specs` and `Game::interactions` cache

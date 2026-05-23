@@ -37,7 +37,7 @@ use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
 use currawong::glam::{Mat4, Quat, UVec2, Vec2, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, FatLineMaterial,
-    FatLineMaterialInstance, FatLineMaterialParams, FatLineVertex, Frustum, Handle,
+    FatLineMaterialInstance, FatLineMaterialParams, FatLineVertex, Footprint, Frustum, Handle,
     InstanceBuckets, Interaction, MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs,
     MeshTemplate, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams,
     PbrAtlasMaterials, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
@@ -87,6 +87,11 @@ struct Game {
     /// deserialize to [`Interaction::None`], which `tiles` resolves to an
     /// empty vec — the overlay simply draws zero instances.
     interactions: HashMap<KindId, Interaction>,
+    /// Cached `Footprint` per kind for the placement-tiles overlay. Same
+    /// once-at-startup parse pattern as `interactions`; kinds without a
+    /// `tiles:` field deserialize to an empty `Footprint` and draw zero
+    /// instances.
+    footprints: HashMap<KindId, Footprint>,
 }
 
 impl Game {
@@ -94,6 +99,7 @@ impl Game {
         let mut available: Vec<KindId> = Vec::new();
         let mut render_specs: HashMap<KindId, RenderSpec> = HashMap::new();
         let mut interactions: HashMap<KindId, Interaction> = HashMap::new();
+        let mut footprints: HashMap<KindId, Footprint> = HashMap::new();
         for (kind_id, def) in defs.iter() {
             match RenderSpec::from_def(def) {
                 Ok(spec) => {
@@ -110,6 +116,13 @@ impl Game {
                         Interaction::None
                     });
                     interactions.insert(kind_id.clone(), interaction);
+                    // Footprint follows the same opt-in convention; missing
+                    // `tiles:` defaults to an empty footprint.
+                    let footprint = Footprint::from_def(def).unwrap_or_else(|e| {
+                        eprintln!("lumber_editor: {kind_id} footprint parse: {e}");
+                        Footprint::default()
+                    });
+                    footprints.insert(kind_id.clone(), footprint);
                 }
                 Err(e) => {
                     eprintln!("lumber_editor: skipping {kind_id}: {e}");
@@ -136,6 +149,7 @@ impl Game {
             available,
             render_specs,
             interactions,
+            footprints,
         }
     }
 }
@@ -206,6 +220,13 @@ struct LumberEditorView {
     /// read on top of the green squares.
     interaction_overlay: InteractionTilesOverlay,
 
+    /// Orange X-marked squares drawn on the ground, one per placement
+    /// tile declared by the selected kind's `Footprint`. Same shape as
+    /// `interaction_overlay`, with the unit-square geometry augmented by
+    /// two diagonals so a single tile reads as a filled placement marker
+    /// rather than just an outline.
+    footprint_overlay: FootprintTilesOverlay,
+
     /// Previous frame's selection; auto-frame fires when this differs from
     /// the sim's current `KindId` component on `subject`.
     last_selected: Option<KindId>,
@@ -216,6 +237,7 @@ struct LumberEditorView {
     show_main_mesh: bool,
     show_bounding_box: bool,
     show_interaction_tiles: bool,
+    show_footprint_tiles: bool,
 }
 
 /// GPU resources for the editor's static checkerboard floor. One quad, one
@@ -260,6 +282,21 @@ struct InteractionTilesOverlay {
     /// Scratch buffer for assembling per-tile instance attribs before the
     /// single `write_buffer` upload. Kept on the struct so the allocation
     /// is reused across frames.
+    instance_scratch: Vec<MeshInstanceAttribs>,
+}
+
+/// GPU resources for the placement-tiles overlay. Identical packaging to
+/// [`InteractionTilesOverlay`] — fat-line pipeline, per-frame instance
+/// buffer pre-sized to [`MAX_FOOTPRINT_TILES`] — but the static
+/// vertex/index data is a unit square with two diagonals (six fat-line
+/// segments per tile, drawn in orange).
+struct FootprintTilesOverlay {
+    material: FatLineMaterial,
+    color: FatLineMaterialInstance,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    instance_buffer: wgpu::Buffer,
     instance_scratch: Vec<MeshInstanceAttribs>,
 }
 
@@ -374,6 +411,7 @@ impl View for LumberEditorView {
         let ground = build_ground_plane(renderer, &material, &samplers, &asset_server);
         let bounds_overlay = build_bounds_overlay(renderer, camera_binding.layout());
         let interaction_overlay = build_interaction_overlay(renderer, camera_binding.layout());
+        let footprint_overlay = build_footprint_overlay(renderer, camera_binding.layout());
 
         Self {
             camera,
@@ -392,10 +430,12 @@ impl View for LumberEditorView {
             ground,
             bounds_overlay,
             interaction_overlay,
+            footprint_overlay,
             last_selected: None,
             show_main_mesh: true,
             show_bounding_box: true,
             show_interaction_tiles: true,
+            show_footprint_tiles: true,
         }
     }
 
@@ -477,6 +517,7 @@ impl View for LumberEditorView {
                 ui.checkbox(&mut self.show_main_mesh, "Main item mesh");
                 ui.checkbox(&mut self.show_bounding_box, "Bounding box");
                 ui.checkbox(&mut self.show_interaction_tiles, "Interaction tiles");
+                ui.checkbox(&mut self.show_footprint_tiles, "Footprint tiles");
             });
     }
 
@@ -673,6 +714,33 @@ impl View for LumberEditorView {
                     wgpu::IndexFormat::Uint16,
                 );
                 pass.draw_indexed(0..self.interaction_overlay.index_count, 0, 0..count);
+                renderer.record_draw(1);
+            }
+        }
+
+        // Footprint overlay — orange X-marked squares for the selected
+        // kind's placement tiles. Same pipeline and shape as the
+        // interaction overlay; drawn alongside it so both can be parsed
+        // at a glance.
+        if self.show_footprint_tiles
+            && let (Some(kind), Some(transform)) = (subject_kind.as_ref(), subject_transform)
+            && let Some(footprint) = sim.footprints.get(kind)
+        {
+            let tiles = footprint.tiles(&transform);
+            let count = self.footprint_overlay.refresh(&renderer.queue, &tiles);
+            if count > 0 {
+                self.footprint_overlay
+                    .color
+                    .write_viewport(&renderer.queue, UVec2::new(size.width, size.height));
+                pass.set_pipeline(self.footprint_overlay.material.pipeline());
+                pass.set_bind_group(1, self.footprint_overlay.color.bind_group(), &[]);
+                pass.set_vertex_buffer(0, self.footprint_overlay.vertex_buffer.slice(..));
+                pass.set_vertex_buffer(1, self.footprint_overlay.instance_buffer.slice(..));
+                pass.set_index_buffer(
+                    self.footprint_overlay.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint16,
+                );
+                pass.draw_indexed(0..self.footprint_overlay.index_count, 0, 0..count);
                 renderer.record_draw(1);
             }
         }
@@ -998,6 +1066,140 @@ fn build_interaction_overlay(
         index_count: indices.len() as u32,
         instance_buffer,
         instance_scratch: Vec::with_capacity(MAX_INTERACTION_TILES as usize),
+    }
+}
+
+// --- Footprint-tiles overlay ------------------------------------------
+
+/// Saturated orange for the placement tile markers. Sits clearly between
+/// the green interaction tiles and the yellow bounds wireframe so all
+/// three overlays can be enabled simultaneously and still parsed at a
+/// glance.
+const FOOTPRINT_TILE_COLOR: Vec4 = Vec4::new(1.0, 0.55, 0.10, 1.0);
+/// Screen-space stroke width for the outline + diagonals in pixels.
+/// Matches the interaction-tile weight so neighbouring squares read as
+/// the same class of marker.
+const FOOTPRINT_TILE_WIDTH_PX: f32 = 8.0;
+/// Vertical lift above the ground plane to avoid z-fighting. Slightly
+/// above the interaction-tile epsilon so the two overlays don't fight
+/// each other when they happen to land on the same cell.
+const FOOTPRINT_TILE_Z_EPSILON: f32 = 0.015;
+/// Cap on the per-frame instance count. A footprint of "thousands of
+/// tiles" doesn't make sense; 256 is generous for any plausibly-authored
+/// kind and matches the interaction overlay's cap.
+const MAX_FOOTPRINT_TILES: u32 = 256;
+
+/// Fat-line vertex + index data for a unit square *with two diagonals*
+/// spanning `[-0.5, 0.5]² × {0}` in XY. Six segments (4 edges + 2
+/// diagonals) → 24 verts, 36 triangle-list indices. Sibling to
+/// [`unit_square_fat_line_geometry`] above; the diagonals are what
+/// visually distinguishes a placement tile from a (plain-outline)
+/// interaction tile.
+fn unit_square_with_diagonals_fat_line_geometry() -> (Vec<FatLineVertex>, Vec<u16>) {
+    let h = 0.5;
+    let corners: [[f32; 3]; 4] = [
+        [-h, -h, 0.0], // 0: -X -Y
+        [h, -h, 0.0],  // 1: +X -Y
+        [h, h, 0.0],   // 2: +X +Y
+        [-h, h, 0.0],  // 3: -X +Y
+    ];
+    // 4 perimeter edges + 2 diagonals forming an X across the square.
+    // CCW perimeter orientation matches the pipeline's `FrontFace::Ccw`.
+    let segments: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 3), (3, 0), (0, 2), (1, 3)];
+
+    let mut vertices = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    for (a, b) in segments {
+        let pos_a = corners[a];
+        let pos_b = corners[b];
+        let base = vertices.len() as u16;
+        for &(endpoint, side) in &[(0.0_f32, -1.0_f32), (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+            vertices.push(FatLineVertex {
+                pos_a,
+                pos_b,
+                side,
+                endpoint,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    }
+    (vertices, indices)
+}
+
+fn build_footprint_overlay(
+    renderer: &Renderer,
+    camera_layout: &wgpu::BindGroupLayout,
+) -> FootprintTilesOverlay {
+    use wgpu::util::DeviceExt;
+
+    let material = FatLineMaterial::new(renderer, camera_layout);
+    let color = material.create_instance(
+        renderer,
+        FatLineMaterialParams {
+            base_color: FOOTPRINT_TILE_COLOR,
+            width_px: FOOTPRINT_TILE_WIDTH_PX,
+        },
+    );
+
+    let (vertices, indices) = unit_square_with_diagonals_fat_line_geometry();
+    let vertex_buffer = renderer
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lumber-editor footprint-tile vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+    let index_buffer = renderer
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lumber-editor footprint-tile indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+    let instance_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("lumber-editor footprint-tile instances"),
+        size: (MAX_FOOTPRINT_TILES as u64) * std::mem::size_of::<MeshInstanceAttribs>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    FootprintTilesOverlay {
+        material,
+        color,
+        vertex_buffer,
+        index_buffer,
+        index_count: indices.len() as u32,
+        instance_buffer,
+        instance_scratch: Vec::with_capacity(MAX_FOOTPRINT_TILES as usize),
+    }
+}
+
+impl FootprintTilesOverlay {
+    /// Rebuild the per-instance buffer from `tiles` (integer world tile
+    /// coords from [`Footprint::tiles`]). Same centring convention as
+    /// [`InteractionTilesOverlay::refresh`] — each square is centred on
+    /// the integer world coord, matching how the editor draws the kind
+    /// body and its interaction tiles. Clamped to [`MAX_FOOTPRINT_TILES`].
+    fn refresh(&mut self, queue: &wgpu::Queue, tiles: &[(i32, i32, i32)]) -> u32 {
+        self.instance_scratch.clear();
+        let cap = MAX_FOOTPRINT_TILES as usize;
+        for &(tx, ty, tz) in tiles.iter().take(cap) {
+            let translation = Vec3::new(tx as f32, ty as f32, tz as f32 + FOOTPRINT_TILE_Z_EPSILON);
+            let model =
+                Mat4::from_scale_rotation_translation(Vec3::ONE, Quat::IDENTITY, translation);
+            self.instance_scratch
+                .push(MeshInstanceAttribs::new(model, Vec4::ONE));
+        }
+        let count = self.instance_scratch.len() as u32;
+        if count > 0 {
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&self.instance_scratch),
+            );
+        }
+        count
     }
 }
 

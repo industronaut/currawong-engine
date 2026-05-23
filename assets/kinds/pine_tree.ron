@@ -6,6 +6,7 @@
     chop_ticks: 120,
     // Same shape as oak — any of the 8 surrounding tiles works.
     interaction: (type: "Surround", radius_tiles: 1),
+    footprint: [(0, 0)],
     render: (
         shape: "tree",
         mesh: "models/trees/pine.glb",
