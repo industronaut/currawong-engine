@@ -267,19 +267,21 @@ impl View for LumberEditorView {
         let mut mesh_templates: HashMap<KindId, MeshTemplate<PbrMaterialInstance>> = HashMap::new();
         let mut templates: Templates = RenderRegistry::new();
 
-        for (kind_id, def) in defs.iter() {
-            let spec = match RenderSpec::from_def(def) {
-                Ok(spec) => spec,
-                Err(_) => continue,
-            };
-            let body =
-                material.streamed_template(renderer, &samplers, &asset_server, kind_id, &spec);
+        // Silent `on_skip` — `Game::new` already eprintlned the same errors
+        // when it built the sim-side `render_specs` cache.
+        for (kind_id, _spec, body) in material.streamed_kind_body_templates(
+            renderer,
+            &samplers,
+            &asset_server,
+            &defs,
+            |_, _| {},
+        ) {
             let bounds = body.visual_bounds;
             mesh_templates.insert(kind_id.clone(), body);
             let template = RenderTemplate::new(kind_id.as_str())
                 .with_mesh_part(kind_id.clone(), kind_id.clone(), Mat4::IDENTITY)
                 .with_visual_bounds(bounds);
-            templates.register(kind_id.clone(), template);
+            templates.register(kind_id, template);
         }
 
         // Single live object, so hysteresis is irrelevant.

@@ -323,14 +323,13 @@ impl View for LumberCampView {
         // RenderTemplate. Unknown shapes are logged and skipped — the
         // sim might still place them, in which case the engine cull will
         // simply not find a template and skip them silently.
-        for (kind_id, def) in defs.iter() {
-            let render = match RenderSpec::from_def(def) {
-                Ok(spec) => spec,
-                Err(e) => {
-                    eprintln!("lumber_camp: skipping {kind_id}: {e}");
-                    continue;
-                }
-            };
+        for (kind_id, render, body_template) in material.streamed_kind_body_templates(
+            renderer,
+            &samplers,
+            &asset_server,
+            &defs,
+            |kid, e| eprintln!("lumber_camp: skipping {kid}: {e}"),
+        ) {
             let Some(shape) = RenderShape::from_tag(&render.shape) else {
                 eprintln!(
                     "lumber_camp: kind {kind_id} declares unknown render.shape `{}`; skipping",
@@ -338,12 +337,10 @@ impl View for LumberCampView {
                 );
                 continue;
             };
-            let body_template =
-                material.streamed_template(renderer, &samplers, &asset_server, kind_id, &render);
             mesh_templates.insert(PartKey::Body(kind_id.clone()), body_template);
             let template = shape.register_template(kind_id.clone(), &render);
             templates.register(kind_id.clone(), template);
-            shapes.insert(kind_id.clone(), shape);
+            shapes.insert(kind_id, shape);
         }
 
         let proxies = RenderProxies::<KindId>::new(CULL_HYSTERESIS_FRAMES);

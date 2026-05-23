@@ -21,7 +21,7 @@ use glam::{Mat4, Vec3, Vec4};
 use serde::Deserialize;
 use wgpu::util::DeviceExt;
 
-use crate::data::{KindDef, KindId, VfsPath};
+use crate::data::{Definitions, KindDef, KindId, VfsPath};
 
 use super::asset_server::{AssetServer, MeshSource, ResolvedMesh};
 use super::handle::Handle;
@@ -200,6 +200,43 @@ impl PbrMaterial {
             visual_bounds: spec.visual_bounds(),
             material,
         }
+    }
+
+    /// Walk every kind in `defs` and build a streamed body
+    /// [`MeshTemplate`] for each one that has a parseable `render:` block.
+    /// Skipped kinds (no `render` block, or a malformed one) are reported
+    /// through `on_skip` and absent from the result.
+    ///
+    /// Returns `(KindId, RenderSpec, MeshTemplate)` triples in iteration
+    /// order over `defs`. Callers typically:
+    /// - Collect the templates into the `HashMap<PartKey, MeshTemplate>` the
+    ///   draw loop consumes.
+    /// - Use the spec to populate a per-kind [`RenderTemplate`](super::RenderTemplate)
+    ///   (visual bounds, shape-specific extra parts, etc).
+    ///
+    /// Pass `|_, _| {}` for `on_skip` to ignore parse errors silently — the
+    /// right shape when the sim side already validated and logged them.
+    pub fn streamed_kind_body_templates(
+        &self,
+        renderer: &Renderer,
+        samplers: &SamplerRegistry,
+        asset_server: &AssetServer,
+        defs: &Definitions,
+        mut on_skip: impl FnMut(&KindId, ron::Error),
+    ) -> Vec<(KindId, RenderSpec, MeshTemplate<PbrMaterialInstance>)> {
+        defs.iter()
+            .filter_map(|(kind_id, def)| match RenderSpec::from_def(def) {
+                Ok(spec) => {
+                    let body =
+                        self.streamed_template(renderer, samplers, asset_server, kind_id, &spec);
+                    Some((kind_id.clone(), spec, body))
+                }
+                Err(e) => {
+                    on_skip(kind_id, e);
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Build an inline [`MeshTemplate`] from a [`PrimitiveMesh`] + flat albedo
