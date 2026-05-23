@@ -17,6 +17,7 @@ cargo clippy --all-targets
 cargo clippy --no-default-features --all-targets
 
 cargo run --example lumber_camp          # end-to-end game loop: pawns chop trees, haul logs to a stockpile
+cargo run --example lumber_editor --features egui   # pick a kind, view its glb + texture with orbit camera
 cargo run --example trees                # ~200 trees growing under live sim mutation
 cargo run --example textured_pbr         # PBR cubes lit by a sim-driven sun
 cargo run --example textured_pbr --features egui   # same, with debug overlay

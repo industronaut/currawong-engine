@@ -101,6 +101,10 @@ name = "lumber_camp"
 required-features = ["yakui", "egui"]
 
 [[example]]
+name = "lumber_editor"
+required-features = ["egui"]
+
+[[example]]
 name = "headless"
 
 # One-shot tool that materialises `assets/test/cube.glb`, the unit-cube
