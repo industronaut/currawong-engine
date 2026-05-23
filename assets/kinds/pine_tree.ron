@@ -4,6 +4,8 @@
 (
     id: "currawong:pine_tree",
     chop_ticks: 120,
+    // Same shape as oak — any of the 8 surrounding tiles works.
+    interaction: (type: "Surround", radius_tiles: 1),
     render: (
         shape: "tree",
         mesh: "models/trees/pine.glb",

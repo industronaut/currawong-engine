@@ -3,6 +3,12 @@
 // the kind itself is the building.
 (
     id: "currawong:lumber_camp",
+    // Single deposit tile on the building's local -X face. With the example
+    // placing the camp at Facing::ZERO (forward = +X) in the +X +Y corner,
+    // this puts the drop-off point one tile west of the building — between
+    // the camp and the lumberjacks' workspace. `Facing` so the offset
+    // rotates with the building if/when the example reorients it.
+    interaction: (type: "Facing", offsets: [(-1, 0, 0)]),
     render: (
         shape: "building",
         mesh: "lumber/base.glb",
