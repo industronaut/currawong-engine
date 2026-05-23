@@ -37,14 +37,14 @@ use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
 use currawong::glam::{Mat4, Quat, UVec2, Vec2, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, FatLineMaterial,
-    FatLineMaterialInstance, FatLineMaterialParams, Frustum, Handle, InstanceBuckets, MaterialId,
-    MaterialRegistry, MeshDraw, MeshInstanceAttribs, MeshTemplate, OrbitRig, PbrAtlasMaterial,
-    PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrAtlasMaterials, PbrMaterial,
-    PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh, RenderObjectTraversal, RenderProxies,
-    RenderRegistry, RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
-    ShadowMeshPipeline, SimPos, SimUnit, Simulation, SunCascades, Texture, TextureColorSpace, View,
-    ViewConfig, ViewEnvironment, WorldObjectId, WorldTransform, Zone, ZoneId, Zones, egui,
-    pollster, unit_cube_fat_line_geometry, wgpu, winit,
+    FatLineMaterialInstance, FatLineMaterialParams, FatLineVertex, Frustum, Handle,
+    InstanceBuckets, Interaction, MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs,
+    MeshTemplate, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams,
+    PbrAtlasMaterials, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
+    RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec, RenderTemplate, Renderer,
+    SamplerKind, SamplerRegistry, ShadowMeshPipeline, SimPos, SimUnit, Simulation, SunCascades,
+    Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldObjectId, WorldTransform,
+    Zone, ZoneId, Zones, egui, pollster, unit_cube_fat_line_geometry, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -80,17 +80,36 @@ struct Game {
     /// dozen entries max in any reasonable kinds folder); avoids re-parsing
     /// the def on every selection.
     render_specs: HashMap<KindId, RenderSpec>,
+    /// Cached `Interaction` per kind for the interaction-tiles overlay.
+    /// Same shape as `render_specs` — sim-side typed parse of the def, done
+    /// once at startup so the view can `.get(&kind).tiles(transform)` each
+    /// frame without re-parsing. Kinds whose def omits `interaction:`
+    /// deserialize to [`Interaction::None`], which `tiles` resolves to an
+    /// empty vec — the overlay simply draws zero instances.
+    interactions: HashMap<KindId, Interaction>,
 }
 
 impl Game {
     fn new(defs: Definitions) -> Self {
         let mut available: Vec<KindId> = Vec::new();
         let mut render_specs: HashMap<KindId, RenderSpec> = HashMap::new();
+        let mut interactions: HashMap<KindId, Interaction> = HashMap::new();
         for (kind_id, def) in defs.iter() {
             match RenderSpec::from_def(def) {
                 Ok(spec) => {
                     available.push(kind_id.clone());
                     render_specs.insert(kind_id.clone(), spec);
+                    // Interaction is independent of render: a kind without a
+                    // declared interaction still appears in the editor, just
+                    // with an empty tile overlay. A parse error here would
+                    // mean a malformed `interaction:` block — eprintln but
+                    // fall through to `Interaction::None` so the kind is
+                    // still selectable for visual inspection.
+                    let interaction = Interaction::from_def(def).unwrap_or_else(|e| {
+                        eprintln!("lumber_editor: {kind_id} interaction parse: {e}");
+                        Interaction::None
+                    });
+                    interactions.insert(kind_id.clone(), interaction);
                 }
                 Err(e) => {
                     eprintln!("lumber_editor: skipping {kind_id}: {e}");
@@ -116,6 +135,7 @@ impl Game {
             subject,
             available,
             render_specs,
+            interactions,
         }
     }
 }
@@ -178,6 +198,14 @@ struct LumberEditorView {
     /// to the kind's AABB.
     bounds_overlay: BoundsOverlay,
 
+    /// Green flat squares drawn on the ground, one per interaction tile
+    /// declared by the selected kind's `Interaction`. Same shape as
+    /// `bounds_overlay`: one static unit-quad shared across kinds, one
+    /// growable per-frame instance buffer holding a `MeshInstanceAttribs`
+    /// per tile. Drawn before the bounds overlay so the yellow AABB lines
+    /// read on top of the green squares.
+    interaction_overlay: InteractionTilesOverlay,
+
     /// Previous frame's selection; auto-frame fires when this differs from
     /// the sim's current `KindId` component on `subject`.
     last_selected: Option<KindId>,
@@ -207,6 +235,25 @@ struct BoundsOverlay {
     index_buffer: wgpu::Buffer,
     index_count: u32,
     instance_buffer: wgpu::Buffer,
+}
+
+/// GPU resources for the interaction-tiles overlay. Four-edge fat-line
+/// square in the XY plane shared across kinds (constant 8 px screen-space
+/// stroke), with a per-frame instance buffer pre-sized to
+/// [`MAX_INTERACTION_TILES`] and rewritten each frame from the selected
+/// kind's [`Interaction::tiles`]. Draws zero instances when the selection
+/// has [`Interaction::None`].
+struct InteractionTilesOverlay {
+    material: FatLineMaterial,
+    color: FatLineMaterialInstance,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    instance_buffer: wgpu::Buffer,
+    /// Scratch buffer for assembling per-tile instance attribs before the
+    /// single `write_buffer` upload. Kept on the struct so the allocation
+    /// is reused across frames.
+    instance_scratch: Vec<MeshInstanceAttribs>,
 }
 
 impl View for LumberEditorView {
@@ -319,6 +366,7 @@ impl View for LumberEditorView {
         let shadow_pipeline = ShadowMeshPipeline::new(renderer);
         let ground = build_ground_plane(renderer, &material, &samplers, &asset_server);
         let bounds_overlay = build_bounds_overlay(renderer, camera_binding.layout());
+        let interaction_overlay = build_interaction_overlay(renderer, camera_binding.layout());
 
         Self {
             camera,
@@ -336,6 +384,7 @@ impl View for LumberEditorView {
             shadow_pipeline,
             ground,
             bounds_overlay,
+            interaction_overlay,
             last_selected: None,
         }
     }
@@ -562,6 +611,42 @@ impl View for LumberEditorView {
             &self.buckets,
         );
 
+        // Interaction-tiles overlay — green fat-line square outlines on
+        // the ground, one per tile returned by the selected kind's
+        // `Interaction`. The scratch vec is rebuilt from scratch every
+        // frame; cheap for the single-subject editor (a few dozen tiles
+        // max in the worst case). Drawn before the bounds wireframe so
+        // the yellow AABB lines read on top where the two intersect.
+        let zone = sim.zones.get(sim.zone);
+        let subject_kind = zone
+            .and_then(|z| z.components().get::<KindId>(sim.subject))
+            .cloned();
+        let subject_transform = zone.and_then(|z| z.get(sim.subject)).copied();
+        if let (Some(kind), Some(transform)) = (subject_kind.as_ref(), subject_transform)
+            && let Some(interaction) = sim.interactions.get(kind)
+        {
+            let tiles = interaction.tiles(&transform);
+            let count = self.interaction_overlay.refresh(&renderer.queue, &tiles);
+            if count > 0 {
+                // FatLine pipeline needs the live viewport size each frame
+                // to convert pixel widths into NDC — same write the bounds
+                // overlay performs below.
+                self.interaction_overlay
+                    .color
+                    .write_viewport(&renderer.queue, UVec2::new(size.width, size.height));
+                pass.set_pipeline(self.interaction_overlay.material.pipeline());
+                pass.set_bind_group(1, self.interaction_overlay.color.bind_group(), &[]);
+                pass.set_vertex_buffer(0, self.interaction_overlay.vertex_buffer.slice(..));
+                pass.set_vertex_buffer(1, self.interaction_overlay.instance_buffer.slice(..));
+                pass.set_index_buffer(
+                    self.interaction_overlay.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint16,
+                );
+                pass.draw_indexed(0..self.interaction_overlay.index_count, 0, 0..count);
+                renderer.record_draw(1);
+            }
+        }
+
         // Bounding-box overlay — yellow fat-line wireframe of the selected
         // kind's visual AABB at a fixed pixel width. Two per-frame uniform
         // writes: (a) the per-instance model matrix from the active
@@ -778,6 +863,147 @@ fn write_bounds_instance(queue: &wgpu::Queue, buffer: &wgpu::Buffer, aabb: Aabb)
     let model = Mat4::from_scale_rotation_translation(scale, Quat::IDENTITY, aabb.center());
     let attribs = MeshInstanceAttribs::new(model, Vec4::ONE);
     queue.write_buffer(buffer, 0, bytemuck::bytes_of(&attribs));
+}
+
+// --- Interaction-tiles overlay ----------------------------------------
+
+/// Saturated lime green for the interaction-tile outlines. Reads cleanly
+/// against the muted ground checker and stays clear of the yellow bounds
+/// wireframe so the two overlays can be parsed at a glance.
+const INTERACTION_TILE_COLOR: Vec4 = Vec4::new(0.20, 0.95, 0.35, 1.0);
+/// Screen-space stroke width for the outline in pixels. Picked to match
+/// the user-visible weight requested in the editor — heavy enough to read
+/// as a deliberate marker, light enough not to dominate small kinds.
+const INTERACTION_TILE_WIDTH_PX: f32 = 8.0;
+/// Vertical lift above the ground plane to avoid z-fighting with the
+/// checker. Small enough to be visually flush, large enough that depth
+/// quantization at the far end of the orbit-rig view never collapses it
+/// back to the ground.
+const INTERACTION_TILE_Z_EPSILON: f32 = 0.01;
+/// Cap on the per-frame instance count. `Surround { radius_tiles: 5 }`
+/// yields 120 tiles; 256 leaves comfortable headroom for the editor's
+/// single-subject scope without ever growing the buffer mid-frame.
+const MAX_INTERACTION_TILES: u32 = 256;
+
+/// Fat-line vertex + index data for a unit square outline spanning
+/// `[-0.5, 0.5]² × {0}` in XY. Four edges → 16 verts, 24 triangle-list
+/// indices. Sibling to [`unit_cube_fat_line_geometry`] — same packing
+/// convention so the same [`FatLineMaterial`] pipeline draws both.
+fn unit_square_fat_line_geometry() -> (Vec<FatLineVertex>, Vec<u16>) {
+    let h = 0.5;
+    let corners: [[f32; 3]; 4] = [
+        [-h, -h, 0.0], // 0: -X -Y
+        [h, -h, 0.0],  // 1: +X -Y
+        [h, h, 0.0],   // 2: +X +Y
+        [-h, h, 0.0],  // 3: -X +Y
+    ];
+    // CCW when viewed from +Z (the orbit-rig camera looks down at the
+    // ground), matching the pipeline's `FrontFace::Ccw`.
+    let edges: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+
+    let mut vertices = Vec::with_capacity(16);
+    let mut indices = Vec::with_capacity(24);
+    for (a, b) in edges {
+        let pos_a = corners[a];
+        let pos_b = corners[b];
+        let base = vertices.len() as u16;
+        for &(endpoint, side) in &[(0.0_f32, -1.0_f32), (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+            vertices.push(FatLineVertex {
+                pos_a,
+                pos_b,
+                side,
+                endpoint,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    }
+    (vertices, indices)
+}
+
+fn build_interaction_overlay(
+    renderer: &Renderer,
+    camera_layout: &wgpu::BindGroupLayout,
+) -> InteractionTilesOverlay {
+    use wgpu::util::DeviceExt;
+
+    let material = FatLineMaterial::new(renderer, camera_layout);
+    let color = material.create_instance(
+        renderer,
+        FatLineMaterialParams {
+            base_color: INTERACTION_TILE_COLOR,
+            width_px: INTERACTION_TILE_WIDTH_PX,
+        },
+    );
+
+    let (vertices, indices) = unit_square_fat_line_geometry();
+    let vertex_buffer = renderer
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lumber-editor interaction-tile vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+    let index_buffer = renderer
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lumber-editor interaction-tile indices"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+    let instance_buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("lumber-editor interaction-tile instances"),
+        size: (MAX_INTERACTION_TILES as u64) * std::mem::size_of::<MeshInstanceAttribs>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    InteractionTilesOverlay {
+        material,
+        color,
+        vertex_buffer,
+        index_buffer,
+        index_count: indices.len() as u32,
+        instance_buffer,
+        instance_scratch: Vec::with_capacity(MAX_INTERACTION_TILES as usize),
+    }
+}
+
+impl InteractionTilesOverlay {
+    /// Rebuild the per-instance buffer from `tiles` (integer world tile
+    /// coords from [`Interaction::tiles`]). Returns the instance count to
+    /// draw — clamped to [`MAX_INTERACTION_TILES`] so a future radius-10
+    /// surround can't overflow the buffer (it would just clip silently;
+    /// fine for an editor preview, the alternative is a panic mid-render).
+    ///
+    /// Each square is centred on the *integer* world coord `(tx, ty)` — not
+    /// `(tx+0.5, ty+0.5)`. The kind body is drawn at
+    /// `transform.position.to_vec3()` (which is the tile-corner value), so
+    /// the editor treats the body as "occupying the cell centred on its
+    /// origin", and the surrounding interaction squares ring it cleanly at
+    /// `(±1, 0)`, `(0, ±1)`, etc. The `+0.5` tile-corner→tile-centre offset
+    /// is therefore the wrong convention for this visualisation.
+    fn refresh(&mut self, queue: &wgpu::Queue, tiles: &[(i32, i32, i32)]) -> u32 {
+        self.instance_scratch.clear();
+        let cap = MAX_INTERACTION_TILES as usize;
+        for &(tx, ty, tz) in tiles.iter().take(cap) {
+            let translation =
+                Vec3::new(tx as f32, ty as f32, tz as f32 + INTERACTION_TILE_Z_EPSILON);
+            let model =
+                Mat4::from_scale_rotation_translation(Vec3::ONE, Quat::IDENTITY, translation);
+            self.instance_scratch
+                .push(MeshInstanceAttribs::new(model, Vec4::ONE));
+        }
+        let count = self.instance_scratch.len() as u32;
+        if count > 0 {
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&self.instance_scratch),
+            );
+        }
+        count
+    }
 }
 
 /// Bake a 64×64 RGBA8 checkerboard intended for `LinearRepeat` tiling. Two
