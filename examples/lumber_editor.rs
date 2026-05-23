@@ -36,15 +36,15 @@ use std::time::Duration;
 use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
 use currawong::glam::{Mat4, Quat, UVec2, Vec2, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, Frustum, Handle,
-    InstanceBuckets, LineMaterial, LineMaterialInstance, MaterialId, MaterialRegistry, MeshDraw,
-    MeshInstanceAttribs, MeshTemplate, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance,
-    PbrAtlasMaterialParams, PbrAtlasMaterials, PbrMaterial, PbrMaterialInstance, PbrMaterialParams,
-    PrimitiveMesh, RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec,
-    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline, SimPos, SimUnit,
-    Simulation, SunCascades, Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment,
-    WorldObjectId, WorldTransform, Zone, ZoneId, Zones, egui, pollster, unit_cube_line_geometry,
-    wgpu, winit,
+    Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, FatLineMaterial,
+    FatLineMaterialInstance, FatLineMaterialParams, Frustum, Handle, InstanceBuckets, MaterialId,
+    MaterialRegistry, MeshDraw, MeshInstanceAttribs, MeshTemplate, OrbitRig, PbrAtlasMaterial,
+    PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrAtlasMaterials, PbrMaterial,
+    PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh, RenderObjectTraversal, RenderProxies,
+    RenderRegistry, RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
+    ShadowMeshPipeline, SimPos, SimUnit, Simulation, SunCascades, Texture, TextureColorSpace, View,
+    ViewConfig, ViewEnvironment, WorldObjectId, WorldTransform, Zone, ZoneId, Zones, egui,
+    pollster, unit_cube_fat_line_geometry, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -194,13 +194,15 @@ struct GroundPlane {
     material: PbrMaterialInstance,
 }
 
-/// GPU resources for the bounding-box overlay. The line material + unit-cube
-/// vertex/index buffers are static; the single-instance buffer holds a model
-/// matrix that maps `[-0.5, 0.5]³` to the active kind's visual AABB and is
-/// rewritten on selection change.
+/// GPU resources for the bounding-box overlay. Uses [`FatLineMaterial`] for
+/// a constant pixel width regardless of camera distance — wgpu has no
+/// `lineWidth` knob, so each segment is expanded to a screen-space quad in
+/// the vertex shader. Unit-cube vertex/index buffers are static; the
+/// single-instance buffer holds a model matrix that maps `[-0.5, 0.5]³` to
+/// the active kind's visual AABB and is rewritten every frame in `render`.
 struct BoundsOverlay {
-    material: LineMaterial,
-    color: LineMaterialInstance,
+    material: FatLineMaterial,
+    color: FatLineMaterialInstance,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
@@ -560,12 +562,13 @@ impl View for LumberEditorView {
             &self.buckets,
         );
 
-        // Bounding-box overlay — yellow LineList wireframe of the selected
-        // kind's visual AABB. The instance buffer is rewritten every frame
-        // from the active selection (one 84 B write — cheaper than carrying
-        // change-detection state across update/render). Drawn last so its
-        // depth-tested lines occlude correctly behind the kind's body but
-        // sit on top of co-planar ground geometry.
+        // Bounding-box overlay — yellow fat-line wireframe of the selected
+        // kind's visual AABB at a fixed pixel width. Two per-frame uniform
+        // writes: (a) the per-instance model matrix from the active
+        // selection, (b) the viewport size the vertex shader needs to
+        // convert pixels → NDC for the screen-space perpendicular. Drawn
+        // last so its depth-tested triangles occlude correctly behind the
+        // kind's body but sit on top of co-planar ground geometry.
         let current_aabb = sim
             .zones
             .get(sim.zone)
@@ -574,6 +577,9 @@ impl View for LumberEditorView {
             .map(|spec| spec.visual_bounds());
         if let Some(aabb) = current_aabb {
             write_bounds_instance(&renderer.queue, &self.bounds_overlay.instance_buffer, aabb);
+            self.bounds_overlay
+                .color
+                .write_viewport(&renderer.queue, UVec2::new(size.width, size.height));
             pass.set_pipeline(self.bounds_overlay.material.pipeline());
             pass.set_bind_group(1, self.bounds_overlay.color.bind_group(), &[]);
             pass.set_vertex_buffer(0, self.bounds_overlay.vertex_buffer.slice(..));
@@ -707,6 +713,9 @@ fn build_ground_plane(
 /// Yellow used for the bounding-box wireframe. Saturated primary so the
 /// box reads against both the lit kind body and the muted ground checker.
 const BOUNDS_COLOR: Vec4 = Vec4::new(1.0, 1.0, 0.0, 1.0);
+/// Screen-space line width in pixels. Thick enough to read clearly at the
+/// editor's typical orbit distance without dominating the figure.
+const BOUNDS_WIDTH_PX: f32 = 2.5;
 
 fn build_bounds_overlay(
     renderer: &Renderer,
@@ -714,10 +723,16 @@ fn build_bounds_overlay(
 ) -> BoundsOverlay {
     use wgpu::util::DeviceExt;
 
-    let material = LineMaterial::new(renderer, camera_layout);
-    let color = material.create_instance(renderer, BOUNDS_COLOR);
+    let material = FatLineMaterial::new(renderer, camera_layout);
+    let color = material.create_instance(
+        renderer,
+        FatLineMaterialParams {
+            base_color: BOUNDS_COLOR,
+            width_px: BOUNDS_WIDTH_PX,
+        },
+    );
 
-    let (vertices, indices) = unit_cube_line_geometry();
+    let (vertices, indices) = unit_cube_fat_line_geometry();
     let vertex_buffer = renderer
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
