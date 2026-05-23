@@ -3,6 +3,9 @@
 (
     id: "currawong:oak_tree",
     chop_ticks: 90,
+    // Any of the 8 surrounding tiles is a valid chop spot. Rotation-
+    // invariant (trees don't have a meaningful facing).
+    interaction: (type: "Surround", radius_tiles: 1),
     render: (
         shape: "tree",
         mesh: "models/trees/oak.glb",
