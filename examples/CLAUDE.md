@@ -41,9 +41,17 @@ Sim mutation goes through `Command` (`ToggleDesignation`). The win/lose
 state machine in `sim/mod.rs` freezes the world on `Won`/`Lost` — no
 in-game restart.
 
-**[`lumber_editor.rs`](lumber_editor.rs)** — single-item kind viewer with
+**[`lumber_editor/`](lumber_editor/)** — single-item kind viewer with
 debug overlays. Started life as a glb/texture viewer (#120); now also the
-visualisation surface for kind metadata. Current state:
+visualisation surface for kind metadata. Split across [`main.rs`](lumber_editor/main.rs)
+(View struct + `View` trait impl + entry point), [`sim.rs`](lumber_editor/sim.rs)
+(Command + Game), [`scene.rs`](lumber_editor/scene.rs) (checker floor +
+facing arrow), [`overlays.rs`](lumber_editor/overlays.rs) (bounds +
+interaction-tile + footprint-tile fat-line overlays),
+[`kind_panel.rs`](lumber_editor/kind_panel.rs) (left-side egui surface),
+[`hot_reload.rs`](lumber_editor/hot_reload.rs) (file-watcher pump +
+template rebuild), [`mesh_edit.rs`](lumber_editor/mesh_edit.rs) (recalc /
+Save / auto-frame trio). Current state:
 
 - **Kind dropdown + auto-framing.** Left egui panel has an `egui::ComboBox`
   over every kind with a `render` block; selecting one swaps the displayed
