@@ -88,14 +88,14 @@ fn pine_tree_declares_surround_radius_1() {
 }
 
 #[test]
-fn lumber_camp_declares_single_facing_offset() {
+fn lumber_camp_declares_west_face_facing_offsets() {
     let defs = load_assets();
     let def = defs.get(&kind("currawong:lumber_camp")).unwrap();
     let interaction = Interaction::from_def(def).unwrap();
     assert_eq!(
         interaction,
         Interaction::Facing {
-            offsets: vec![(2, 1, 0)],
+            offsets: vec![(2, 1, 0), (2, 0, 0), (2, 2, 0)],
         }
     );
 }
@@ -110,11 +110,14 @@ fn lumberjack_has_no_interaction() {
 }
 
 #[test]
-fn lumber_camp_declares_two_by_two_footprint() {
+fn lumber_camp_declares_two_by_three_footprint() {
     let defs = load_assets();
     let def = defs.get(&kind("currawong:lumber_camp")).unwrap();
     let footprint = Footprint::from_def(def).unwrap();
-    assert_eq!(footprint, Footprint(vec![(0, 0), (1, 0), (0, 1), (1, 1)]));
+    assert_eq!(
+        footprint,
+        Footprint(vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)])
+    );
 }
 
 #[test]
