@@ -35,6 +35,12 @@ fixed = "1.27"
 indexmap = "2"
 rand = { version = "0.8", default-features = false }
 rand_pcg = "0.3"
+# Cross-platform filesystem watcher backing the VFS hot-reload path
+# (`AssetSource::drain_changes` → `Vfs::drain_changes` → `AssetServer::pump`).
+# Native-only — wasm builds mount a `MemorySource` whose default `drain_changes`
+# returns empty, so notify is never reached there. Default features keep the
+# macOS FSEvents backend; the alternative is the polling backend.
+notify = "8"
 bytemuck = { version = "1", optional = true }
 # glTF 2.0 loader for static-mesh streaming. `utils` gives us the
 # `Reader::read_positions` / `read_normals` / `read_tex_coords` /

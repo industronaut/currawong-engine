@@ -82,4 +82,23 @@ pub trait AssetSource: Send + Sync {
     /// unions and dedupes across layers; individual sources are not
     /// required to sort or dedupe their own output.
     fn list(&self) -> Result<Vec<VfsPath>, AssetError>;
+
+    /// Drain queued change notifications since the last call. Each returned
+    /// path is one the consumer should treat as potentially-stale: bytes
+    /// changed, file was created, renamed, or removed. The VFS unions the
+    /// per-layer drains; the [`AssetServer`](crate::AssetServer) then
+    /// evicts its cache entries and the next request spawns a fresh load.
+    ///
+    /// Default returns empty — sources that don't watch (in-memory archives,
+    /// the eventual WASM `include_bytes!` layer) never produce
+    /// notifications. [`FsSource`](super::FsSource) implements it via the
+    /// `notify` crate when [`FsSource::start_watching`](super::FsSource::start_watching)
+    /// is called.
+    ///
+    /// Takes `&self` rather than `&mut self` because [`Vfs`](super::Vfs)
+    /// holds sources as `Box<dyn AssetSource>` and can't hand out mutable
+    /// borrows; implementations carry their own interior mutability.
+    fn drain_changes(&self) -> Vec<VfsPath> {
+        Vec::new()
+    }
 }

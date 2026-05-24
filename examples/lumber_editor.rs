@@ -51,22 +51,45 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 
 // --- VFS ---------------------------------------------------------------
 
-/// Mount the repo's `assets/` directory as a fresh [`Vfs`]. Called twice at
-/// startup — once by `main` for the sim's [`Definitions`], once by the view
-/// for the [`AssetServer`] — matching the lumber_camp convention.
+/// Mount the repo's `assets/` directory as a fresh [`Vfs`] with the
+/// filesystem watcher running. Called twice at startup — once by `main` for
+/// the sim's [`Definitions`], once by the view for the [`AssetServer`] —
+/// matching the lumber_camp convention.
+///
+/// The main-side VFS is dropped immediately after [`Definitions::load`]
+/// returns, so its short-lived watcher tears down with it; the cost is one
+/// brief notify thread spawn. The view-side VFS is the one that actually
+/// drives hot reload through [`AssetServer::pump`].
 fn lumber_editor_vfs() -> Vfs {
     let assets_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let mut source = FsSource::new(assets_root);
+    if let Err(e) = source.start_watching() {
+        eprintln!("lumber_editor: hot reload disabled (watcher init failed: {e})");
+    }
     let mut vfs = Vfs::new();
-    vfs.mount(FsSource::new(assets_root));
+    vfs.mount(source);
     vfs
 }
 
 // --- Sim ---------------------------------------------------------------
 
-/// Sole sim mutation: pick which kind the single displayed object renders as.
+/// Sim-side mutations: kind selection from the egui panel, plus the
+/// hot-reload reload-typed-digest pushed by the View when the file watcher
+/// detects a change under `assets/`.
 #[derive(Debug, Clone)]
 enum Command {
     SelectKind(KindId),
+    /// Replace the sim's parsed-at-startup caches with a freshly-loaded
+    /// snapshot. The view parses [`Definitions`] off the file-watcher tick
+    /// (it's a tiny directory; cheap) and ships the typed digest through
+    /// here so [`apply_command`](Game::apply_command) stays a synchronous
+    /// in-memory swap.
+    ReloadDefinitions {
+        available: Vec<KindId>,
+        render_specs: HashMap<KindId, RenderSpec>,
+        interactions: HashMap<KindId, Interaction>,
+        footprints: HashMap<KindId, Footprint>,
+    },
 }
 
 struct Game {
@@ -166,6 +189,28 @@ impl Simulation for Game {
                     zone.components_mut().insert(self.subject, kind.clone());
                 }
             }
+            Command::ReloadDefinitions {
+                available,
+                render_specs,
+                interactions,
+                footprints,
+            } => {
+                self.available = available.clone();
+                self.render_specs = render_specs.clone();
+                self.interactions = interactions.clone();
+                self.footprints = footprints.clone();
+                // If the previously-selected kind disappeared from defs
+                // (renamed, deleted, or its `render:` block went away),
+                // fall back to the first available so the editor doesn't
+                // get stuck pointing at a phantom.
+                if let Some(zone) = self.zones.get_mut(self.zone) {
+                    let current = zone.components().get::<KindId>(self.subject).cloned();
+                    let still_valid = current.as_ref().is_some_and(|k| self.available.contains(k));
+                    if !still_valid && let Some(first) = self.available.first() {
+                        zone.components_mut().insert(self.subject, first.clone());
+                    }
+                }
+            }
         }
     }
 }
@@ -238,6 +283,14 @@ struct LumberEditorView {
     show_bounding_box: bool,
     show_interaction_tiles: bool,
     show_footprint_tiles: bool,
+
+    /// Set in [`Self::update`] when the file watcher reports changes and
+    /// definitions re-parse cleanly. Drained in [`Self::shadow_pass`]
+    /// (cascade 0) to rebuild `mesh_templates` + `templates`. Two-phase
+    /// because `update` has no `Renderer` and the template rebuild needs
+    /// one — splitting the parse half (file-system reads) from the GPU
+    /// half (handle requests, material instances) keeps the seam clean.
+    pending_defs: Option<Definitions>,
 }
 
 /// GPU resources for the editor's static checkerboard floor. One quad, one
@@ -436,6 +489,7 @@ impl View for LumberEditorView {
             show_bounding_box: true,
             show_interaction_tiles: true,
             show_footprint_tiles: true,
+            pending_defs: None,
         }
     }
 
@@ -459,7 +513,7 @@ impl View for LumberEditorView {
         &mut self,
         sim: &Game,
         _ctx: &mut EngineCtx,
-        _cmds: &mut CommandQueue<Command>,
+        cmds: &mut CommandQueue<Command>,
         dt: Duration,
     ) {
         // Wall-clock rig integration — keeps WASD pan and scroll zoom
@@ -468,6 +522,7 @@ impl View for LumberEditorView {
         self.rig.update(dt);
         self.rig.apply_to(&mut self.camera);
         self.maybe_auto_frame(sim);
+        self.maybe_hot_reload(cmds);
     }
 
     fn ui(
@@ -554,6 +609,12 @@ impl View for LumberEditorView {
         // to land before any of them. The engine calls `shadow_pass` four
         // times *before* `render`, so cascade 0 is the right anchor.
         if cascade == 0 {
+            // Hot reload's GPU half — if `update` parked a fresh `Definitions`
+            // here, rebuild `mesh_templates` + `templates` before anything
+            // below dereferences them. The cull/refresh/upload sequence then
+            // sees the new handles automatically.
+            self.maybe_rebuild_templates(renderer);
+
             self.buckets.begin_frame();
 
             let frustum = Frustum::from_view_proj(self.camera.view_proj());
@@ -780,6 +841,111 @@ impl View for LumberEditorView {
 }
 
 impl LumberEditorView {
+    /// Drain VFS-side change events from the [`AssetServer`]; if anything
+    /// changed, re-parse [`Definitions`], ship the typed digest to the sim
+    /// via [`Command::ReloadDefinitions`], and park the parsed registry in
+    /// [`Self::pending_defs`] for `shadow_pass` to consume.
+    ///
+    /// Catches three kinds of edit in one flow:
+    /// - **Asset bytes** (glb / png) — `pump` evicts the cache entry; the
+    ///   template rebuild in `shadow_pass` re-requests fresh handles.
+    /// - **`.ron` def fields** (bounds, metallic, footprint…) — re-parsed
+    ///   defs feed both the sim's typed caches and the next template
+    ///   rebuild.
+    /// - **`.ron` adds/removes** (new kind file, deleted kind file) — the
+    ///   typed digest's `available` list changes; sim swaps it and resets
+    ///   the subject if its KindId was deleted.
+    ///
+    /// A parse error during reload is logged and dropped — the editor
+    /// keeps its previous defs rather than crashing on a half-saved file.
+    fn maybe_hot_reload(&mut self, cmds: &mut CommandQueue<Command>) {
+        let changed = self.asset_server.pump();
+        if changed.is_empty() {
+            return;
+        }
+        let defs = match pollster::block_on(Definitions::load(
+            self.asset_server.vfs(),
+            &VfsPath::new("kinds").expect("valid VFS path"),
+        )) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("lumber_editor: hot reload — definitions re-parse failed: {e}");
+                return;
+            }
+        };
+        let mut available: Vec<KindId> = Vec::new();
+        let mut render_specs: HashMap<KindId, RenderSpec> = HashMap::new();
+        let mut interactions: HashMap<KindId, Interaction> = HashMap::new();
+        let mut footprints: HashMap<KindId, Footprint> = HashMap::new();
+        for (kind_id, def) in defs.iter() {
+            let Ok(spec) = RenderSpec::from_def(def) else {
+                continue;
+            };
+            available.push(kind_id.clone());
+            render_specs.insert(kind_id.clone(), spec);
+            interactions.insert(
+                kind_id.clone(),
+                Interaction::from_def(def).unwrap_or(Interaction::None),
+            );
+            footprints.insert(
+                kind_id.clone(),
+                Footprint::from_def(def).unwrap_or_default(),
+            );
+        }
+        available.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        eprintln!(
+            "lumber_editor: hot reload — {} change(s), {} kind(s) after re-parse",
+            changed.len(),
+            available.len()
+        );
+        cmds.push_now(Command::ReloadDefinitions {
+            available,
+            render_specs,
+            interactions,
+            footprints,
+        });
+        self.pending_defs = Some(defs);
+    }
+
+    /// Rebuild `mesh_templates` + `templates` (and register any new bucket
+    /// keys) from `self.pending_defs`. No-op when no reload is pending.
+    /// Runs once per reload, at the top of `shadow_pass` cascade 0 where
+    /// the `Renderer` is available.
+    ///
+    /// Templates for kinds removed in the new defs aren't explicitly
+    /// dropped from `buckets` (no API for that today) — they simply stop
+    /// getting `push`ed because nothing in the cull walk references them.
+    /// The bucket buffer lingers as a small leak; fine for editor scope.
+    fn maybe_rebuild_templates(&mut self, renderer: &Renderer) {
+        let Some(defs) = self.pending_defs.take() else {
+            return;
+        };
+        let mut mesh_templates: HashMap<KindId, MeshTemplate<PbrMaterialInstance>> = HashMap::new();
+        let mut templates: Templates = RenderRegistry::new();
+        for (kind_id, _spec, body) in self.material.streamed_kind_body_templates(
+            renderer,
+            &self.samplers,
+            &self.asset_server,
+            &defs,
+            |_, _| {},
+        ) {
+            let bounds = body.visual_bounds;
+            mesh_templates.insert(kind_id.clone(), body);
+            let template = RenderTemplate::new(kind_id.as_str())
+                .with_mesh_part(kind_id.clone(), kind_id.clone(), Mat4::IDENTITY)
+                .with_visual_bounds(bounds);
+            templates.register(kind_id, template);
+        }
+        for key in mesh_templates.keys().cloned().collect::<Vec<_>>() {
+            self.buckets.register(&renderer.device, key);
+        }
+        self.mesh_templates = mesh_templates;
+        self.templates = templates;
+        // Invalidate the auto-frame cache so a kind whose visual bounds
+        // changed reframes the camera on the next `update` tick.
+        self.last_selected = None;
+    }
+
     /// Snap the orbit rig to fit the newly-selected kind's bounds. No-op
     /// when the selection hasn't changed since the previous frame.
     /// (Bounds overlay re-upload lives in `render` where the queue is

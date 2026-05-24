@@ -72,6 +72,29 @@ impl Vfs {
         out.sort();
         Ok(out)
     }
+
+    /// Drain queued change notifications from every layer that supports
+    /// watching. Returns deduped, sorted paths — same convention as
+    /// [`Self::list`]. The [`AssetServer`](crate::AssetServer) pump calls
+    /// this once per frame and uses the result to evict cached handles.
+    ///
+    /// A path appearing here is a *possibly-stale* signal: bytes may have
+    /// changed, the file may have been created or removed. The asset
+    /// server's response is uniform — evict the cache entry and let the
+    /// next request spawn a fresh load.
+    pub fn drain_changes(&self) -> Vec<VfsPath> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for source in &self.layers {
+            for path in source.drain_changes() {
+                if seen.insert(path.clone()) {
+                    out.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +161,50 @@ mod tests {
             listing,
             vec!["only_in_base.ron", "only_in_override.ron", "shared.ron",]
         );
+    }
+
+    #[test]
+    fn drain_changes_empty_without_watching_layers() {
+        // No watcher mounted (MemorySource doesn't override drain_changes);
+        // the aggregate is empty and the asset-server pump becomes a no-op.
+        let mut vfs = Vfs::new();
+        vfs.mount(MemorySource::new().with("foo", b""));
+        assert!(vfs.drain_changes().is_empty());
+    }
+
+    #[test]
+    fn drain_changes_unions_dedupes_and_sorts() {
+        use crate::data::source::{AssetError, AssetFuture, AssetSource};
+        use std::sync::Mutex;
+        // A tiny fake source that pretends to be watching: drain_changes
+        // returns whatever paths the test parked in its queue.
+        struct Parked(Mutex<Vec<VfsPath>>);
+        impl AssetSource for Parked {
+            fn read<'a>(&'a self, _: &'a VfsPath) -> AssetFuture<'a, Vec<u8>> {
+                Box::pin(std::future::ready(Err(AssetError::NotFound)))
+            }
+            fn list(&self) -> Result<Vec<VfsPath>, AssetError> {
+                Ok(Vec::new())
+            }
+            fn drain_changes(&self) -> Vec<VfsPath> {
+                std::mem::take(&mut *self.0.lock().unwrap())
+            }
+        }
+
+        let mut vfs = Vfs::new();
+        // Two layers each parking some changes — "shared" lands twice.
+        vfs.mount(Parked(Mutex::new(vec![p("a"), p("shared")])));
+        vfs.mount(Parked(Mutex::new(vec![p("shared"), p("b")])));
+        let changes: Vec<String> = vfs
+            .drain_changes()
+            .into_iter()
+            .map(|p| p.as_str().to_owned())
+            .collect();
+        // Sorted, deduped — same shape as list().
+        assert_eq!(changes, vec!["a", "b", "shared"]);
+        // Second drain is empty — the fake sources returned their queues
+        // by `mem::take`, and a real watcher's channel works the same way.
+        assert!(vfs.drain_changes().is_empty());
     }
 
     #[test]
