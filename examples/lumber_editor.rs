@@ -91,6 +91,16 @@ enum Command {
         interactions: HashMap<KindId, Interaction>,
         footprints: HashMap<KindId, Footprint>,
     },
+    /// Replace the `bounds_min`/`bounds_max` of a kind's cached
+    /// [`RenderSpec`] in memory. Drives the recalc-from-mesh button: the
+    /// edit lives in sim state and is reflected by the bounds overlay +
+    /// camera auto-frame on the next frame. The Save button mirrors the
+    /// in-memory value out to the kind's `.ron` file separately.
+    UpdateBounds {
+        kind: KindId,
+        min: (f32, f32, f32),
+        max: (f32, f32, f32),
+    },
 }
 
 struct Game {
@@ -212,6 +222,12 @@ impl Simulation for Game {
                     }
                 }
             }
+            Command::UpdateBounds { kind, min, max } => {
+                if let Some(spec) = self.render_specs.get_mut(kind) {
+                    spec.bounds_min = *min;
+                    spec.bounds_max = *max;
+                }
+            }
         }
     }
 }
@@ -302,14 +318,25 @@ struct LumberEditorView {
 
     /// Source `.ron` file (relative to the VFS root) each kind was loaded
     /// from. Populated alongside the per-kind template caches in `init` and
-    /// `maybe_rebuild_templates`. The "recalc bounding box" button uses it
-    /// to find the file to rewrite.
+    /// `maybe_rebuild_templates`. The Save button uses it to find the file
+    /// to rewrite.
     kind_sources: HashMap<KindId, VfsPath>,
 
     /// On-disk root the VFS is mounted on. Joined with a [`VfsPath`] to get
-    /// a real `Path` the editor can write to when the user clicks "recalc
-    /// bounding box".
+    /// a real `Path` the editor can write to when the user clicks Save.
     assets_root: PathBuf,
+
+    /// In-memory bounds edit, scoped to one kind at a time. `Some((kind,
+    /// pristine))` means the user has clicked Recalc against `kind` and
+    /// the sim's `render_specs[kind]` has been updated; `pristine` is the
+    /// pre-edit [`RenderSpec`] kept so the edit can be reverted if the
+    /// user switches kinds without saving. `None` means no unsaved edit
+    /// is pending — the Save button is disabled in that state.
+    ///
+    /// Switching kinds, clicking Save, or a hot reload all clear this
+    /// back to `None` (with a revert command pushed on the switch-without-save
+    /// path so sim state matches disk again).
+    pending_edit: Option<(KindId, RenderSpec)>,
 }
 
 /// GPU resources for the editor's static checkerboard floor. One quad, one
@@ -534,6 +561,7 @@ impl View for LumberEditorView {
             pending_defs: None,
             kind_sources,
             assets_root: Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
+            pending_edit: None,
         }
     }
 
@@ -605,6 +633,20 @@ impl View for LumberEditorView {
                         for kind in &sim.available {
                             let selected = current.as_ref() == Some(kind);
                             if ui.selectable_label(selected, kind.as_str()).clicked() && !selected {
+                                // Switching away from a kind with an
+                                // unsaved bounds edit reverts that edit —
+                                // per the editor's "lost if another file
+                                // is loaded" model. Done by pushing an
+                                // UpdateBounds with the pre-edit pristine
+                                // values; the sim applies it on the next
+                                // tick, just before SelectKind.
+                                if let Some((dirty_kind, pristine)) = self.pending_edit.take() {
+                                    cmds.push_now(Command::UpdateBounds {
+                                        kind: dirty_kind,
+                                        min: pristine.bounds_min,
+                                        max: pristine.bounds_max,
+                                    });
+                                }
                                 cmds.push_now(Command::SelectKind(kind.clone()));
                             }
                         }
@@ -623,8 +665,9 @@ impl View for LumberEditorView {
                 ui.heading("Bounding box");
                 ui.separator();
                 // Only enable the button when the mesh is loaded — recalc
-                // off the magenta fallback would write its `[-0.5, 0.5]^3`
-                // cube back into the kind def, which is the wrong direction.
+                // off the magenta fallback would push its `[-0.5, 0.5]^3`
+                // cube into the in-memory spec, which is the wrong
+                // direction.
                 let mesh_ready = current
                     .as_ref()
                     .and_then(|kind| self.mesh_templates.get(kind))
@@ -632,12 +675,37 @@ impl View for LumberEditorView {
                         MeshBacking::Streamed { handle } => handle.is_ready(),
                         MeshBacking::Inline { .. } => true,
                     });
-                let button = egui::Button::new("Recalc bounding box from mesh");
-                if ui.add_enabled(mesh_ready, button).clicked()
+                let recalc_button = egui::Button::new("Recalc bounding box from mesh");
+                if ui.add_enabled(mesh_ready, recalc_button).clicked()
                     && let Some(kind) = current.as_ref()
                 {
-                    self.recalc_bounds_for(kind);
+                    self.recalc_bounds_for(kind, sim, cmds);
                 }
+
+                // Save button anchored to the bottom of the panel. Bottom-up
+                // layout reverses the natural top-down flow, so the button
+                // sits flush against the panel's lower edge regardless of
+                // how much vertical space the sections above consumed.
+                let dirty = current
+                    .as_ref()
+                    .zip(self.pending_edit.as_ref())
+                    .is_some_and(|(k, (dk, _))| k == dk);
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    let save_button = egui::Button::new("Save");
+                    if ui
+                        .add_enabled(dirty, save_button)
+                        .on_hover_text(
+                            "Write the in-memory bounds for the selected \
+                             kind back to its .ron file.",
+                        )
+                        .clicked()
+                        && let Some(kind) = current.as_ref()
+                        && let Some(spec) = sim.render_specs.get(kind)
+                    {
+                        self.save_bounds_for(kind, spec.visual_bounds());
+                    }
+                    ui.separator();
+                });
             });
     }
 
@@ -959,6 +1027,10 @@ impl LumberEditorView {
         if changed.is_empty() {
             return;
         }
+        // A hot reload replaces sim.render_specs wholesale from disk, so
+        // any in-memory bounds edit (this kind's or another's) is gone
+        // regardless. Clear the dirty marker to match.
+        self.pending_edit = None;
         let defs = match pollster::block_on(Definitions::load(
             self.asset_server.vfs(),
             &VfsPath::new("kinds").expect("valid VFS path"),
@@ -1048,17 +1120,19 @@ impl LumberEditorView {
     }
 
     /// Recalculate the visual AABB for `kind` from its loaded mesh and
-    /// rewrite the `bounds_min`/`bounds_max` lines in the source `.ron`.
-    /// The file watcher mounted by `lumber_editor_vfs` picks up the write
-    /// and triggers a hot reload through [`Self::maybe_hot_reload`], so
-    /// the in-memory bounds + camera auto-frame refresh on their own.
+    /// push an [`Command::UpdateBounds`] so the sim's `render_specs[kind]`
+    /// reflects the new value on the next tick. The edit stays in memory
+    /// — the Save button is what mirrors it out to disk.
+    ///
+    /// Snapshots the pre-edit [`RenderSpec`] into `pending_edit` on the
+    /// first recalc for a given kind so the edit can be reverted if the
+    /// user switches kinds without saving. Subsequent recalcs on the same
+    /// kind reuse the same pristine snapshot — clicking recalc N times
+    /// in a row is still "one edit" from the dirty-tracking perspective.
     ///
     /// Quietly no-ops if the mesh isn't `Ready` (button is gated in `ui`
-    /// too, but the loaded state can change between the check and the
-    /// click); logs and skips on the rare case where the kind has no
-    /// known source path (a hot-reload race where the kind was deleted
-    /// between selecting it and clicking the button).
-    fn recalc_bounds_for(&self, kind: &KindId) {
+    /// too, but state can change between the check and the click).
+    fn recalc_bounds_for(&mut self, kind: &KindId, sim: &Game, cmds: &mut CommandQueue<Command>) {
         let Some(template) = self.mesh_templates.get(kind) else {
             eprintln!("lumber_editor: recalc — no mesh template for {kind}");
             return;
@@ -1083,24 +1157,47 @@ impl LumberEditorView {
                 return;
             }
         };
+        if self.pending_edit.as_ref().is_none_or(|(k, _)| k != kind)
+            && let Some(spec) = sim.render_specs.get(kind)
+        {
+            self.pending_edit = Some((kind.clone(), spec.clone()));
+        }
+        cmds.push_now(Command::UpdateBounds {
+            kind: kind.clone(),
+            min: (bounds.min.x, bounds.min.y, bounds.min.z),
+            max: (bounds.max.x, bounds.max.y, bounds.max.z),
+        });
+        // The new bounds may differ enough from the disk-loaded ones that
+        // the camera should refit. Invalidate the auto-frame cache so
+        // `maybe_auto_frame` runs again on the next `update`.
+        self.last_selected = None;
+    }
+
+    /// Mirror the sim's current in-memory bounds for `kind` out to its
+    /// source `.ron` file and clear `pending_edit`. The file watcher
+    /// picks up the write and triggers a hot reload through
+    /// [`Self::maybe_hot_reload`]; since disk now matches in-memory the
+    /// resulting `ReloadDefinitions` is a no-op for the bounds.
+    fn save_bounds_for(&mut self, kind: &KindId, bounds: Aabb) {
         let Some(source) = self.kind_sources.get(kind) else {
-            eprintln!("lumber_editor: recalc — no source path known for {kind}");
+            eprintln!("lumber_editor: save — no source path known for {kind}");
             return;
         };
         let on_disk = self.assets_root.join(source.as_str());
         if let Err(e) = rewrite_bounds_in_ron(&on_disk, bounds) {
             eprintln!(
-                "lumber_editor: recalc — failed to rewrite {}: {e}",
+                "lumber_editor: save — failed to rewrite {}: {e}",
                 on_disk.display()
             );
-        } else {
-            eprintln!(
-                "lumber_editor: recalc — wrote bounds_min={:?}, bounds_max={:?} to {}",
-                bounds.min,
-                bounds.max,
-                on_disk.display()
-            );
+            return;
         }
+        eprintln!(
+            "lumber_editor: save — wrote bounds_min={:?}, bounds_max={:?} to {}",
+            bounds.min,
+            bounds.max,
+            on_disk.display()
+        );
+        self.pending_edit = None;
     }
 
     /// Snap the orbit rig to fit the newly-selected kind's bounds. No-op
