@@ -29,7 +29,7 @@
 //! - Esc — quit.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,13 +38,14 @@ use currawong::glam::{Mat4, Quat, UVec2, Vec2, Vec3, Vec4};
 use currawong::{
     Aabb, AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Facing, FatLineMaterial,
     FatLineMaterialInstance, FatLineMaterialParams, FatLineVertex, Footprint, Frustum, Handle,
-    InstanceBuckets, Interaction, MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs,
-    MeshTemplate, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams,
-    PbrAtlasMaterials, PbrMaterial, PbrMaterialInstance, PbrMaterialParams, PrimitiveMesh,
-    RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec, RenderTemplate, Renderer,
-    SamplerKind, SamplerRegistry, ShadowMeshPipeline, SimPos, SimUnit, Simulation, SunCascades,
-    Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldObjectId, WorldTransform,
-    Zone, ZoneId, Zones, egui, pollster, unit_cube_fat_line_geometry, wgpu, winit,
+    HandleState, InstanceBuckets, Interaction, MaterialId, MaterialRegistry, MeshBacking, MeshDraw,
+    MeshInstanceAttribs, MeshTemplate, OrbitRig, PbrAtlasMaterial, PbrAtlasMaterialInstance,
+    PbrAtlasMaterialParams, PbrAtlasMaterials, PbrMaterial, PbrMaterialInstance, PbrMaterialParams,
+    PrimitiveMesh, RenderObjectTraversal, RenderProxies, RenderRegistry, RenderSpec,
+    RenderTemplate, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline, SimPos, SimUnit,
+    Simulation, SunCascades, Texture, TextureColorSpace, View, ViewConfig, ViewEnvironment,
+    WorldObjectId, WorldTransform, Zone, ZoneId, Zones, egui, pollster,
+    unit_cube_fat_line_geometry, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -298,6 +299,17 @@ struct LumberEditorView {
     /// one — splitting the parse half (file-system reads) from the GPU
     /// half (handle requests, material instances) keeps the seam clean.
     pending_defs: Option<Definitions>,
+
+    /// Source `.ron` file (relative to the VFS root) each kind was loaded
+    /// from. Populated alongside the per-kind template caches in `init` and
+    /// `maybe_rebuild_templates`. The "recalc bounding box" button uses it
+    /// to find the file to rewrite.
+    kind_sources: HashMap<KindId, VfsPath>,
+
+    /// On-disk root the VFS is mounted on. Joined with a [`VfsPath`] to get
+    /// a real `Path` the editor can write to when the user clicks "recalc
+    /// bounding box".
+    assets_root: PathBuf,
 }
 
 /// GPU resources for the editor's static checkerboard floor. One quad, one
@@ -455,6 +467,10 @@ impl View for LumberEditorView {
 
         let mut mesh_templates: HashMap<KindId, MeshTemplate<PbrMaterialInstance>> = HashMap::new();
         let mut templates: Templates = RenderRegistry::new();
+        let mut kind_sources: HashMap<KindId, VfsPath> = HashMap::new();
+        for (kind_id, def) in defs.iter() {
+            kind_sources.insert(kind_id.clone(), def.source.clone());
+        }
 
         // Silent `on_skip` — `Game::new` already eprintlned the same errors
         // when it built the sim-side `render_specs` cache.
@@ -516,6 +532,8 @@ impl View for LumberEditorView {
             show_footprint_tiles: true,
             show_facing_arrow: true,
             pending_defs: None,
+            kind_sources,
+            assets_root: Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
         }
     }
 
@@ -600,6 +618,26 @@ impl View for LumberEditorView {
                 ui.checkbox(&mut self.show_interaction_tiles, "Interaction tiles");
                 ui.checkbox(&mut self.show_footprint_tiles, "Footprint tiles");
                 ui.checkbox(&mut self.show_facing_arrow, "Facing arrow");
+
+                ui.add_space(8.0);
+                ui.heading("Bounding box");
+                ui.separator();
+                // Only enable the button when the mesh is loaded — recalc
+                // off the magenta fallback would write its `[-0.5, 0.5]^3`
+                // cube back into the kind def, which is the wrong direction.
+                let mesh_ready = current
+                    .as_ref()
+                    .and_then(|kind| self.mesh_templates.get(kind))
+                    .is_some_and(|tpl| match &tpl.mesh {
+                        MeshBacking::Streamed { handle } => handle.is_ready(),
+                        MeshBacking::Inline { .. } => true,
+                    });
+                let button = egui::Button::new("Recalc bounding box from mesh");
+                if ui.add_enabled(mesh_ready, button).clicked()
+                    && let Some(kind) = current.as_ref()
+                {
+                    self.recalc_bounds_for(kind);
+                }
             });
     }
 
@@ -980,6 +1018,10 @@ impl LumberEditorView {
         };
         let mut mesh_templates: HashMap<KindId, MeshTemplate<PbrMaterialInstance>> = HashMap::new();
         let mut templates: Templates = RenderRegistry::new();
+        let mut kind_sources: HashMap<KindId, VfsPath> = HashMap::new();
+        for (kind_id, def) in defs.iter() {
+            kind_sources.insert(kind_id.clone(), def.source.clone());
+        }
         for (kind_id, _spec, body) in self.material.streamed_kind_body_templates(
             renderer,
             &self.samplers,
@@ -999,9 +1041,66 @@ impl LumberEditorView {
         }
         self.mesh_templates = mesh_templates;
         self.templates = templates;
+        self.kind_sources = kind_sources;
         // Invalidate the auto-frame cache so a kind whose visual bounds
         // changed reframes the camera on the next `update` tick.
         self.last_selected = None;
+    }
+
+    /// Recalculate the visual AABB for `kind` from its loaded mesh and
+    /// rewrite the `bounds_min`/`bounds_max` lines in the source `.ron`.
+    /// The file watcher mounted by `lumber_editor_vfs` picks up the write
+    /// and triggers a hot reload through [`Self::maybe_hot_reload`], so
+    /// the in-memory bounds + camera auto-frame refresh on their own.
+    ///
+    /// Quietly no-ops if the mesh isn't `Ready` (button is gated in `ui`
+    /// too, but the loaded state can change between the check and the
+    /// click); logs and skips on the rare case where the kind has no
+    /// known source path (a hot-reload race where the kind was deleted
+    /// between selecting it and clicking the button).
+    fn recalc_bounds_for(&self, kind: &KindId) {
+        let Some(template) = self.mesh_templates.get(kind) else {
+            eprintln!("lumber_editor: recalc — no mesh template for {kind}");
+            return;
+        };
+        let bounds = match &template.mesh {
+            MeshBacking::Streamed { handle } => match handle.peek() {
+                HandleState::Ready(mesh) => mesh.bounds,
+                HandleState::Loading => {
+                    eprintln!("lumber_editor: recalc — mesh for {kind} is still loading");
+                    return;
+                }
+                HandleState::Failed(err) => {
+                    eprintln!("lumber_editor: recalc — mesh for {kind} failed: {err}");
+                    return;
+                }
+            },
+            // Inline templates don't carry a runtime `Mesh.bounds`; not
+            // produced by the editor today, but skip cleanly if one ever
+            // appears rather than silently writing a degenerate AABB.
+            MeshBacking::Inline { .. } => {
+                eprintln!("lumber_editor: recalc — {kind} uses an inline mesh, no recalc");
+                return;
+            }
+        };
+        let Some(source) = self.kind_sources.get(kind) else {
+            eprintln!("lumber_editor: recalc — no source path known for {kind}");
+            return;
+        };
+        let on_disk = self.assets_root.join(source.as_str());
+        if let Err(e) = rewrite_bounds_in_ron(&on_disk, bounds) {
+            eprintln!(
+                "lumber_editor: recalc — failed to rewrite {}: {e}",
+                on_disk.display()
+            );
+        } else {
+            eprintln!(
+                "lumber_editor: recalc — wrote bounds_min={:?}, bounds_max={:?} to {}",
+                bounds.min,
+                bounds.max,
+                on_disk.display()
+            );
+        }
     }
 
     /// Snap the orbit rig to fit the newly-selected kind's bounds. No-op
@@ -1615,6 +1714,53 @@ fn make_checker_texture(renderer: &Renderer) -> Texture {
         }
     }
     Texture::from_rgba8(renderer, "lumber-editor checker", SIZE, SIZE, &bytes, true)
+}
+
+// --- Bounds rewrite ----------------------------------------------------
+
+/// Rewrite the `bounds_min:` and `bounds_max:` lines of a kind `.ron` file
+/// in place from `bounds`. Walks the file line by line so comments,
+/// formatting, and unrelated fields are preserved — the only edits are
+/// the two tuple values inside the `render:` block. Whitespace at the
+/// start of each line is kept so the indentation matches the source.
+///
+/// A degenerate match (a kind file with two `bounds_min:` lines, or one
+/// inside a string literal) would rewrite both. Acceptable for the
+/// editor's authored content; not robust against adversarial RON.
+fn rewrite_bounds_in_ron(path: &Path, bounds: Aabb) -> std::io::Result<()> {
+    let original = std::fs::read_to_string(path)?;
+    let mut out = String::with_capacity(original.len());
+    for line in original.split_inclusive('\n') {
+        if let Some(rewritten) = rewrite_bounds_line(line, bounds) {
+            out.push_str(&rewritten);
+        } else {
+            out.push_str(line);
+        }
+    }
+    std::fs::write(path, out)
+}
+
+/// Return a replacement for `line` if it's a `bounds_min:` / `bounds_max:`
+/// line; otherwise `None`. Preserves leading indentation and the original
+/// line ending. `Debug` formatting on the f32 components matches the
+/// existing RON style (`0.0` not `0`, `-0.5` not `-0.50000`).
+fn rewrite_bounds_line(line: &str, bounds: Aabb) -> Option<String> {
+    let stripped = line.strip_suffix("\r\n").or(line.strip_suffix('\n'));
+    let body = stripped.unwrap_or(line);
+    let line_end = &line[body.len()..];
+    let trimmed = body.trim_start();
+    let indent = &body[..body.len() - trimmed.len()];
+    let (field, v) = if trimmed.starts_with("bounds_min:") {
+        ("bounds_min", bounds.min)
+    } else if trimmed.starts_with("bounds_max:") {
+        ("bounds_max", bounds.max)
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{indent}{field}: ({:?}, {:?}, {:?}),{line_end}",
+        v.x, v.y, v.z,
+    ))
 }
 
 // --- Entry point -------------------------------------------------------
