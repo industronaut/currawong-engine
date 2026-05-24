@@ -16,7 +16,7 @@
         // World-space AABB the visual occupies (after origin-at-base
         // placement). Drives the frustum cull + the asset server's
         // magenta fallback sizing while the real mesh streams in.
-        bounds_min: (-0.65, -0.65, 0.0),
-        bounds_max: (0.65, 0.65, 2.10),
+        bounds_min: (-2.3488538, -1.9408265, -0.0070957434),
+        bounds_max: (2.088915, 2.7883399, 5.020219),
     ),
 )

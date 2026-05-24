@@ -9,7 +9,7 @@
         albedo: "textures/pawns/lumberjack.png",
         metallic: 0.0,
         roughness: 0.70,
-        bounds_min: (-0.40, -0.40, 0.0),
-        bounds_max: (0.70, 0.40, 1.70),
+        bounds_min: (-0.3, -0.3, 0.0),
+        bounds_max: (0.3, 0.3, 1.6),
     ),
 )
