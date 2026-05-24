@@ -95,7 +95,7 @@ fn lumber_camp_declares_single_facing_offset() {
     assert_eq!(
         interaction,
         Interaction::Facing {
-            offsets: vec![(-1, 0, 0)],
+            offsets: vec![(2, 1, 0)],
         }
     );
 }

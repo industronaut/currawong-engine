@@ -9,7 +9,7 @@
     footprint: [(0, 0)],
     render: (
         shape: "tree",
-        mesh: "models/trees/oak.glb",
+        mesh: "lumber/oak_tree_1.glb",
         albedo: "textures/trees/oak_bark.png",
         metallic: 0.0,
         roughness: 0.95,
