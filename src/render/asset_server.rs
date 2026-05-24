@@ -163,6 +163,40 @@ impl AssetServer {
         self.force_loading.store(on, Ordering::Relaxed);
     }
 
+    /// Drain VFS-side change events and evict matching cache entries.
+    /// Returns the set of paths whose cached handles were dropped —
+    /// callers re-request anything they care about, which spawns a fresh
+    /// load through a brand-new [`Handle`] (new identity, write-once
+    /// `OnceLock` intact).
+    ///
+    /// Call once per frame from [`View::update`](crate::View::update). If
+    /// the underlying [`Vfs`] has no watcher mounted (e.g. tests on a
+    /// [`MemorySource`], or an `FsSource` whose
+    /// [`start_watching`](crate::FsSource::start_watching) was never
+    /// called) this is a cheap no-op.
+    ///
+    /// Existing [`Handle`] clones already in consumers' hands keep
+    /// their old content — `OnceLock` is write-once by design. Identity
+    /// is the cache-invalidation signal: a new handle has a fresh
+    /// [`Arc`] identity that fails [`Handle::ptr_eq`](super::Handle::ptr_eq)
+    /// against the old one, which is what material instances key their
+    /// bind-group caches on.
+    pub fn pump(&self) -> Vec<VfsPath> {
+        let changes = self.vfs.drain_changes();
+        if changes.is_empty() {
+            return changes;
+        }
+        let mut textures = self.textures.lock().expect("texture cache poisoned");
+        let mut meshes = self.meshes.lock().expect("mesh cache poisoned");
+        for path in &changes {
+            // Texture cache is keyed by (path, color_space) — one PNG
+            // requested sRGB and Linear lives in two slots and both go.
+            textures.retain(|key, _| &key.path != path);
+            meshes.remove(path);
+        }
+        changes
+    }
+
     /// Return a [`Handle<Texture>`] for `path`, spawning a background load
     /// if this is the first request. Repeated calls for the same
     /// `(path, color_space)` share the same handle — second-and-later
