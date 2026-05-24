@@ -1414,8 +1414,8 @@ impl InteractionTilesOverlay {
 fn make_checker_texture(renderer: &Renderer) -> Texture {
     const SIZE: u32 = 64;
     const CELL_PX: u32 = SIZE / 2;
-    const LIGHT: [u8; 4] = [220, 220, 220, 255];
-    const DARK: [u8; 4] = [160, 160, 160, 255];
+    const LIGHT: [u8; 4] = [160, 160, 160, 255];
+    const DARK: [u8; 4] = [110, 110, 110, 255];
     let mut bytes = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     for y in 0..SIZE {
         for x in 0..SIZE {
