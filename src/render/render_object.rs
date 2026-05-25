@@ -41,6 +41,33 @@ use super::visibility::Aabb;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct NodeId(pub u16);
 
+/// Where a node should land within its new parent's child list when
+/// reparented via [`RenderTemplate::reparent_node`]. The `Before` /
+/// `After` variants name a sibling already present in the destination
+/// — that's the shape the egui_ltreeview drag-and-drop frontend
+/// surfaces drops in (it knows the node the user released over).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InsertPosition {
+    First,
+    Last,
+    Before(NodeId),
+    After(NodeId),
+}
+
+/// Why a [`RenderTemplate::reparent_node`] call refused. Each variant
+/// is recoverable — the caller is expected to ignore the drop and
+/// leave the tree as it was.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReparentError {
+    /// The node being moved doesn't exist in this template.
+    NotFound,
+    /// The requested new parent isn't a live node in this template.
+    ParentNotFound,
+    /// The move would create a cycle (the new parent is the node
+    /// itself or one of its descendants).
+    Cycle,
+}
+
 /// One drawable piece of geometry referenced by a [`TemplateNode`] whose
 /// kind is `Mesh`: a mesh handle and the material key it draws with.
 ///
@@ -271,36 +298,82 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     /// indices held by the caller across this call must be assumed stale.
     ///
     /// Used by the editor's delete-node action. The implementation
-    /// snapshots surviving nodes in their original declaration order
-    /// (which preserves the parent-first invariant — every removed node's
-    /// parent was either removed too or precedes all survivors) and
-    /// re-pushes them into a fresh index, so all parallel structures
-    /// (`id_to_slot`, `children_slots`, `root_slots`) stay consistent.
+    /// rebuilds the parallel structures (`id_to_slot`, `children_slots`,
+    /// `root_slots`) directly from an old-slot → new-slot mapping rather
+    /// than re-pushing through [`Self::add_node`], so the user's authored
+    /// child order survives even when [`Self::reparent_node`] has left
+    /// the `nodes` Vec in a not-strictly-parent-first declaration order.
     pub fn remove_node(&mut self, id: NodeId) {
         let Some(start_slot) = self.slot_of(id) else {
             return;
         };
-        // DFS to collect the doomed subtree's ids.
-        let mut doomed: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+
+        // DFS to collect the doomed subtree's slots and ids.
+        let mut doomed_ids: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut doomed_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut stack = vec![start_slot];
         while let Some(slot) = stack.pop() {
-            doomed.insert(self.nodes[slot as usize].id);
+            doomed_ids.insert(self.nodes[slot as usize].id);
+            doomed_slots.insert(slot);
             for &child in &self.children_slots[slot as usize] {
                 stack.push(child);
             }
         }
 
+        // Old → new slot map, sequential over the survivors in
+        // declaration order. Doomed entries map to `None`.
+        let mut new_slot: Vec<Option<u32>> = vec![None; self.nodes.len()];
+        let mut next: u32 = 0;
+        for (old, node) in self.nodes.iter().enumerate() {
+            if !doomed_ids.contains(&node.id) {
+                new_slot[old] = Some(next);
+                next += 1;
+            }
+        }
+
+        // Reindex children_slots and root_slots in place — this is the
+        // step that preserves user-authored child order (set by
+        // `reparent_node`'s `InsertPosition`), which a re-push through
+        // `add_node` would have flattened back to declaration order.
+        let new_children_slots: Vec<Vec<u32>> = self
+            .children_slots
+            .iter()
+            .enumerate()
+            .filter_map(|(old_slot, kids)| {
+                if doomed_slots.contains(&(old_slot as u32)) {
+                    return None;
+                }
+                Some(
+                    kids.iter()
+                        .filter_map(|&old_kid| new_slot[old_kid as usize])
+                        .collect(),
+                )
+            })
+            .collect();
+        let new_root_slots: Vec<u32> = self
+            .root_slots
+            .iter()
+            .filter_map(|&old_slot| new_slot[old_slot as usize])
+            .collect();
+
+        // Compact the nodes Vec and rebuild id_to_slot.
         let surviving: Vec<TemplateNode<M, MK, E, S>> = std::mem::take(&mut self.nodes)
             .into_iter()
-            .filter(|n| !doomed.contains(&n.id))
+            .filter(|n| !doomed_ids.contains(&n.id))
             .collect();
 
         self.id_to_slot.clear();
-        self.children_slots.clear();
-        self.root_slots.clear();
-        for node in surviving {
-            self.add_node(node);
+        for (slot, node) in surviving.iter().enumerate() {
+            let id_idx = node.id.0 as usize;
+            if id_idx >= self.id_to_slot.len() {
+                self.id_to_slot.resize(id_idx + 1, None);
+            }
+            self.id_to_slot[id_idx] = Some(slot as u32);
         }
+
+        self.nodes = surviving;
+        self.children_slots = new_children_slots;
+        self.root_slots = new_root_slots;
     }
 
     /// Borrow the node with id `id` for in-place editing — the editor
@@ -396,6 +469,97 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     /// Visual AABB declared by [`Self::with_visual_bounds`], if any.
     pub fn visual_bounds(&self) -> Option<Aabb> {
         self.visual_bounds
+    }
+
+    /// Move `id` so its new parent is `new_parent` and it lands at
+    /// `position` within that parent's child list (or within the root
+    /// list when `new_parent` is `None`). The node's `local_transform`
+    /// is left untouched — callers that want world-space stability
+    /// must compose the new parent's inverse themselves first.
+    ///
+    /// Used by the editor's drag-and-drop reparenting. Rejects moves
+    /// that would create a cycle (`new_parent` is `id` itself or any
+    /// of its descendants) and moves of unknown ids; both other error
+    /// arms surface bad references the caller can recover from.
+    ///
+    /// Position references (`Before` / `After`) must name an existing
+    /// child of `new_parent`; otherwise the position degrades to
+    /// `Last`. This matches the egui_ltreeview drag-and-drop frontend
+    /// where the position id is captured at click-time and might have
+    /// shifted by apply-time.
+    pub fn reparent_node(
+        &mut self,
+        id: NodeId,
+        new_parent: Option<NodeId>,
+        position: InsertPosition,
+    ) -> Result<(), ReparentError> {
+        let slot = self.slot_of(id).ok_or(ReparentError::NotFound)?;
+
+        let new_parent_slot = match new_parent {
+            None => None,
+            Some(pid) => {
+                if pid == id {
+                    return Err(ReparentError::Cycle);
+                }
+                let p_slot = self.slot_of(pid).ok_or(ReparentError::ParentNotFound)?;
+                if self.is_descendant(p_slot, slot) {
+                    return Err(ReparentError::Cycle);
+                }
+                Some(p_slot)
+            }
+        };
+
+        let old_parent = self.nodes[slot as usize].parent;
+        let old_siblings = match old_parent {
+            None => &mut self.root_slots,
+            Some(pid) => {
+                let p_slot = self.slot_of(pid).expect("parent slot exists for live node");
+                &mut self.children_slots[p_slot as usize]
+            }
+        };
+        if let Some(pos) = old_siblings.iter().position(|s| *s == slot) {
+            old_siblings.remove(pos);
+        }
+
+        self.nodes[slot as usize].parent = new_parent;
+
+        let new_siblings = match new_parent_slot {
+            None => &mut self.root_slots,
+            Some(p_slot) => &mut self.children_slots[p_slot as usize],
+        };
+        let insert_at = match position {
+            InsertPosition::First => 0,
+            InsertPosition::Last => new_siblings.len(),
+            InsertPosition::Before(sib) => new_siblings
+                .iter()
+                .position(|&s| self.nodes[s as usize].id == sib)
+                .unwrap_or(new_siblings.len()),
+            InsertPosition::After(sib) => new_siblings
+                .iter()
+                .position(|&s| self.nodes[s as usize].id == sib)
+                .map(|i| i + 1)
+                .unwrap_or(new_siblings.len()),
+        };
+        new_siblings.insert(insert_at, slot);
+        Ok(())
+    }
+
+    /// True if `candidate_slot` is `ancestor_slot` itself or any of its
+    /// descendants. Used by [`Self::reparent_node`] to reject cycles.
+    fn is_descendant(&self, candidate_slot: u32, ancestor_slot: u32) -> bool {
+        if candidate_slot == ancestor_slot {
+            return true;
+        }
+        let mut stack = vec![ancestor_slot];
+        while let Some(slot) = stack.pop() {
+            for &child in &self.children_slots[slot as usize] {
+                if child == candidate_slot {
+                    return true;
+                }
+                stack.push(child);
+            }
+        }
+        false
     }
 
     /// Lowest unused [`NodeId`] in this template. Used by the sugar
@@ -790,5 +954,161 @@ mod tests {
         let bounds = Aabb::new(Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 2.5, 1.0));
         let t: RenderTemplate = RenderTemplate::new("campfire").with_visual_bounds(bounds);
         assert_eq!(t.visual_bounds(), Some(bounds));
+    }
+
+    fn three_node_chain() -> (RenderTemplate<TestMesh, TestMat>, NodeId, NodeId, NodeId) {
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let c = NodeId(2);
+        let t = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(c, "c", Some(a), Mat4::IDENTITY));
+        (t, a, b, c)
+    }
+
+    #[test]
+    fn reparent_moves_node_under_new_parent() {
+        let (mut t, a, b, c) = three_node_chain();
+        t.reparent_node(c, Some(b), InsertPosition::Last).unwrap();
+        assert_eq!(t.node(c).unwrap().parent, Some(b));
+        assert!(t.children(t.slot_of(a).unwrap()).is_empty());
+        assert_eq!(t.children(t.slot_of(b).unwrap()), &[t.slot_of(c).unwrap()]);
+    }
+
+    #[test]
+    fn reparent_to_root_makes_node_a_root() {
+        let (mut t, _a, _b, c) = three_node_chain();
+        t.reparent_node(c, None, InsertPosition::Last).unwrap();
+        assert!(t.node(c).unwrap().parent.is_none());
+        assert!(t.roots().contains(&t.slot_of(c).unwrap()));
+    }
+
+    #[test]
+    fn reparent_respects_before_and_after_positions() {
+        let p = NodeId(0);
+        let x = NodeId(1);
+        let y = NodeId(2);
+        let z = NodeId(3);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(p, "p", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(x, "x", Some(p), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(y, "y", Some(p), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(z, "z", None, Mat4::IDENTITY));
+
+        t.reparent_node(z, Some(p), InsertPosition::Before(y))
+            .unwrap();
+        let order: Vec<NodeId> = t
+            .children(t.slot_of(p).unwrap())
+            .iter()
+            .map(|&s| t.nodes()[s as usize].id)
+            .collect();
+        assert_eq!(order, vec![x, z, y]);
+
+        t.reparent_node(z, Some(p), InsertPosition::After(y))
+            .unwrap();
+        let order: Vec<NodeId> = t
+            .children(t.slot_of(p).unwrap())
+            .iter()
+            .map(|&s| t.nodes()[s as usize].id)
+            .collect();
+        assert_eq!(order, vec![x, y, z]);
+    }
+
+    #[test]
+    fn reparent_rejects_self_and_descendant_targets() {
+        let (mut t, a, _b, c) = three_node_chain();
+        assert_eq!(
+            t.reparent_node(a, Some(a), InsertPosition::Last),
+            Err(ReparentError::Cycle)
+        );
+        // c is a descendant of a — making c a's parent would loop the tree.
+        assert_eq!(
+            t.reparent_node(a, Some(c), InsertPosition::Last),
+            Err(ReparentError::Cycle)
+        );
+    }
+
+    #[test]
+    fn reparent_rejects_unknown_node_and_parent() {
+        let (mut t, _a, _b, _c) = three_node_chain();
+        assert_eq!(
+            t.reparent_node(NodeId(99), None, InsertPosition::Last),
+            Err(ReparentError::NotFound)
+        );
+        assert_eq!(
+            t.reparent_node(NodeId(0), Some(NodeId(99)), InsertPosition::Last),
+            Err(ReparentError::ParentNotFound)
+        );
+    }
+
+    #[test]
+    fn remove_node_after_reparent_does_not_panic() {
+        // Regression: reparent_node leaves the `nodes` Vec in its
+        // original declaration order, which may no longer be
+        // parent-first after the move. remove_node's earlier rebuild
+        // re-pushed surviving nodes through add_node and tripped on the
+        // parent-first invariant.
+        //
+        // Setup: c is declared at slot 2, d at slot 3. Move c under d
+        // so c (slot 2) now has parent d (slot 3) — child precedes
+        // parent in declaration order.
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let c = NodeId(2);
+        let d = NodeId(3);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(c, "c", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(d, "d", None, Mat4::IDENTITY));
+        t.reparent_node(c, Some(d), InsertPosition::Last).unwrap();
+
+        // Deleting an unrelated root used to trip the rebuild on the
+        // not-parent-first declaration order (`add_node(c)` ran before
+        // d's slot was registered).
+        t.remove_node(a);
+        assert_eq!(t.node_count(), 3);
+        assert!(t.node(a).is_none());
+        assert_eq!(t.node(c).unwrap().parent, Some(d));
+        assert_eq!(t.children(t.slot_of(d).unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn remove_node_preserves_reparented_child_order() {
+        // Before: a has children [b, c] in that order. After moving b
+        // After c, the order is [c, b]. A subsequent removal of an
+        // unrelated node must not reset the order back to declaration
+        // order (which would silently undo the user's drag).
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let c = NodeId(2);
+        let d = NodeId(3);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", Some(a), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(c, "c", Some(a), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(d, "d", None, Mat4::IDENTITY));
+        t.reparent_node(b, Some(a), InsertPosition::After(c))
+            .unwrap();
+        t.remove_node(d);
+
+        let order: Vec<NodeId> = t
+            .children(t.slot_of(a).unwrap())
+            .iter()
+            .map(|&s| t.nodes()[s as usize].id)
+            .collect();
+        assert_eq!(order, vec![c, b]);
+    }
+
+    #[test]
+    fn reparent_falls_back_to_last_when_sibling_ref_is_stale() {
+        let (mut t, a, b, c) = three_node_chain();
+        // c isn't a child of b yet; Before(c) at parent b can't resolve.
+        t.reparent_node(c, Some(b), InsertPosition::Before(NodeId(99)))
+            .unwrap();
+        // Falls back to appending at the end.
+        assert_eq!(t.children(t.slot_of(b).unwrap()), &[t.slot_of(c).unwrap()]);
+        assert!(t.children(t.slot_of(a).unwrap()).is_empty());
     }
 }

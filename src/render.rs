@@ -154,7 +154,8 @@ pub use pbr_atlas::{PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterial
 pub use picking::{Hover, Ray, TerrainPicker};
 pub use picking_buffer::{FrameIdTable, HitTarget};
 pub use render_object::{
-    EmitterPart, MeshPart, NodeId, NodeKind, RenderRegistry, RenderTemplate, TemplateNode,
+    EmitterPart, InsertPosition, MeshPart, NodeId, NodeKind, RenderRegistry, RenderTemplate,
+    ReparentError, TemplateNode,
 };
 pub use render_object_traversal::RenderObjectTraversal;
 pub use render_proxy::{NodeState, RenderProxies, RenderProxy};

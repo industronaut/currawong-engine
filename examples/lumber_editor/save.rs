@@ -113,49 +113,75 @@ impl LumberEditorView {
     }
 }
 
-/// Walk the template's nodes and project each one back into a
-/// [`NodeSpec`]. Mesh nodes resolve their VFS path from the [`MeshKey`]
-/// — `KindBody` falls back to `body_mesh_path` (the kind's flat
+/// Walk the template and project each node back into a [`NodeSpec`].
+/// Mesh nodes resolve their VFS path from the [`MeshKey`] —
+/// `KindBody` falls back to `body_mesh_path` (the kind's flat
 /// `render.mesh`), `Glb` uses the path baked into the key. Emitter
 /// nodes are skipped — the editor doesn't author them today and the
 /// schema doesn't have a serialisation form yet.
+///
+/// Emits nodes in **parent-first** order via a DFS rooted at
+/// [`RenderTemplate::roots`]: that's the order
+/// [`build_hierarchical_render_template`] needs at load time, and it
+/// doesn't match `template.nodes()` declaration order after a
+/// [`RenderTemplate::reparent_node`] — the Vec stays in author order
+/// but the parent/child relationship can move a child ahead of its
+/// new parent. Saving the raw Vec would panic the next hot reload.
 fn node_specs_from_template(
     template: &RenderTemplate<MeshKey, MeshKey>,
     body_mesh_path: &str,
 ) -> Vec<NodeSpec> {
-    template
-        .nodes()
-        .iter()
-        .filter_map(|node| {
-            let (kind_tag, mesh) = match &node.kind {
-                NodeKind::Empty => (node_kind::EMPTY.to_string(), None),
-                NodeKind::Mesh(part) => {
-                    let mesh_path = match &part.mesh {
-                        MeshKey::KindBody(_) => body_mesh_path.to_string(),
-                        MeshKey::Glb(p) => p.as_ref().to_string(),
-                    };
-                    (
-                        node_kind::MESH.to_string(),
-                        Some(MeshNodeSpec {
-                            mesh: mesh_path,
-                            albedo: None,
-                            metallic: 0.0,
-                            roughness: 0.85,
-                        }),
-                    )
-                }
-                NodeKind::Emitter(_) => return None,
+    let mut out = Vec::with_capacity(template.node_count());
+    for &root_slot in template.roots() {
+        emit_subtree(template, root_slot, body_mesh_path, &mut out);
+    }
+    out
+}
+
+/// Recursive helper for [`node_specs_from_template`]. Appends one
+/// [`NodeSpec`] for `slot` (when it isn't an emitter) then recurses
+/// into its children. Children are visited in the order
+/// [`RenderTemplate::children`] reports, so drag-and-drop sibling
+/// reorders survive the round-trip to disk.
+fn emit_subtree(
+    template: &RenderTemplate<MeshKey, MeshKey>,
+    slot: u32,
+    body_mesh_path: &str,
+    out: &mut Vec<NodeSpec>,
+) {
+    let node = &template.nodes()[slot as usize];
+    let spec = match &node.kind {
+        NodeKind::Empty => Some((node_kind::EMPTY.to_string(), None)),
+        NodeKind::Mesh(part) => {
+            let mesh_path = match &part.mesh {
+                MeshKey::KindBody(_) => body_mesh_path.to_string(),
+                MeshKey::Glb(p) => p.as_ref().to_string(),
             };
-            Some(NodeSpec {
-                id: node.id.0,
-                name: node.name.clone(),
-                parent: node.parent.map(|p| p.0),
-                transform: TransformSpec::from_mat4(node.local_transform),
-                kind: kind_tag,
-                mesh,
-            })
-        })
-        .collect()
+            Some((
+                node_kind::MESH.to_string(),
+                Some(MeshNodeSpec {
+                    mesh: mesh_path,
+                    albedo: None,
+                    metallic: 0.0,
+                    roughness: 0.85,
+                }),
+            ))
+        }
+        NodeKind::Emitter(_) => None,
+    };
+    if let Some((kind_tag, mesh)) = spec {
+        out.push(NodeSpec {
+            id: node.id.0,
+            name: node.name.clone(),
+            parent: node.parent.map(|p| p.0),
+            transform: TransformSpec::from_mat4(node.local_transform),
+            kind: kind_tag,
+            mesh,
+        });
+    }
+    for &child in template.children(slot) {
+        emit_subtree(template, child, body_mesh_path, out);
+    }
 }
 
 /// Find the byte span of the top-level `render: (...)` block in `src`
@@ -290,5 +316,50 @@ mod tests {
         std::fs::write(&tmp, "(no_render: true)\n").unwrap();
         assert!(replace_render_block(&tmp, "render: ()").is_err());
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn node_specs_emitted_parent_first_after_reparent() {
+        use crate::MeshKey;
+        use currawong::InsertPosition;
+        use currawong::data::KindId;
+        use currawong::glam::Mat4;
+        use currawong::{NodeId, RenderTemplate, TemplateNode};
+
+        // Reproduce the panic-on-save shape: c declared at slot 2 with
+        // parent None, d declared at slot 3 with parent None, then c
+        // gets reparented under d. nodes() now lists c before d but
+        // c's parent is d — saving in nodes() order produced a
+        // not-parent-first RON file that crashed the next hot reload.
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let c = NodeId(2);
+        let d = NodeId(3);
+        let mut t: RenderTemplate<MeshKey, MeshKey> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", Some(a), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(c, "c", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(d, "d", None, Mat4::IDENTITY));
+        t.reparent_node(c, Some(d), InsertPosition::Last).unwrap();
+
+        let specs = node_specs_from_template(&t, "currawong:dummy");
+        // Every node's parent (if any) must appear earlier in the list.
+        let mut seen: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        for spec in &specs {
+            if let Some(parent_id) = spec.parent {
+                assert!(
+                    seen.contains(&parent_id),
+                    "node {} (parent={parent_id}) emitted before its parent",
+                    spec.id
+                );
+            }
+            seen.insert(spec.id);
+        }
+        // Sanity: all four nodes round-tripped.
+        let ids: Vec<u16> = specs.iter().map(|s| s.id).collect();
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&0) && ids.contains(&1) && ids.contains(&2) && ids.contains(&3));
+        // Use KindId so the import isn't dead.
+        let _ = KindId::new("currawong:dummy").expect("valid kind id");
     }
 }

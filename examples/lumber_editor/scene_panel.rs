@@ -18,8 +18,9 @@
 //! `nodes:` block).
 
 use currawong::data::{KindId, VfsPath};
+use currawong::egui_ltreeview::{Action, DirPosition, NodeBuilder, TreeView};
 use currawong::glam::{EulerRot, Mat4, Quat, Vec3};
-use currawong::{NodeId, NodeKind, RenderTemplate, TemplateNode, egui};
+use currawong::{InsertPosition, NodeId, NodeKind, RenderTemplate, TemplateNode, egui};
 use std::f32::consts::PI;
 
 use crate::LumberEditorView;
@@ -27,8 +28,17 @@ use crate::LumberEditorView;
 /// Deferred mutation queued by the tree-view widgets so the immutable
 /// borrow on `self.templates` ends before we call `get_mut` to apply it.
 enum SceneAction {
-    AddChild { parent: Option<NodeId> },
-    Delete { id: NodeId },
+    AddChild {
+        parent: Option<NodeId>,
+    },
+    Delete {
+        id: NodeId,
+    },
+    Reparent {
+        id: NodeId,
+        new_parent: Option<NodeId>,
+        position: InsertPosition,
+    },
 }
 
 /// Floor for any per-axis scale value passed to
@@ -54,85 +64,142 @@ impl LumberEditorView {
         // Drop stale selection — happens when the user switched kinds (the
         // previous selection's NodeId doesn't exist in the new template)
         // or when a hot reload rebuilt the template and the id is gone.
-        if let Some(id) = self.selected_node {
-            let exists = self
-                .templates
-                .get(&current_kind)
-                .map(|t| t.node(id).is_some())
-                .unwrap_or(false);
-            if !exists {
+        // Pruned on both the convenience mirror (`selected_node`) and the
+        // widget's persistent state, so `egui_ltreeview` doesn't keep
+        // pointing at a vanished id.
+        if let Some(template) = self.templates.get(&current_kind) {
+            if self
+                .selected_node
+                .is_some_and(|id| template.node(id).is_none())
+            {
                 self.selected_node = None;
+            }
+            let pruned: Vec<Option<NodeId>> = self
+                .tree_view_state
+                .selected()
+                .iter()
+                .copied()
+                .filter(|sel| match sel {
+                    None => true,
+                    Some(id) => template.node(*id).is_some(),
+                })
+                .collect();
+            if pruned.len() != self.tree_view_state.selected().len() {
+                self.tree_view_state.set_selected(pruned);
             }
         }
 
-        let mut new_selection = self.selected_node;
-        let mut action: Option<SceneAction> = None;
+        let mut actions: Vec<SceneAction> = Vec::new();
 
-        // Tree view — immutable borrow on self.templates, walked in a
-        // scope so the borrow ends before the action-buttons block below.
+        // Tree view — immutable borrow on `self.templates` lives only inside
+        // this block so the deferred mutations below can call `get_mut`.
         {
             let Some(template) = self.templates.get(&current_kind) else {
                 ui.label("(no template registered)");
                 return;
             };
             egui::ScrollArea::vertical()
-                .max_height(180.0)
+                .max_height(220.0)
                 .show(ui, |ui| {
-                    for &root in template.roots() {
-                        render_node(ui, template, root, 0, &mut new_selection);
-                    }
-                    if template.node_count() == 0 {
-                        ui.label("(empty)");
+                    let id = ui.make_persistent_id("lumber-editor-scene-tree");
+                    let (_response, tree_actions) = TreeView::new(id)
+                        .allow_drag_and_drop(true)
+                        .allow_multi_selection(false)
+                        .show_state(ui, &mut self.tree_view_state, |builder| {
+                            // Wrapper "Template" root — gives drag-and-drop a
+                            // drop target for "make this a top-level node",
+                            // which the real template models with `parent: None`.
+                            builder.node(NodeBuilder::dir(None).label("Template"));
+                            for &root_slot in template.roots() {
+                                build_subtree(builder, template, root_slot);
+                            }
+                            builder.close_dir();
+                        });
+                    for action in tree_actions {
+                        if let Action::Move(dnd) = action
+                            && let Some(scene_action) = translate_move(&dnd)
+                        {
+                            actions.push(scene_action);
+                        }
                     }
                 });
         }
 
+        // Mirror the widget's selection into the convenience field the rest
+        // of the editor reads (gizmo, inspector, "+ child" parent). First
+        // selected `Some(id)` wins; `None` (the wrapper root) maps to no
+        // selection.
+        self.selected_node = self
+            .tree_view_state
+            .selected()
+            .iter()
+            .find_map(|s| s.as_ref().copied());
+
         ui.horizontal(|ui| {
-            let add_label = if new_selection.is_some() {
+            let add_label = if self.selected_node.is_some() {
                 "+ child"
             } else {
                 "+ root"
             };
             if ui.button(add_label).clicked() {
-                action = Some(SceneAction::AddChild {
-                    parent: new_selection,
+                actions.push(SceneAction::AddChild {
+                    parent: self.selected_node,
                 });
             }
-            let delete_enabled = new_selection.is_some();
+            let delete_enabled = self.selected_node.is_some();
             let delete = ui.add_enabled(delete_enabled, egui::Button::new("- delete"));
             if delete.clicked()
-                && let Some(id) = new_selection
+                && let Some(id) = self.selected_node
             {
-                action = Some(SceneAction::Delete { id });
+                actions.push(SceneAction::Delete { id });
             }
         });
 
-        // Commit the deferred mutation. Selection updates land here too
-        // so the post-action selection (newly added node id, or cleared on
-        // delete) wins over the in-frame click selection.
-        self.selected_node = new_selection;
-        let mutated = match action {
-            Some(SceneAction::AddChild { parent }) => {
-                if let Some(template) = self.templates.get_mut(&current_kind) {
-                    let new_id = template.next_free_node_id();
-                    let name = format!("node_{}", new_id.0);
-                    template.add_node(TemplateNode::empty(new_id, name, parent, Mat4::IDENTITY));
-                    self.selected_node = Some(new_id);
-                    true
-                } else {
-                    false
+        // Commit deferred mutations. Selection updates land here too so the
+        // post-action selection (newly added node id, or cleared on delete)
+        // wins over the in-frame click selection.
+        let mut mutated = false;
+        for action in actions {
+            match action {
+                SceneAction::AddChild { parent } => {
+                    if let Some(template) = self.templates.get_mut(&current_kind) {
+                        let new_id = template.next_free_node_id();
+                        let name = format!("node_{}", new_id.0);
+                        template.add_node(TemplateNode::empty(
+                            new_id,
+                            name,
+                            parent,
+                            Mat4::IDENTITY,
+                        ));
+                        self.selected_node = Some(new_id);
+                        self.tree_view_state.set_selected(vec![Some(new_id)]);
+                        if let Some(parent_id) = parent {
+                            self.tree_view_state.expand_node(&Some(parent_id));
+                        }
+                        mutated = true;
+                    }
+                }
+                SceneAction::Delete { id } => {
+                    if let Some(template) = self.templates.get_mut(&current_kind) {
+                        template.remove_node(id);
+                        self.selected_node = None;
+                        self.tree_view_state.set_selected(vec![]);
+                        mutated = true;
+                    }
+                }
+                SceneAction::Reparent {
+                    id,
+                    new_parent,
+                    position,
+                } => {
+                    if let Some(template) = self.templates.get_mut(&current_kind)
+                        && template.reparent_node(id, new_parent, position).is_ok()
+                    {
+                        mutated = true;
+                    }
                 }
             }
-            Some(SceneAction::Delete { id }) => {
-                let removed = self.templates.get_mut(&current_kind).is_some_and(|t| {
-                    t.remove_node(id);
-                    true
-                });
-                self.selected_node = None;
-                removed
-            }
-            None => false,
-        };
+        }
         if mutated {
             self.dirty_kinds.insert(current_kind.clone());
         }
@@ -319,28 +386,58 @@ impl LumberEditorView {
     }
 }
 
-/// Recursive tree row. Indents by depth and renders each child after the
-/// parent's own row, in declaration order. Empty children list is fine —
-/// produces just the parent's row.
-fn render_node<M, MK, E, S>(
-    ui: &mut egui::Ui,
+/// Emit one [`egui_ltreeview`] node for the [`TemplateNode`] at `slot`
+/// and recurse into its children. Every node is emitted as a `dir`
+/// (not `leaf`) because any node in our model can host children
+/// (Empty, Mesh, and Emitter alike) — making them all dirs keeps the
+/// drop-into-anything affordance the user expects from the widget.
+fn build_subtree<M, MK, E, S>(
+    builder: &mut currawong::egui_ltreeview::TreeViewBuilder<'_, Option<NodeId>>,
     template: &RenderTemplate<M, MK, E, S>,
     slot: u32,
-    depth: u8,
-    selected: &mut Option<NodeId>,
 ) {
     let node = &template.nodes()[slot as usize];
-    let id = node.id;
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 14.0);
-        let label = format!("{} {}", node_kind_icon(&node.kind), node.name);
-        if ui.selectable_label(*selected == Some(id), label).clicked() {
-            *selected = Some(id);
-        }
-    });
+    let label = format!("{} {}", node_kind_icon(&node.kind), node.name);
+    builder.node(NodeBuilder::dir(Some(node.id)).label(label));
     for &child in template.children(slot) {
-        render_node(ui, template, child, depth + 1, selected);
+        build_subtree(builder, template, child);
     }
+    builder.close_dir();
+}
+
+/// Translate one [`egui_ltreeview`] drag-and-drop drop into a
+/// [`SceneAction::Reparent`]. Returns `None` when the drop carries no
+/// real-node source (only the wrapper template root) — that's a no-op,
+/// not a tree edit.
+///
+/// The wrapper root key (`None`) maps to `parent = None` in the real
+/// template; every other `Option<NodeId>` is `Some(real_id)`. Drag
+/// sources are filtered down to the first real node since the widget
+/// is configured for single-selection.
+fn translate_move(
+    dnd: &currawong::egui_ltreeview::DragAndDrop<Option<NodeId>>,
+) -> Option<SceneAction> {
+    let source_id = dnd.source.iter().find_map(|s| s.as_ref().copied())?;
+    let new_parent = dnd.target;
+    // Refuse to drop a node into itself — covered by reparent_node's
+    // cycle check too, but cheap to catch early.
+    if new_parent == Some(source_id) {
+        return None;
+    }
+    let position = match dnd.position {
+        DirPosition::First => InsertPosition::First,
+        DirPosition::Last => InsertPosition::Last,
+        DirPosition::Before(Some(sib)) => InsertPosition::Before(sib),
+        DirPosition::After(Some(sib)) => InsertPosition::After(sib),
+        // Sibling slot referenced the wrapper root — that can't happen in a
+        // single-root tree; fall back to appending at the end.
+        DirPosition::Before(None) | DirPosition::After(None) => InsertPosition::Last,
+    };
+    Some(SceneAction::Reparent {
+        id: source_id,
+        new_parent,
+        position,
+    })
 }
 
 fn node_kind_icon<M, MK, E, S>(kind: &NodeKind<M, MK, E, S>) -> &'static str {

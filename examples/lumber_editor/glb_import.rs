@@ -138,5 +138,9 @@ impl LumberEditorView {
             currawong::MeshPart::new(key.clone(), key),
         ));
         self.selected_node = Some(node_id);
+        self.tree_view_state.set_selected(vec![Some(node_id)]);
+        if let Some(parent_id) = parent {
+            self.tree_view_state.expand_node(&Some(parent_id));
+        }
     }
 }
