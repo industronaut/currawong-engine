@@ -27,18 +27,21 @@ use std::f32::consts::TAU;
 use currawong::data::VfsPath;
 use currawong::glam::{Mat4, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, EngineCtx, MeshBacking, MeshTemplate, PbrMaterial,
-    PbrMaterialInstance, PbrMaterialParams, RenderProxy, Renderer, SamplerKind, SamplerRegistry,
-    TextureColorSpace, WorldObjectId, WorldObjectRef,
+    Aabb, AssetServer, Components, EngineCtx, MeshBacking, MeshTemplate, NodeId, PbrMaterial,
+    PbrMaterialInstance, PbrMaterialParams, RenderProxy, RenderTemplate, Renderer, SamplerKind,
+    SamplerRegistry, TextureColorSpace, WorldObjectId, WorldObjectRef,
 };
 
+use super::PartKey;
 use crate::sim::{Carrying, Game, Idle};
 
-/// Index of the carried-log mesh part in every pawn's render template —
-/// second part after the body. Stable because
-/// [`super::RenderShape::register_template`] adds parts in declaration
+/// Stable [`NodeId`] of the carried-log node in every pawn's render
+/// template — second node after the body. Sugar
+/// [`RenderTemplate::with_mesh_part`] auto-allocates ids from 0, so the
+/// body is `NodeId(0)` and the log is `NodeId(1)`. Stable because
+/// [`super::RenderShape::register_template`] adds nodes in declaration
 /// order and only the pawn shape adds the log.
-const LOG_PART: usize = 1;
+const LOG_NODE_ID: NodeId = NodeId(1);
 
 /// Vertical amplitude of the idle bob applied to pawns carrying an
 /// [`Idle`](crate::sim::Idle) component. A few centimetres reads as
@@ -224,6 +227,7 @@ impl PawnRenderer {
 pub fn update_instance(
     parent: WorldObjectRef,
     components: &Components,
+    template: &RenderTemplate<PartKey, PartKey>,
     instance: &mut RenderProxy,
     alpha: f32,
     state: &PawnRenderer,
@@ -234,5 +238,6 @@ pub fn update_instance(
         .map(|i| i.seconds.to_num::<f32>());
     let pos = state.interp_position(parent.id, live_position, alpha, idle_seconds);
     instance.world_xform.w_axis = Vec4::new(pos.x, pos.y, pos.z, 1.0);
-    instance.mesh_parts[LOG_PART].visible = components.get::<Carrying>(parent.id).is_some();
+    let slot = template.slot_of(LOG_NODE_ID).expect("log node");
+    instance.node_mut(slot).visible = components.get::<Carrying>(parent.id).is_some();
 }

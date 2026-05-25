@@ -13,17 +13,21 @@ use std::f32::consts::PI;
 
 use currawong::glam::{Mat4, Quat, Vec3, Vec4};
 use currawong::{
-    Aabb, AssetServer, Components, InlineTemplate, MeshTemplate, PbrMaterial, PbrMaterialInstance,
-    PrimitiveMesh, RenderProxy, Renderer, SamplerRegistry, WorldObjectRef,
+    Aabb, AssetServer, Components, InlineTemplate, MeshTemplate, NodeId, PbrMaterial,
+    PbrMaterialInstance, PrimitiveMesh, RenderProxy, RenderTemplate, Renderer, SamplerRegistry,
+    WorldObjectRef,
 };
 
+use super::PartKey;
 use crate::sim::Designated;
 
-/// Index of the designation-marker mesh part in every tree's render
-/// template — second part after the body. Stable because
-/// [`super::RenderShape::register_template`] adds parts in declaration
+/// Stable [`NodeId`] of the designation-marker node in every tree's render
+/// template — second node after the body. The sugar [`RenderTemplate::with_mesh_part`]
+/// auto-allocates ids starting at 0, so the body is `NodeId(0)` and the
+/// marker is `NodeId(1)`. Stable because
+/// [`super::RenderShape::register_template`] adds nodes in declaration
 /// order and only the tree shape adds the marker.
-const MARKER_PART: usize = 1;
+const MARKER_NODE_ID: NodeId = NodeId(1);
 
 /// Vertical air gap between the tree apex and the marker apex. Keeps the
 /// marker from kissing the canopy at this camera distance.
@@ -93,9 +97,11 @@ pub fn extended_bounds(body_bounds: &Aabb) -> Aabb {
 pub fn update_instance(
     parent: WorldObjectRef,
     components: &Components,
+    template: &RenderTemplate<PartKey, PartKey>,
     instance: &mut RenderProxy,
 ) {
-    instance.mesh_parts[MARKER_PART].visible = components.get::<Designated>(parent.id).is_some();
+    let slot = template.slot_of(MARKER_NODE_ID).expect("marker node");
+    instance.node_mut(slot).visible = components.get::<Designated>(parent.id).is_some();
 }
 
 /// Emit a [`Command::ToggleDesignation`] for whichever sim object is

@@ -508,11 +508,13 @@ impl View for LumberCampView {
                 &sim.zones,
                 &self.templates,
                 &mut self.proxies,
-                |parent, kind_id, components, instance| match shapes.get(kind_id) {
+                |parent, kind_id, components, template, instance| match shapes.get(kind_id) {
                     Some(RenderShape::Pawn) => {
-                        pawn::update_instance(parent, components, instance, alpha, pawn)
+                        pawn::update_instance(parent, components, template, instance, alpha, pawn)
                     }
-                    Some(RenderShape::Tree) => tree::update_instance(parent, components, instance),
+                    Some(RenderShape::Tree) => {
+                        tree::update_instance(parent, components, template, instance)
+                    }
                     Some(RenderShape::Building) | None => {}
                 },
             );

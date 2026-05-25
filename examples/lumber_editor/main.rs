@@ -466,7 +466,7 @@ impl View for LumberEditorView {
                 &sim.zones,
                 &self.templates,
                 &mut self.proxies,
-                |_parent, _kind, _components, _instance| {},
+                |_parent, _kind, _components, _template, _instance| {},
             );
 
             let buckets = &mut self.buckets;
