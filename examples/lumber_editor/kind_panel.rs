@@ -103,6 +103,11 @@ impl LumberEditorView {
                 // when the user clicks into a node.
                 self.scene_section(current.as_ref(), ui);
 
+                // Gizmo enable + mode toggle. Lives in the left panel
+                // alongside the visibility toggles so all view-side
+                // overlays cluster in one place.
+                self.gizmo_section(ui);
+
                 // Save button anchored to the bottom of the panel. Bottom-up
                 // layout reverses the natural top-down flow, so the button
                 // sits flush against the panel's lower edge regardless of

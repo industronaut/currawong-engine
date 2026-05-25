@@ -35,6 +35,8 @@ pub use winit;
 
 #[cfg(feature = "egui")]
 pub use egui;
+#[cfg(feature = "egui")]
+pub use transform_gizmo_egui;
 
 #[cfg(feature = "yakui")]
 pub use yakui;

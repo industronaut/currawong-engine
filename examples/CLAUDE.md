@@ -74,6 +74,12 @@ Save / auto-frame trio). Current state:
 - **Visibility checkboxes** in the same left panel toggle the main item
   mesh (and its shadow), the bounding-box overlay, the interaction-tiles
   overlay, and the footprint-tiles overlay independently.
+- **3D transform gizmo** ([`gizmo.rs`](lumber_editor/gizmo.rs)) on the
+  selected scene node via `transform-gizmo-egui`. Drives the same
+  `local_transform` as the inspector DragValues, so dirty-tracking and
+  Save pick gizmo drags up for free. Left-panel radio group toggles
+  Translate / Rotate / Scale / All. Walks the parent chain to compose
+  world space, bakes the gizmo result back to local on edit.
 
 Sim is one zone with one object at the origin; sole mutation is
 `Command::SelectKind`. `Game::render_specs` and `Game::interactions` cache
