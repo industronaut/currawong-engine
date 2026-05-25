@@ -44,7 +44,10 @@ impl LumberEditorView {
         sim: &Game,
         cmds: &mut CommandQueue<Command>,
     ) {
-        let Some(template) = self.mesh_templates.get(kind) else {
+        let Some(template) = self
+            .mesh_templates
+            .get(&crate::MeshKey::KindBody(kind.clone()))
+        else {
             eprintln!("lumber_editor: recalc — no mesh template for {kind}");
             return;
         };

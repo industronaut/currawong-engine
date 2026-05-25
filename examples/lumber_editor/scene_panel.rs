@@ -19,7 +19,7 @@
 
 use std::f32::consts::PI;
 
-use currawong::data::KindId;
+use currawong::data::{KindId, VfsPath};
 use currawong::glam::{EulerRot, Mat4, Quat, Vec3};
 use currawong::{NodeId, NodeKind, RenderTemplate, TemplateNode, egui};
 
@@ -122,6 +122,59 @@ impl LumberEditorView {
                 self.selected_node = None;
             }
             None => {}
+        }
+
+        // "Add mesh from glb" — VFS path text input + Add button. The
+        // request lands as a Mesh node parented under the current
+        // selection on the *next* frame's shadow_pass cascade 0, where
+        // the renderer is available to build the MeshTemplate.
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("glb:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.glb_import_path)
+                    .hint_text("e.g. lumber/logs.glb")
+                    .desired_width(ui.available_width() - 60.0),
+            );
+        });
+        let path_buffer = self.glb_import_path.trim().to_string();
+        let path_valid = !path_buffer.is_empty() && VfsPath::new(&path_buffer).is_ok();
+        if ui
+            .add_enabled(path_valid, egui::Button::new("Add mesh from glb"))
+            .clicked()
+            && let Ok(path) = VfsPath::new(&path_buffer)
+        {
+            let parent = self.selected_node;
+            self.queue_glb_import(&current_kind, parent, path);
+            self.glb_import_path.clear();
+        }
+
+        // Graft from another template — deep-copy that kind's node tree
+        // into this one with fresh NodeIds, parenting under the current
+        // selection. Synchronous (no renderer needed). Picked from a
+        // ComboBox listing every kind except the current one (self-graft
+        // is a no-op).
+        ui.add_space(6.0);
+        // Snapshot the kinds list so the immutable borrow on self ends
+        // before the show_ui closure runs (which captures the buffer it
+        // writes into).
+        let mut graft_source: Option<KindId> = None;
+        let kinds: Vec<KindId> = self.kind_sources.keys().cloned().collect();
+        egui::ComboBox::from_id_salt("graft-source")
+            .selected_text("Graft from…")
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for kind in &kinds {
+                    if *kind == current_kind {
+                        continue;
+                    }
+                    if ui.selectable_label(false, kind.as_str()).clicked() {
+                        graft_source = Some(kind.clone());
+                    }
+                }
+            });
+        if let Some(src) = graft_source {
+            self.graft_from_template(&src, &current_kind);
         }
     }
 

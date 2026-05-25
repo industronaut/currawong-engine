@@ -22,8 +22,8 @@ use currawong::{
 };
 
 use crate::LumberEditorView;
-use crate::Templates;
 use crate::sim::Command;
+use crate::{MeshKey, Templates};
 
 impl LumberEditorView {
     /// Drain VFS-side change events from the [`AssetServer`]; if anything
@@ -109,7 +109,8 @@ impl LumberEditorView {
         let Some(defs) = self.pending_defs.take() else {
             return;
         };
-        let mut mesh_templates: HashMap<KindId, MeshTemplate<PbrMaterialInstance>> = HashMap::new();
+        let mut mesh_templates: HashMap<MeshKey, MeshTemplate<PbrMaterialInstance>> =
+            HashMap::new();
         let mut templates: Templates = RenderRegistry::new();
         let mut kind_sources: HashMap<KindId, VfsPath> = HashMap::new();
         for (kind_id, def) in defs.iter() {
@@ -123,9 +124,10 @@ impl LumberEditorView {
             |_, _| {},
         ) {
             let bounds = body.visual_bounds;
-            mesh_templates.insert(kind_id.clone(), body);
+            let body_key = MeshKey::KindBody(kind_id.clone());
+            mesh_templates.insert(body_key.clone(), body);
             let template = RenderTemplate::new(kind_id.as_str())
-                .with_mesh_part(kind_id.clone(), kind_id.clone(), Mat4::IDENTITY)
+                .with_mesh_part(body_key.clone(), body_key, Mat4::IDENTITY)
                 .with_visual_bounds(bounds);
             templates.register(kind_id, template);
         }

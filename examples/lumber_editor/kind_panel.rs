@@ -82,7 +82,10 @@ impl LumberEditorView {
                 // direction.
                 let mesh_ready = current
                     .as_ref()
-                    .and_then(|kind| self.mesh_templates.get(kind))
+                    .and_then(|kind| {
+                        self.mesh_templates
+                            .get(&crate::MeshKey::KindBody(kind.clone()))
+                    })
                     .is_some_and(|tpl| match &tpl.mesh {
                         MeshBacking::Streamed { handle } => handle.is_ready(),
                         MeshBacking::Inline { .. } => true,
