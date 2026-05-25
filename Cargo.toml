@@ -11,7 +11,7 @@ default = ["render"]
 # Render side: window, GPU, View, run(). Disable for headless sim-only builds.
 render = ["dep:bytemuck", "dep:gltf", "dep:image", "dep:pollster", "dep:wgpu", "dep:winit", "glam/bytemuck"]
 # egui-based debug UI overlay. Implies `render`. Adds `View::ui` opt-in hook.
-egui = ["render", "dep:egui", "dep:egui-winit", "dep:egui-wgpu", "dep:transform-gizmo-egui"]
+egui = ["render", "dep:egui", "dep:egui-winit", "dep:egui-wgpu", "dep:transform-gizmo-egui", "dep:egui_ltreeview"]
 # yakui-based game UI. Implies `render`. Adds `View::game_ui` opt-in hook.
 # Independent of `egui`; both can be enabled simultaneously.
 yakui = ["render", "dep:yakui", "dep:yakui-wgpu", "dep:yakui-winit"]
@@ -59,6 +59,10 @@ egui-wgpu = { version = "0.34.2", optional = true }
 # so it lines up with our pinned versions above. Activated by the `egui`
 # feature alongside the rest of the egui stack.
 transform-gizmo-egui = { version = "0.9", optional = true }
+# Tree-view widget powering `lumber_editor`'s scene-graph panel — directory /
+# leaf nodes, multi-select, keyboard nav, and built-in drag-and-drop frontend.
+# 0.7 targets egui 0.34; activated alongside the rest of the egui stack.
+egui_ltreeview = { version = "0.7", optional = true }
 # Pinned to a main-branch commit because published yakui-wgpu 0.3.0 still uses
 # wgpu 22; main has been on wgpu 29 since the bumping-various-dependencies PR.
 # Move to a real version when 0.4 (or whatever the post-wgpu-29 release is)

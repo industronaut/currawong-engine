@@ -85,6 +85,7 @@ impl LumberEditorView {
 
         if let Some(id) = last_root_dest {
             self.selected_node = Some(id);
+            self.tree_view_state.set_selected(vec![Some(id)]);
         }
         count
     }

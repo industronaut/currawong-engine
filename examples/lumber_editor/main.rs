@@ -53,6 +53,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
+use currawong::egui_ltreeview::TreeViewState;
 use currawong::glam::{Mat4, UVec2, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Frustum, InstanceBuckets,
@@ -254,6 +255,16 @@ pub(crate) struct LumberEditorView {
     /// `local_transform` the inspector DragValues edit, so the dirty
     /// machinery picks up gizmo drags for free.
     pub(crate) gizmo: GizmoState,
+
+    /// Persistent state for the `egui_ltreeview` scene-graph widget —
+    /// owns selection + expanded-dir bookkeeping across frames. Keyed
+    /// by [`Option<NodeId>`] where `None` is the implicit "Template"
+    /// root the tree view wraps around the real nodes; the wrapper is
+    /// what lets drag-and-drop drop *to* the top level. Mirrors into
+    /// [`Self::selected_node`] each frame so the rest of the editor
+    /// (gizmo, inspector, +child parenting) can keep treating
+    /// `selected_node` as the source of truth.
+    pub(crate) tree_view_state: TreeViewState<Option<NodeId>>,
 }
 
 impl View for LumberEditorView {
@@ -414,6 +425,7 @@ impl View for LumberEditorView {
             pending_glb_imports: Vec::new(),
             dirty_kinds: HashSet::new(),
             gizmo: GizmoState::new(),
+            tree_view_state: TreeViewState::default(),
         }
     }
 
