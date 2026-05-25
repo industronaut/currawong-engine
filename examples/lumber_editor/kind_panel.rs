@@ -105,23 +105,22 @@ impl LumberEditorView {
                 // layout reverses the natural top-down flow, so the button
                 // sits flush against the panel's lower edge regardless of
                 // how much vertical space the sections above consumed.
-                let dirty = current
-                    .as_ref()
-                    .zip(self.pending_edit.as_ref())
-                    .is_some_and(|(k, (dk, _))| k == dk);
+                // Enabled when the selected kind has any unsaved edit —
+                // bounds recalc (legacy `pending_edit`) or scene-tree
+                // mutation tracked in `dirty_kinds`.
+                let dirty = current.as_ref().is_some_and(|k| self.is_kind_dirty(k));
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                     let save_button = egui::Button::new("Save");
                     if ui
                         .add_enabled(dirty, save_button)
                         .on_hover_text(
-                            "Write the in-memory bounds for the selected \
-                             kind back to its .ron file.",
+                            "Rewrite the selected kind's `render` block on \
+                             disk with the current bounds + scene tree.",
                         )
                         .clicked()
                         && let Some(kind) = current.as_ref()
-                        && let Some(spec) = sim.render_specs.get(kind)
                     {
-                        self.save_bounds_for(kind, spec.visual_bounds());
+                        self.save_template_for(kind, sim);
                     }
                     ui.separator();
                 });

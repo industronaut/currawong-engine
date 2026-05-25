@@ -145,7 +145,10 @@ pub use mesh::{
 };
 pub use mesh_draw::{MeshDraw, PbrAtlasMaterials};
 pub use mesh_primitives::PrimitiveMesh;
-pub use mesh_template::{InlineTemplate, MeshBacking, MeshTemplate, RenderSpec};
+pub use mesh_template::{
+    InlineTemplate, MeshBacking, MeshNodeSpec, MeshTemplate, NodeSpec, RenderSpec, TransformSpec,
+    node_kind,
+};
 pub use pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use pbr_atlas::{PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams};
 pub use picking::{Hover, Ray, TerrainPicker};

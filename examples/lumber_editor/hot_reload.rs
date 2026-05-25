@@ -15,10 +15,9 @@
 use std::collections::HashMap;
 
 use currawong::data::{Definitions, KindId, VfsPath};
-use currawong::glam::Mat4;
 use currawong::{
     CommandQueue, Footprint, Interaction, MeshTemplate, PbrMaterialInstance, RenderRegistry,
-    RenderSpec, RenderTemplate, Renderer, pollster,
+    RenderSpec, Renderer, pollster,
 };
 
 use crate::LumberEditorView;
@@ -50,8 +49,11 @@ impl LumberEditorView {
         }
         // A hot reload replaces sim.render_specs wholesale from disk, so
         // any in-memory bounds edit (this kind's or another's) is gone
-        // regardless. Clear the dirty marker to match.
+        // regardless. Same logic for scene-tree edits — the template
+        // rebuild in `maybe_rebuild_templates` discards them. Clear
+        // both dirty markers to match.
         self.pending_edit = None;
+        self.dirty_kinds.clear();
         let defs = match pollster::block_on(Definitions::load(
             self.asset_server.vfs(),
             &VfsPath::new("kinds").expect("valid VFS path"),
@@ -116,20 +118,24 @@ impl LumberEditorView {
         for (kind_id, def) in defs.iter() {
             kind_sources.insert(kind_id.clone(), def.source.clone());
         }
-        for (kind_id, _spec, body) in self.material.streamed_kind_body_templates(
+        for (kind_id, spec, body) in self.material.streamed_kind_body_templates(
             renderer,
             &self.samplers,
             &self.asset_server,
             &defs,
             |_, _| {},
         ) {
-            let bounds = body.visual_bounds;
-            let body_key = MeshKey::KindBody(kind_id.clone());
-            mesh_templates.insert(body_key.clone(), body);
-            let template = RenderTemplate::new(kind_id.as_str())
-                .with_mesh_part(body_key.clone(), body_key, Mat4::IDENTITY)
-                .with_visual_bounds(bounds);
-            templates.register(kind_id, template);
+            crate::template_build::build_template_for_kind(
+                &kind_id,
+                &spec,
+                body,
+                renderer,
+                &self.material,
+                &self.samplers,
+                &self.asset_server,
+                &mut mesh_templates,
+                &mut templates,
+            );
         }
         for key in mesh_templates.keys().cloned().collect::<Vec<_>>() {
             self.buckets.register(&renderer.device, key);

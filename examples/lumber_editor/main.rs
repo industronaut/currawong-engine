@@ -40,11 +40,13 @@ mod hot_reload;
 mod kind_panel;
 mod mesh_edit;
 mod overlays;
+mod save;
 mod scene;
 mod scene_panel;
 mod sim;
+mod template_build;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,9 +58,8 @@ use currawong::{
     MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs, MeshTemplate, NodeId, OrbitRig,
     PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrAtlasMaterials,
     PbrMaterial, PbrMaterialInstance, RenderObjectTraversal, RenderProxies, RenderRegistry,
-    RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline,
-    SunCascades, TextureColorSpace, View, ViewConfig, ViewEnvironment, ZoneId, egui, pollster,
-    wgpu, winit,
+    RenderSpec, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline, SunCascades,
+    TextureColorSpace, View, ViewConfig, ViewEnvironment, ZoneId, egui, pollster, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -238,6 +239,14 @@ pub(crate) struct LumberEditorView {
     /// queue and apply doesn't reparent the new node. See
     /// [`glb_import`](crate::glb_import).
     pub(crate) pending_glb_imports: Vec<(KindId, NodeId, Option<NodeId>, currawong::data::VfsPath)>,
+
+    /// Kinds with unsaved scene-tree edits (add / delete / rename /
+    /// TRS edit / glb import / graft). The Save button is enabled when
+    /// the current kind is in this set or in
+    /// [`pending_edit`](Self::pending_edit) (bounds recalc). Save
+    /// flushes the kind out of this set; hot reload clears it
+    /// wholesale since the on-disk rebuild discards in-memory edits.
+    pub(crate) dirty_kinds: HashSet<KindId>,
 }
 
 impl View for LumberEditorView {
@@ -327,20 +336,24 @@ impl View for LumberEditorView {
 
         // Silent `on_skip` — `Game::new` already eprintlned the same errors
         // when it built the sim-side `render_specs` cache.
-        for (kind_id, _spec, body) in material.streamed_kind_body_templates(
+        for (kind_id, spec, body) in material.streamed_kind_body_templates(
             renderer,
             &samplers,
             &asset_server,
             &defs,
             |_, _| {},
         ) {
-            let bounds = body.visual_bounds;
-            let body_key = MeshKey::KindBody(kind_id.clone());
-            mesh_templates.insert(body_key.clone(), body);
-            let template = RenderTemplate::new(kind_id.as_str())
-                .with_mesh_part(body_key.clone(), body_key, Mat4::IDENTITY)
-                .with_visual_bounds(bounds);
-            templates.register(kind_id, template);
+            template_build::build_template_for_kind(
+                &kind_id,
+                &spec,
+                body,
+                renderer,
+                &material,
+                &samplers,
+                &asset_server,
+                &mut mesh_templates,
+                &mut templates,
+            );
         }
 
         // Single live object, so hysteresis is irrelevant.
@@ -392,6 +405,7 @@ impl View for LumberEditorView {
             selected_node: None,
             glb_import_path: String::new(),
             pending_glb_imports: Vec::new(),
+            dirty_kinds: HashSet::new(),
         }
     }
 

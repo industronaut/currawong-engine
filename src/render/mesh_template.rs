@@ -17,8 +17,8 @@
 //! their own constructors with the same shape.
 
 use bytemuck::cast_slice;
-use glam::{Mat4, Vec3, Vec4};
-use serde::Deserialize;
+use glam::{Mat4, Quat, Vec3, Vec4};
+use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
 
 use crate::data::{Definitions, KindDef, KindId, VfsPath};
@@ -100,7 +100,7 @@ impl<M> MeshTemplate<M> {
 ///     // ... sim fields ...
 /// )
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RenderSpec {
     /// View-side dispatch tag. The example chooses a closed set (e.g. `"tree"
     /// | "pawn" | "building"`) and uses it to pick a factory that decides the
@@ -117,6 +117,139 @@ pub struct RenderSpec {
     pub roughness: f32,
     pub bounds_min: (f32, f32, f32),
     pub bounds_max: (f32, f32, f32),
+    /// Optional hierarchical node tree authored in the kind def, parallel
+    /// to the flat `mesh`/`albedo`/`bounds_*` fields above. When
+    /// non-empty, view-side template construction walks these nodes
+    /// instead of synthesising a one-mesh template from the flat fields.
+    /// The flat fields stay populated either way — sim consumers
+    /// (`Game::render_specs`, recalc-bounds, overlays) read them
+    /// directly. New on the hierarchical-render-templates branch
+    /// (Phase 6); existing kind files omit the field and parse with an
+    /// empty vec.
+    #[serde(default)]
+    pub nodes: Vec<NodeSpec>,
+}
+
+/// Translation / rotation (xyzw quaternion) / scale tuple — the
+/// serialisable form of an [`Mat4`] local-transform that round-trips
+/// through `Mat4::from_scale_rotation_translation` /
+/// `Mat4::to_scale_rotation_translation`.
+///
+/// Defaulted to identity so kind defs can omit unchanged transforms.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct TransformSpec {
+    pub translation: (f32, f32, f32),
+    /// Quaternion as `(x, y, z, w)`. Defaults to identity `(0, 0, 0, 1)`.
+    pub rotation: (f32, f32, f32, f32),
+    pub scale: (f32, f32, f32),
+}
+
+impl Default for TransformSpec {
+    fn default() -> Self {
+        Self {
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.0, 1.0),
+        }
+    }
+}
+
+impl TransformSpec {
+    /// Decompose a [`Mat4`] for serialisation. Inverse of [`Self::to_mat4`].
+    pub fn from_mat4(m: Mat4) -> Self {
+        let (scale, rotation, translation) = m.to_scale_rotation_translation();
+        Self {
+            translation: translation.into(),
+            rotation: (rotation.x, rotation.y, rotation.z, rotation.w),
+            scale: scale.into(),
+        }
+    }
+
+    /// Compose the local transform back into a [`Mat4`].
+    pub fn to_mat4(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(
+            Vec3::from(self.scale),
+            Quat::from_xyzw(
+                self.rotation.0,
+                self.rotation.1,
+                self.rotation.2,
+                self.rotation.3,
+            ),
+            Vec3::from(self.translation),
+        )
+    }
+}
+
+/// Material parameters for a [`NodeKindSpec::Mesh`] node — the
+/// per-node analogue of the flat `mesh` / `albedo` / `metallic` /
+/// `roughness` fields on [`RenderSpec`]. `albedo` is optional so a node
+/// can fall back to the example's standard atlas; `metallic` and
+/// `roughness` have PBR-default values when omitted.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MeshNodeSpec {
+    /// VFS path to the streamed glTF.
+    pub mesh: String,
+    /// VFS path to the streamed albedo texture (sRGB). Optional —
+    /// editor's "Add mesh from glb" leaves this `None` and the consumer
+    /// falls back to whatever default it uses for grafted geometry.
+    #[serde(default)]
+    pub albedo: Option<String>,
+    /// `0.0` = dielectric, `1.0` = metal. Defaults to `0.0`.
+    #[serde(default)]
+    pub metallic: f32,
+    /// `0.04..1.0`. Defaults to `0.85`.
+    #[serde(default = "default_roughness")]
+    pub roughness: f32,
+}
+
+fn default_roughness() -> f32 {
+    0.85
+}
+
+/// Tag string for the [`NodeSpec`] payload — `"empty"` for an
+/// attachment-only node, `"mesh"` for a [`MeshNodeSpec`] payload.
+/// `"emitter"` is reserved for the future emitter-in-editor pass.
+///
+/// Modelled as a tag string rather than an enum so the schema
+/// round-trips through `ron::Value::into_rust` — ron 0.8's `Value` has
+/// no enum-payload variant, so a Rust `enum NodeKindSpec { Empty,
+/// Mesh(MeshNodeSpec) }` would fail to deserialise via the existing
+/// `KindDef.value` path.
+pub mod node_kind {
+    pub const EMPTY: &str = "empty";
+    pub const MESH: &str = "mesh";
+}
+
+/// Serialisable form of a [`TemplateNode`](super::TemplateNode) authored
+/// in a kind def's hierarchical `render.nodes` block. Carries the
+/// stable [`NodeId`](super::NodeId) (`u16`), a display name, an optional
+/// parent id (`None` = root), a local transform (defaults to identity),
+/// and a [`node_kind`]-tagged payload.
+///
+/// `mesh` is `Some` iff `kind == "mesh"`. Validation lives at the
+/// editor's template-build seam — schema-level checks would otherwise
+/// be duplicated across every consumer.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NodeSpec {
+    /// Stable [`NodeId`](super::NodeId) within this template. Authored
+    /// at editor time and persisted verbatim across saves.
+    pub id: u16,
+    pub name: String,
+    /// Parent id; `None` for roots. Parents must precede children in
+    /// the `nodes` vec (matches the
+    /// [`RenderTemplate`](super::RenderTemplate) parent-first
+    /// invariant).
+    #[serde(default)]
+    pub parent: Option<u16>,
+    #[serde(default)]
+    pub transform: TransformSpec,
+    /// One of [`node_kind::EMPTY`] or [`node_kind::MESH`].
+    pub kind: String,
+    /// Mesh-node payload — present iff [`kind`](Self::kind) is
+    /// `"mesh"`. Editor consumers panic / log on a `"mesh"` kind with
+    /// no payload.
+    #[serde(default)]
+    pub mesh: Option<MeshNodeSpec>,
 }
 
 impl RenderSpec {
@@ -308,6 +441,7 @@ mod tests {
             roughness: 0.9,
             bounds_min: (-0.6, -0.6, 0.0),
             bounds_max: (0.6, 0.6, 3.4),
+            nodes: Vec::new(),
         };
         let bounds = spec.visual_bounds();
         assert_eq!(bounds.min, Vec3::new(-0.6, -0.6, 0.0));
@@ -340,6 +474,125 @@ mod tests {
         assert_eq!(spec.shape, "tree");
         assert_eq!(spec.mesh, "trees/oak.glb");
         assert_eq!(spec.roughness, 0.9);
+    }
+
+    #[test]
+    fn render_spec_parses_with_hierarchical_nodes_block() {
+        use crate::data::{KindDef, KindId, VfsPath};
+        let ron_text = r#"(
+            id: "currawong:tank",
+            render: (
+                shape: "building",
+                mesh: "tanks/chassis.glb",
+                albedo: "tanks/chassis_albedo.png",
+                metallic: 0.6,
+                roughness: 0.4,
+                bounds_min: (-1.5, -1.5, 0.0),
+                bounds_max: (1.5, 1.5, 1.4),
+                nodes: [
+                    (
+                        id: 0,
+                        name: "chassis",
+                        parent: None,
+                        kind: "mesh",
+                        mesh: Some((
+                            mesh: "tanks/chassis.glb",
+                        )),
+                    ),
+                    (
+                        id: 1,
+                        name: "turret",
+                        parent: Some(0),
+                        transform: (
+                            translation: (0.0, 0.0, 0.5),
+                            rotation: (0.0, 0.0, 0.0, 1.0),
+                            scale: (1.0, 1.0, 1.0),
+                        ),
+                        kind: "mesh",
+                        mesh: Some((
+                            mesh: "tanks/turret.glb",
+                            metallic: 0.8,
+                            roughness: 0.3,
+                        )),
+                    ),
+                ],
+            ),
+        )"#;
+        let value: ron::Value = ron::from_str(ron_text).expect("parse");
+        let def = KindDef {
+            id: KindId::new("currawong:tank").expect("valid id"),
+            source: VfsPath::new("kinds/tank.ron").expect("valid path"),
+            value,
+        };
+        let spec = RenderSpec::from_def(&def).expect("render block parses");
+        let nodes = &spec.nodes;
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, 0);
+        assert_eq!(nodes[0].parent, None);
+        assert_eq!(nodes[0].kind, node_kind::MESH);
+        let mesh = nodes[1].mesh.as_ref().expect("mesh payload");
+        assert_eq!(mesh.mesh, "tanks/turret.glb");
+        assert_eq!(mesh.metallic, 0.8);
+        assert_eq!(mesh.roughness, 0.3);
+        assert_eq!(nodes[1].parent, Some(0));
+        assert_eq!(nodes[1].transform.translation, (0.0, 0.0, 0.5));
+    }
+
+    #[test]
+    fn render_spec_parses_empty_node_kind_and_defaults() {
+        use crate::data::{KindDef, KindId, VfsPath};
+        let ron_text = r#"(
+            id: "currawong:rig",
+            render: (
+                shape: "building",
+                mesh: "rig.glb",
+                albedo: "rig.png",
+                metallic: 0.0,
+                roughness: 0.9,
+                bounds_min: (-1.0, -1.0, 0.0),
+                bounds_max: (1.0, 1.0, 1.0),
+                nodes: [
+                    (
+                        id: 0,
+                        name: "attach",
+                        kind: "empty",
+                    ),
+                ],
+            ),
+        )"#;
+        let value: ron::Value = ron::from_str(ron_text).expect("parse");
+        let def = KindDef {
+            id: KindId::new("currawong:rig").expect("valid id"),
+            source: VfsPath::new("kinds/rig.ron").expect("valid path"),
+            value,
+        };
+        let spec = RenderSpec::from_def(&def).expect("render block parses");
+        let nodes = &spec.nodes;
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].kind, node_kind::EMPTY);
+        assert!(nodes[0].mesh.is_none());
+        // Default parent + default transform fill in for the omitted fields.
+        assert_eq!(nodes[0].parent, None);
+        assert_eq!(nodes[0].transform, TransformSpec::default());
+    }
+
+    #[test]
+    fn transform_spec_round_trips_through_mat4() {
+        let original = TransformSpec {
+            translation: (1.0, 2.0, 3.0),
+            // 30° around Y, decomposed: (0, sin(15°), 0, cos(15°))
+            rotation: (0.0, 0.258819, 0.0, 0.9659258),
+            scale: (0.5, 0.5, 0.5),
+        };
+        let mat = original.to_mat4();
+        let round_tripped = TransformSpec::from_mat4(mat);
+        // Approximate equality — to_scale_rotation_translation can pick a
+        // different but equivalent quaternion branch, so just check the
+        // composed matrices match.
+        assert!(
+            (mat - round_tripped.to_mat4()).abs_diff_eq(Mat4::ZERO, 1e-5),
+            "TransformSpec round-trip should preserve the composed matrix",
+        );
     }
 
     #[test]

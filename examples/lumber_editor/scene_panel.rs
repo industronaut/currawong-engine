@@ -106,22 +106,30 @@ impl LumberEditorView {
         // so the post-action selection (newly added node id, or cleared on
         // delete) wins over the in-frame click selection.
         self.selected_node = new_selection;
-        match action {
+        let mutated = match action {
             Some(SceneAction::AddChild { parent }) => {
                 if let Some(template) = self.templates.get_mut(&current_kind) {
                     let new_id = template.next_free_node_id();
                     let name = format!("node_{}", new_id.0);
                     template.add_node(TemplateNode::empty(new_id, name, parent, Mat4::IDENTITY));
                     self.selected_node = Some(new_id);
+                    true
+                } else {
+                    false
                 }
             }
             Some(SceneAction::Delete { id }) => {
-                if let Some(template) = self.templates.get_mut(&current_kind) {
-                    template.remove_node(id);
-                }
+                let removed = self.templates.get_mut(&current_kind).is_some_and(|t| {
+                    t.remove_node(id);
+                    true
+                });
                 self.selected_node = None;
+                removed
             }
-            None => {}
+            None => false,
+        };
+        if mutated {
+            self.dirty_kinds.insert(current_kind.clone());
         }
 
         // "Add mesh from glb" — VFS path text input + Add button. The
@@ -145,7 +153,9 @@ impl LumberEditorView {
             && let Ok(path) = VfsPath::new(&path_buffer)
         {
             let parent = self.selected_node;
-            self.queue_glb_import(&current_kind, parent, path);
+            if self.queue_glb_import(&current_kind, parent, path).is_some() {
+                self.dirty_kinds.insert(current_kind.clone());
+            }
             self.glb_import_path.clear();
         }
 
@@ -173,8 +183,10 @@ impl LumberEditorView {
                     }
                 }
             });
-        if let Some(src) = graft_source {
-            self.graft_from_template(&src, &current_kind);
+        if let Some(src) = graft_source
+            && self.graft_from_template(&src, &current_kind) > 0
+        {
+            self.dirty_kinds.insert(current_kind.clone());
         }
     }
 
@@ -189,6 +201,7 @@ impl LumberEditorView {
         let Some(selected) = self.selected_node else {
             return;
         };
+        let mut mutated = false;
         let Some(template) = self.templates.get_mut(&current_kind) else {
             return;
         };
@@ -209,7 +222,9 @@ impl LumberEditorView {
 
         ui.horizontal(|ui| {
             ui.label("Name:");
-            ui.text_edit_singleline(&mut node.name);
+            if ui.text_edit_singleline(&mut node.name).changed() {
+                mutated = true;
+            }
         });
 
         // Decompose for display. scale-rotation-translation; Euler XYZ
@@ -271,6 +286,10 @@ impl LumberEditorView {
             let scale = Vec3::from(s);
             node.local_transform =
                 Mat4::from_scale_rotation_translation(scale, rotation, translation);
+            mutated = true;
+        }
+        if mutated {
+            self.dirty_kinds.insert(current_kind);
         }
     }
 }
