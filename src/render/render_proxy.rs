@@ -5,21 +5,20 @@
 //! [`EmitterTemplate`](super::EmitterTemplate): the View walks the sim
 //! each frame and *declares* one [`RenderProxy`] per
 //! `(WorldObjectRef, R)` key, supplying its world transform, visual
-//! AABB, and the template's mesh/emitter part counts. After the sim
-//! walk, [`RenderProxies::cull`] tests each object's AABB against
-//! the camera frustum, updates a per-object hysteresis counter, and
-//! drops objects that have been outside the frustum longer than the
-//! configured window.
+//! AABB, and the template's node count. After the sim walk,
+//! [`RenderProxies::cull`] tests each object's AABB against the camera
+//! frustum, updates a per-object hysteresis counter, and drops objects
+//! that have been outside the frustum longer than the configured window.
 //!
 //! Each proxy also carries persistent **view-side per-instance state**:
-//! [`RenderProxy::root_visible`] and per-part visibility in
-//! [`mesh_parts`](RenderProxy::mesh_parts) /
-//! [`emitter_parts`](RenderProxy::emitter_parts). This is where the
-//! sim→view translation lands each frame: the template's `update` hook
-//! reads slots/components from the parent sim object and mutates these
-//! fields; the extract walk then reads only this state, never the sim
-//! directly. CLAUDE.md "All sim→view translation happens in the
-//! per-instance update."
+//! [`RenderProxy::root_visible`] gates the whole instance, and the
+//! parallel [`RenderProxy::nodes`] vec carries per-node visibility plus
+//! per-node cached world transforms recomputed each frame by the
+//! traversal. This is where the sim→view translation lands each frame:
+//! the template's `update` hook reads slots/components from the parent
+//! sim object and mutates these fields; the extract walk then reads only
+//! this state, never the sim directly. CLAUDE.md "All sim→view
+//! translation happens in the per-instance update."
 //!
 //! Lifecycle matches CLAUDE.md's invariants:
 //! - Objects created on first visibility (a new object whose AABB is
@@ -27,7 +26,7 @@
 //! - Destroyed on cull-past-hysteresis or when the sim object disappears
 //!   (no `declare` call this frame).
 //! - View state lives only as long as the proxy — no history beyond
-//!   the hysteresis counter and per-part flags, which are recomputed
+//!   the hysteresis counter and per-node flags, which are recomputed
 //!   from sim state each frame via the update hook.
 //!
 //! Templates with no `visual_bounds` are treated as always visible: their
@@ -43,51 +42,70 @@ use crate::sim::WorldObjectRef;
 
 use super::visibility::{Aabb, Frustum};
 
-/// View-side per-part state carried by [`RenderProxy`]. Mutated by
-/// the template's `update` hook; read by the extract walk.
+/// View-side per-node state carried by [`RenderProxy`]. Author-mutable
+/// fields are set by the template's update hook; engine-managed fields
+/// (`world_xform`, `effective_visible`) are filled by the traversal's
+/// per-frame tree walk before extract reads them.
 ///
 /// `visible` defaults to `true` on first declare. Setting it `false`
-/// means the engine skips this part's extract callback this frame —
-/// equivalent to "extract produced no attribs."
+/// means the engine skips this node's extract callback this frame —
+/// equivalent to "extract produced no attribs." Hidden ancestors
+/// cascade: any descendant of an invisible node also has
+/// `effective_visible == false` regardless of its own `visible` flag.
 #[derive(Clone, Debug)]
-pub struct RenderPartState {
+pub struct NodeState {
+    /// Author-set: the node is intended to be drawn this frame. Defaults
+    /// to `true`. Setting `false` skips this node and its descendants in
+    /// the extract walk.
     pub visible: bool,
+    /// Engine-set during the per-frame tree walk: composed world-space
+    /// transform of this node, including all ancestor local transforms
+    /// and the proxy's root world transform. Extract reads this directly
+    /// instead of recomputing.
+    pub world_xform: Mat4,
+    /// Engine-set during the per-frame tree walk: `visible && every
+    /// ancestor's effective_visible`. Extract gates on this.
+    pub effective_visible: bool,
 }
 
-impl Default for RenderPartState {
+impl Default for NodeState {
     fn default() -> Self {
-        Self { visible: true }
+        Self {
+            visible: true,
+            world_xform: Mat4::IDENTITY,
+            effective_visible: true,
+        }
     }
 }
 
 /// Per-object state carried by [`RenderProxies`]: world transform,
 /// optional world-space visual AABB, the hysteresis counter, and
 /// persistent view-side per-instance state ([`root_visible`](Self::root_visible)
-/// plus per-part visibility).
+/// plus per-node visibility).
 ///
 /// This is the view-side proxy for one sim object × render template
-/// pair — analogous to UE's `PrimitiveSceneProxy`. The `*_parts` Vecs
-/// are sized at declare time from the template's mesh/emitter part
-/// counts and resized in place if those ever change.
+/// pair — analogous to UE's `PrimitiveSceneProxy`. The `nodes` vec is
+/// sized at declare time from the template's `node_count` and resized in
+/// place if that ever changes.
 #[derive(Clone, Debug)]
 pub struct RenderProxy {
     /// Composed world transform of the sim object owning this proxy.
-    /// World-space transform of a drawn part is
-    /// `world_xform * part.local_transform`.
+    /// Root nodes inherit this as their parent transform during the
+    /// per-frame tree walk.
     pub world_xform: Mat4,
     /// World-space AABB used for frustum culling. `None` means the
     /// proxy is never frustum-culled (treated as always visible).
     pub world_aabb: Option<Aabb>,
     /// Whole-instance visibility. When `false`, the engine skips every
-    /// mesh and emitter callback for this proxy — no hit-ID is reserved
-    /// either. Defaults to `true`; set in the update hook.
+    /// node callback for this proxy — no hit-ID is reserved either.
+    /// Defaults to `true`; set in the update hook.
     pub root_visible: bool,
-    /// Per-mesh-part view-side state, parallel to
-    /// [`RenderTemplate::mesh_parts`](super::RenderTemplate::mesh_parts).
-    pub mesh_parts: Vec<RenderPartState>,
-    /// Per-emitter-part view-side state, parallel to
-    /// [`RenderTemplate::emitter_parts`](super::RenderTemplate::emitter_parts).
-    pub emitter_parts: Vec<RenderPartState>,
+    /// Per-node view-side state, parallel to
+    /// [`RenderTemplate::nodes`](super::RenderTemplate::nodes). Indexed
+    /// by the dense slot the template assigns each [`NodeId`](super::NodeId);
+    /// look the slot up via
+    /// [`RenderTemplate::slot_of`](super::RenderTemplate::slot_of).
+    pub nodes: Vec<NodeState>,
     frames_since_visible: u32,
     declared_this_frame: bool,
 }
@@ -104,6 +122,19 @@ impl RenderProxy {
     /// [`RenderProxies::cull`] call.
     pub fn is_visible(&self) -> bool {
         self.frames_since_visible == 0
+    }
+
+    /// Convenience accessor: per-node state by slot, panicking on an
+    /// out-of-bounds slot. Use with
+    /// [`RenderTemplate::slot_of`](super::RenderTemplate::slot_of):
+    /// `instance.node_mut(template.slot_of(id).unwrap()).visible = false;`.
+    pub fn node_mut(&mut self, slot: u32) -> &mut NodeState {
+        &mut self.nodes[slot as usize]
+    }
+
+    /// Read-side counterpart of [`Self::node_mut`].
+    pub fn node(&self, slot: u32) -> &NodeState {
+        &self.nodes[slot as usize]
     }
 }
 
@@ -157,21 +188,19 @@ impl<R: Clone + Eq + Hash> RenderProxies<R> {
     /// they're dropped on the next [`cull`](Self::cull) unless visible —
     /// matching CLAUDE.md's "created on first visibility" semantics.
     ///
-    /// `mesh_parts_count` and `emitter_parts_count` size the per-part
-    /// state Vecs from the template; if they change on a later declare
-    /// (e.g. template was replaced), the Vecs are resized in place,
-    /// new entries default to `visible = true`. Per-part visibility
-    /// from prior frames is preserved across declares — the update hook
-    /// is responsible for re-asserting it, since view state is
-    /// recoverable from sim state.
+    /// `node_count` sizes the per-node state Vec from the template. If
+    /// it changes on a later declare (e.g. template was replaced), the
+    /// Vec is resized in place; new entries default to `visible = true`.
+    /// Per-node visibility from prior frames is preserved across
+    /// declares — the update hook is responsible for re-asserting it,
+    /// since view state is recoverable from sim state.
     pub fn declare(
         &mut self,
         parent: WorldObjectRef,
         render_id: R,
         world_xform: Mat4,
         world_aabb: Option<Aabb>,
-        mesh_parts_count: usize,
-        emitter_parts_count: usize,
+        node_count: usize,
     ) {
         let init_frames = self.hysteresis_frames.saturating_add(1);
         let obj = self
@@ -181,8 +210,7 @@ impl<R: Clone + Eq + Hash> RenderProxies<R> {
                 world_xform,
                 world_aabb,
                 root_visible: true,
-                mesh_parts: vec![RenderPartState::default(); mesh_parts_count],
-                emitter_parts: vec![RenderPartState::default(); emitter_parts_count],
+                nodes: vec![NodeState::default(); node_count],
                 // Just past the window so a never-visible new proxy is
                 // dropped on the first cull, instead of lingering 30 frames.
                 frames_since_visible: init_frames,
@@ -191,13 +219,8 @@ impl<R: Clone + Eq + Hash> RenderProxies<R> {
         obj.world_xform = world_xform;
         obj.world_aabb = world_aabb;
         obj.declared_this_frame = true;
-        if obj.mesh_parts.len() != mesh_parts_count {
-            obj.mesh_parts
-                .resize(mesh_parts_count, RenderPartState::default());
-        }
-        if obj.emitter_parts.len() != emitter_parts_count {
-            obj.emitter_parts
-                .resize(emitter_parts_count, RenderPartState::default());
+        if obj.nodes.len() != node_count {
+            obj.nodes.resize(node_count, NodeState::default());
         }
     }
 
@@ -311,7 +334,7 @@ mod tests {
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
         live.cull(&always_inside());
 
         assert_eq!(live.len(), 1);
@@ -326,7 +349,7 @@ mod tests {
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
         live.cull(&always_outside());
 
         // CLAUDE.md: "Instances are created on first visibility." A new
@@ -342,14 +365,14 @@ mod tests {
         let mut live: RenderProxies<Rid> = RenderProxies::new(5);
         // Establish visibility.
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
         live.cull(&always_inside());
         assert_eq!(live.len(), 1);
 
         // Now invisible — should linger up to hysteresis frames.
         for f in 1..=5 {
             live.begin_frame();
-            live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+            live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
             live.cull(&always_outside());
             assert_eq!(live.len(), 1, "proxy dropped at frame {f} of hysteresis");
             let (_, _, obj) = live.iter().next().unwrap();
@@ -358,7 +381,7 @@ mod tests {
         }
         // One more frame past the window → drop.
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
         live.cull(&always_outside());
         assert_eq!(live.len(), 0);
     }
@@ -370,13 +393,13 @@ mod tests {
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(5);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
         live.cull(&always_inside());
 
         // Three frames invisible.
         for _ in 0..3 {
             live.begin_frame();
-            live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+            live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
             live.cull(&always_outside());
         }
         let (_, _, obj) = live.iter().next().unwrap();
@@ -384,7 +407,7 @@ mod tests {
 
         // Now visible again — counter should reset.
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
         live.cull(&always_inside());
         let (_, _, obj) = live.iter().next().unwrap();
         assert!(obj.is_visible());
@@ -397,7 +420,7 @@ mod tests {
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
         live.cull(&always_inside());
         assert_eq!(live.len(), 1);
 
@@ -414,7 +437,7 @@ mod tests {
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(2);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, None, 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, None, 0);
         live.cull(&always_outside()); // would normally drop on first cull
 
         assert_eq!(live.len(), 1);
@@ -423,43 +446,41 @@ mod tests {
     }
 
     #[test]
-    fn part_state_is_sized_from_declare_and_defaults_visible() {
+    fn node_state_is_sized_from_declare_and_defaults_visible() {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 3, 2);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 5);
         live.cull(&always_inside());
 
         let (_, _, obj) = live.iter().next().unwrap();
-        assert_eq!(obj.mesh_parts.len(), 3);
-        assert_eq!(obj.emitter_parts.len(), 2);
+        assert_eq!(obj.nodes.len(), 5);
         assert!(obj.root_visible);
-        assert!(obj.mesh_parts.iter().all(|p| p.visible));
-        assert!(obj.emitter_parts.iter().all(|p| p.visible));
+        assert!(obj.nodes.iter().all(|n| n.visible));
     }
 
     #[test]
-    fn part_state_preserved_across_redeclare() {
+    fn node_state_preserved_across_redeclare() {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 2, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 2);
         live.cull(&always_inside());
 
-        // Mutate per-part state (this is what the update hook will do).
+        // Mutate per-node state (this is what the update hook will do).
         for (_, _, obj) in live.iter_mut() {
-            obj.mesh_parts[0].visible = false;
+            obj.nodes[0].visible = false;
             obj.root_visible = false;
         }
 
         // Re-declare on the next frame — state should persist; the update
         // hook re-asserts it. (No auto-reset to defaults on redeclare.)
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 2, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 2);
 
         let (_, _, obj) = live.iter().next().unwrap();
         assert!(
@@ -467,29 +488,28 @@ mod tests {
             "root_visible must persist across redeclare"
         );
         assert!(
-            !obj.mesh_parts[0].visible,
-            "per-part visibility must persist across redeclare"
+            !obj.nodes[0].visible,
+            "per-node visibility must persist across redeclare"
         );
-        assert!(obj.mesh_parts[1].visible);
+        assert!(obj.nodes[1].visible);
     }
 
     #[test]
-    fn part_state_resizes_when_count_changes() {
+    fn node_state_resizes_when_count_changes() {
         let mut zones = Zones::new();
         let parent = make_parent(&mut zones);
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 1, 1);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 2);
 
-        // Template was swapped — more mesh parts, fewer emitters.
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 3, 0);
+        // Template was swapped — different node count.
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 5);
 
         let (_, _, obj) = live.iter().next().unwrap();
-        assert_eq!(obj.mesh_parts.len(), 3);
-        assert_eq!(obj.emitter_parts.len(), 0);
+        assert_eq!(obj.nodes.len(), 5);
         // New entries default to visible.
-        assert!(obj.mesh_parts.iter().all(|p| p.visible));
+        assert!(obj.nodes.iter().all(|n| n.visible));
     }
 
     #[test]
@@ -499,13 +519,12 @@ mod tests {
 
         let mut live: RenderProxies<Rid> = RenderProxies::new(30);
         live.begin_frame();
-        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0, 0);
+        live.declare(parent, Rid::A, Mat4::IDENTITY, Some(Aabb::cube(0.5)), 0);
         live.declare(
             parent,
             Rid::B,
             Mat4::from_translation(Vec3::X),
             Some(Aabb::cube(0.5)),
-            0,
             0,
         );
         live.cull(&always_inside());

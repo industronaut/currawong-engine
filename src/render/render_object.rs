@@ -1,18 +1,20 @@
 //! Render-object templates and their registry.
 //!
-//! A render object is a view-side template — a hierarchy of meshes, emitters,
-//! materials, and other GPU resources — instanced when the camera shows
-//! a sim object that names it. Templates are identified by a user-chosen id
-//! type `R` (`Copy + Eq + Hash`; conventionally named `RenderId` at the call
-//! site) and stored in a [`RenderRegistry`] owned by the `View`.
+//! A render object is a view-side template — a hierarchy of named nodes
+//! that hold meshes, emitters, or empty attachment transforms — instanced
+//! when the camera shows a sim object that names it. Templates are
+//! identified by a user-chosen id type `R` (`Copy + Eq + Hash`;
+//! conventionally named `RenderId` at the call site) and stored in a
+//! [`RenderRegistry`] owned by the `View`.
 //!
-//! Templates carry two kinds of parts: [`MeshPart<M, MK>`] for static
-//! geometry and [`EmitterPart<E, S>`] for particle emitter attachments.
-//! Each part has a local transform from the template root. Per-instance
-//! state lives on the persistent
-//! [`RenderProxy`](super::RenderProxy); the per-instance update
-//! closure reads sim [`Components`](crate::sim::Components) and writes it
-//! there each frame.
+//! Each [`TemplateNode`] carries a stable [`NodeId`] (assigned at editor
+//! time and persisted in the template definition), a name, a parent link,
+//! a local transform, and a [`NodeKind`] payload — `Empty` for pure
+//! attachment / grouping nodes, `Mesh(MeshPart)` for static geometry,
+//! `Emitter(EmitterPart)` for particle attachments. World transforms and
+//! visibility cascade down the tree once per frame; per-instance state
+//! lives on the persistent [`RenderProxy`](super::RenderProxy), indexed by
+//! the dense slot the template assigns each node at build time.
 //!
 //! `RenderTemplate` and `RenderRegistry` default `M`, `MK`, `E`, `S` to
 //! `()` so callers that haven't committed to a given part kind can use the
@@ -27,79 +29,181 @@ use glam::Mat4;
 
 use super::visibility::Aabb;
 
-/// One drawable piece of a [`RenderTemplate`]: a mesh handle, the material
-/// key it draws with, and a transform relative to the template root.
+/// Stable per-template identifier for a [`TemplateNode`]. Authored at
+/// editor time, written into the template's definition file, and never
+/// reused on delete — so consumer code addressing a node by id never
+/// silently rebinds to a different node after a structural edit.
+///
+/// Per-template id space: a `NodeId(7)` in template A means nothing in
+/// template B. Range is `u16` (64k slots per template), which is more than
+/// any single template needs in practice. Holes left by deletions are
+/// fine; compaction is a separate editor concern.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct NodeId(pub u16);
+
+/// One drawable piece of geometry referenced by a [`TemplateNode`] whose
+/// kind is `Mesh`: a mesh handle and the material key it draws with.
 ///
 /// `M` is the user's mesh-handle type (commonly a small enum like
 /// `enum MeshId { Cube, Tetra }`); `MK` is the user's material-instance
 /// key (commonly `enum MaterialKey { Wood, Stone }`). The engine doesn't
 /// own meshes or material instances — it stores these handles and the
 /// View resolves them against its own tables when rendering.
+///
+/// The transform from the part's local frame up to the template root is
+/// owned by the [`TemplateNode`], not the part — node-owned transforms
+/// make tree traversal cleanly composable.
 #[derive(Clone, Debug)]
 pub struct MeshPart<M, MK> {
     pub mesh: M,
     pub material: MK,
-    /// Transform from the part's local frame to the template's root frame.
-    /// World transform of a drawn instance is
-    /// `world_xform_of_object * local_transform`.
-    pub local_transform: Mat4,
 }
 
 impl<M, MK> MeshPart<M, MK> {
-    pub fn new(mesh: M, material: MK, local_transform: Mat4) -> Self {
-        Self {
-            mesh,
-            material,
-            local_transform,
-        }
+    pub fn new(mesh: M, material: MK) -> Self {
+        Self { mesh, material }
     }
 }
 
-/// An emitter attachment declared by a [`RenderTemplate`]: which emitter
-/// template `E` to spawn, which `S` attachment id keys it (so one
-/// template can carry several emitters keyed independently — e.g. flame +
-/// smoke + sparks), and a transform relative to the template root.
+/// An emitter attachment referenced by a [`TemplateNode`] whose kind is
+/// `Emitter`: which emitter template `E` to spawn and which `S` attachment
+/// id keys it (so one template can carry several emitters keyed
+/// independently — e.g. flame + smoke + sparks).
 ///
 /// The View resolves `E` and `S` against an
 /// [`EmitterReconciler<E, S>`](super::EmitterReconciler), which owns the
 /// emitter lifecycle and particle integration. The render-object system
 /// only declares attachments; the reconciler handles state.
+///
+/// As with [`MeshPart`], the local transform lives on the parent
+/// [`TemplateNode`].
 #[derive(Clone, Debug)]
 pub struct EmitterPart<E, S> {
     pub template: E,
     pub attachment: S,
-    /// Transform from the part's local frame to the template's root frame.
-    /// World transform of a declared emitter is
-    /// `world_xform_of_object * local_transform`.
-    pub local_transform: Mat4,
 }
 
 impl<E, S> EmitterPart<E, S> {
-    pub fn new(template: E, attachment: S, local_transform: Mat4) -> Self {
+    pub fn new(template: E, attachment: S) -> Self {
         Self {
             template,
             attachment,
+        }
+    }
+}
+
+/// The payload carried by a [`TemplateNode`]: empty (transform-only
+/// attachment / grouping), a mesh part, or an emitter part.
+///
+/// Empty nodes don't draw anything themselves but are still walked by
+/// the tree traversal — useful for named attachment points (where the
+/// editor parents emitters or grafted child geometry) and for grouping
+/// nodes that should hide together via the visibility cascade.
+#[derive(Clone, Debug)]
+pub enum NodeKind<M = (), MK = (), E = (), S = ()> {
+    Empty,
+    Mesh(MeshPart<M, MK>),
+    Emitter(EmitterPart<E, S>),
+}
+
+/// One node in a [`RenderTemplate`]'s hierarchy: a stable id, a display
+/// name, a parent link (or `None` for a root), a local transform up to
+/// the parent's frame, and a [`NodeKind`] payload.
+///
+/// Built directly via field syntax or one of the [`TemplateNode::empty`] /
+/// [`TemplateNode::mesh`] / [`TemplateNode::emitter`] constructors and fed
+/// into [`RenderTemplate::with_node`].
+#[derive(Clone, Debug)]
+pub struct TemplateNode<M = (), MK = (), E = (), S = ()> {
+    pub id: NodeId,
+    pub name: String,
+    pub parent: Option<NodeId>,
+    /// Transform from this node's local frame up to its parent's local
+    /// frame (or up to the template root if `parent` is `None`). World
+    /// transform of a drawn part is the composed product down the tree
+    /// times the proxy's world transform.
+    pub local_transform: Mat4,
+    pub kind: NodeKind<M, MK, E, S>,
+}
+
+impl<M, MK, E, S> TemplateNode<M, MK, E, S> {
+    /// Construct an [`NodeKind::Empty`] node — a pure transform /
+    /// attachment point with no draw payload.
+    pub fn empty(
+        id: NodeId,
+        name: impl Into<String>,
+        parent: Option<NodeId>,
+        local_transform: Mat4,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            parent,
             local_transform,
+            kind: NodeKind::Empty,
+        }
+    }
+
+    /// Construct an [`NodeKind::Mesh`] node from a [`MeshPart`].
+    pub fn mesh(
+        id: NodeId,
+        name: impl Into<String>,
+        parent: Option<NodeId>,
+        local_transform: Mat4,
+        part: MeshPart<M, MK>,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            parent,
+            local_transform,
+            kind: NodeKind::Mesh(part),
+        }
+    }
+
+    /// Construct an [`NodeKind::Emitter`] node from an [`EmitterPart`].
+    pub fn emitter(
+        id: NodeId,
+        name: impl Into<String>,
+        parent: Option<NodeId>,
+        local_transform: Mat4,
+        part: EmitterPart<E, S>,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            parent,
+            local_transform,
+            kind: NodeKind::Emitter(part),
         }
     }
 }
 
 /// Static template describing a renderable object. Many sim objects may
 /// reference one template (every oak tree → `tree_oak`); per-instance
-/// variation lives in transforms and in the
-/// [`RenderProxy`](super::RenderProxy) per-instance state the
-/// update closure writes.
+/// variation lives on the [`RenderProxy`](super::RenderProxy)'s per-node
+/// state, written by the update hook each frame.
 ///
-/// Templates are built with [`Self::new`] then chained
-/// [`Self::with_mesh_part`] / [`Self::with_emitter_part`] calls. `M`, `MK`,
-/// `E`, `S` default to `()` for callers that don't need the corresponding
-/// part kind yet.
+/// Internally the template stores three things derived from the node
+/// list: a dense `Vec<TemplateNode>` (the canonical storage),
+/// `id_to_slot` (`Vec<Option<u32>>` indexed by raw `NodeId`, for O(1) id →
+/// slot lookup), and `children_slots` parallel to the nodes (for tree
+/// traversal). All three are kept consistent by [`Self::with_node`].
+///
+/// `M`, `MK`, `E`, `S` default to `()` for callers that don't need the
+/// corresponding part kind yet.
 #[derive(Clone, Debug)]
 pub struct RenderTemplate<M = (), MK = (), E = (), S = ()> {
     /// Human-readable name. Used in panics, logs, and tracing.
     pub label: String,
-    mesh_parts: Vec<MeshPart<M, MK>>,
-    emitter_parts: Vec<EmitterPart<E, S>>,
+    nodes: Vec<TemplateNode<M, MK, E, S>>,
+    /// Sparse: `id_to_slot[id as usize] == Some(slot)` for live nodes.
+    id_to_slot: Vec<Option<u32>>,
+    /// Parallel to `nodes`: `children_slots[slot]` lists the slots of
+    /// direct children, in declaration order.
+    children_slots: Vec<Vec<u32>>,
+    /// Slots whose nodes have `parent: None`. Traversal walks from here.
+    root_slots: Vec<u32>,
     visual_bounds: Option<Aabb>,
 }
 
@@ -107,39 +211,173 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            mesh_parts: Vec::new(),
-            emitter_parts: Vec::new(),
+            nodes: Vec::new(),
+            id_to_slot: Vec::new(),
+            children_slots: Vec::new(),
+            root_slots: Vec::new(),
             visual_bounds: None,
         }
     }
 
-    /// Add a [`MeshPart`] to the template. Parts are stored in insertion
-    /// order; the View walks them per drawn instance, composing each part's
-    /// `local_transform` with the sim object's world transform.
-    pub fn with_mesh_part(mut self, mesh: M, material: MK, local_transform: Mat4) -> Self {
-        self.mesh_parts
-            .push(MeshPart::new(mesh, material, local_transform));
+    /// Add `node` to the template. Panics if its [`NodeId`] is already in
+    /// use, or if its `parent` references an id this template doesn't
+    /// have — nodes must be added parent-first.
+    pub fn with_node(mut self, node: TemplateNode<M, MK, E, S>) -> Self {
+        self.add_node(node);
         self
     }
 
-    /// Add an [`EmitterPart`] to the template. The View walks emitter parts
-    /// during extraction and declares each on an
-    /// [`EmitterReconciler<E, S>`](super::EmitterReconciler), composing the
-    /// part's local transform with the sim object's world transform.
-    pub fn with_emitter_part(mut self, template: E, attachment: S, local_transform: Mat4) -> Self {
-        self.emitter_parts
-            .push(EmitterPart::new(template, attachment, local_transform));
-        self
+    /// In-place add — the same operation as [`Self::with_node`] but
+    /// taking `&mut self`, for editor flows that mutate an already-built
+    /// template. Same invariants: duplicate ids panic; parent references
+    /// must already exist.
+    pub fn add_node(&mut self, node: TemplateNode<M, MK, E, S>) {
+        let id = node.id;
+        let slot = self.nodes.len() as u32;
+
+        let id_idx = id.0 as usize;
+        if id_idx >= self.id_to_slot.len() {
+            self.id_to_slot.resize(id_idx + 1, None);
+        }
+        assert!(
+            self.id_to_slot[id_idx].is_none(),
+            "RenderTemplate `{}`: NodeId({}) is already in use",
+            self.label,
+            id.0
+        );
+
+        match node.parent {
+            None => self.root_slots.push(slot),
+            Some(parent_id) => {
+                let parent_slot = self
+                    .slot_of(parent_id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "RenderTemplate `{}`: NodeId({}) parents NodeId({}) which hasn't been added yet",
+                            self.label, id.0, parent_id.0,
+                        )
+                    });
+                self.children_slots[parent_slot as usize].push(slot);
+            }
+        }
+
+        self.id_to_slot[id_idx] = Some(slot);
+        self.children_slots.push(Vec::new());
+        self.nodes.push(node);
     }
 
-    /// All mesh parts in declaration order.
-    pub fn mesh_parts(&self) -> &[MeshPart<M, MK>] {
-        &self.mesh_parts
+    /// Remove the node with id `id` and every descendant. No-op if the
+    /// template has no such node. The dense slot lookup is rebuilt — slot
+    /// indices held by the caller across this call must be assumed stale.
+    ///
+    /// Used by the editor's delete-node action. The implementation
+    /// snapshots surviving nodes in their original declaration order
+    /// (which preserves the parent-first invariant — every removed node's
+    /// parent was either removed too or precedes all survivors) and
+    /// re-pushes them into a fresh index, so all parallel structures
+    /// (`id_to_slot`, `children_slots`, `root_slots`) stay consistent.
+    pub fn remove_node(&mut self, id: NodeId) {
+        let Some(start_slot) = self.slot_of(id) else {
+            return;
+        };
+        // DFS to collect the doomed subtree's ids.
+        let mut doomed: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut stack = vec![start_slot];
+        while let Some(slot) = stack.pop() {
+            doomed.insert(self.nodes[slot as usize].id);
+            for &child in &self.children_slots[slot as usize] {
+                stack.push(child);
+            }
+        }
+
+        let surviving: Vec<TemplateNode<M, MK, E, S>> = std::mem::take(&mut self.nodes)
+            .into_iter()
+            .filter(|n| !doomed.contains(&n.id))
+            .collect();
+
+        self.id_to_slot.clear();
+        self.children_slots.clear();
+        self.root_slots.clear();
+        for node in surviving {
+            self.add_node(node);
+        }
     }
 
-    /// All emitter parts in declaration order.
-    pub fn emitter_parts(&self) -> &[EmitterPart<E, S>] {
-        &self.emitter_parts
+    /// Borrow the node with id `id` for in-place editing — the editor
+    /// uses this to mutate `local_transform`, `name`, and payload fields
+    /// on the selected node without rebuilding the template. Structural
+    /// fields (`id`, `parent`) should not be mutated through this handle:
+    /// changing them would desynchronise `id_to_slot` / `children_slots`.
+    /// Use [`Self::remove_node`] + a fresh [`Self::with_node`] for
+    /// reparenting.
+    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut TemplateNode<M, MK, E, S>> {
+        let slot = self.slot_of(id)? as usize;
+        self.nodes.get_mut(slot)
+    }
+
+    /// Convenience: add a [`MeshPart`] as a root-level [`NodeKind::Mesh`]
+    /// node, allocating the next unused [`NodeId`]. Carries the call
+    /// sites that don't author hierarchy explicitly.
+    pub fn with_mesh_part(self, mesh: M, material: MK, local_transform: Mat4) -> Self {
+        let id = self.next_free_node_id();
+        let name = format!("mesh_{}", id.0);
+        self.with_node(TemplateNode::mesh(
+            id,
+            name,
+            None,
+            local_transform,
+            MeshPart::new(mesh, material),
+        ))
+    }
+
+    /// Convenience: add an [`EmitterPart`] as a root-level
+    /// [`NodeKind::Emitter`] node, allocating the next unused
+    /// [`NodeId`].
+    pub fn with_emitter_part(self, template: E, attachment: S, local_transform: Mat4) -> Self {
+        let id = self.next_free_node_id();
+        let name = format!("emitter_{}", id.0);
+        self.with_node(TemplateNode::emitter(
+            id,
+            name,
+            None,
+            local_transform,
+            EmitterPart::new(template, attachment),
+        ))
+    }
+
+    /// All nodes in declaration order. Slot indices are this slice's
+    /// indices.
+    pub fn nodes(&self) -> &[TemplateNode<M, MK, E, S>] {
+        &self.nodes
+    }
+
+    /// Dense slot for `id`, or `None` if the template has no such node.
+    /// The dense slot indexes [`Self::nodes`], [`Self::children`], and
+    /// the parallel `RenderProxy::nodes` vec.
+    pub fn slot_of(&self, id: NodeId) -> Option<u32> {
+        self.id_to_slot.get(id.0 as usize).copied().flatten()
+    }
+
+    /// Borrow the node with id `id`, if any.
+    pub fn node(&self, id: NodeId) -> Option<&TemplateNode<M, MK, E, S>> {
+        let slot = self.slot_of(id)?;
+        self.nodes.get(slot as usize)
+    }
+
+    /// Slots whose nodes have no parent.
+    pub fn roots(&self) -> &[u32] {
+        &self.root_slots
+    }
+
+    /// Direct children of the node at `slot`, in declaration order.
+    pub fn children(&self, slot: u32) -> &[u32] {
+        &self.children_slots[slot as usize]
+    }
+
+    /// Total number of nodes — also the size of the per-instance
+    /// `RenderProxy::nodes` vec built from this template.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
     }
 
     /// Set the template's *visual* AABB — the region of space the template
@@ -158,6 +396,25 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     /// Visual AABB declared by [`Self::with_visual_bounds`], if any.
     pub fn visual_bounds(&self) -> Option<Aabb> {
         self.visual_bounds
+    }
+
+    /// Lowest unused [`NodeId`] in this template. Used by the sugar
+    /// builders ([`Self::with_mesh_part`] / [`Self::with_emitter_part`])
+    /// and by editor / glTF-import paths that don't have author-supplied
+    /// ids to assign.
+    pub fn next_free_node_id(&self) -> NodeId {
+        for (i, slot) in self.id_to_slot.iter().enumerate() {
+            if slot.is_none() {
+                return NodeId(i as u16);
+            }
+        }
+        let next = self.id_to_slot.len();
+        assert!(
+            next <= u16::MAX as usize,
+            "RenderTemplate `{}`: NodeId space exhausted (u16::MAX nodes)",
+            self.label,
+        );
+        NodeId(next as u16)
     }
 }
 
@@ -197,6 +454,14 @@ where
     /// up without consuming an owned copy.
     pub fn get(&self, id: &R) -> Option<&RenderTemplate<M, MK, E, S>> {
         self.templates.get(id)
+    }
+
+    /// Mutable variant of [`Self::get`] for editor-driven in-place
+    /// edits — selecting a node and editing its `local_transform`, name,
+    /// or payload through [`RenderTemplate::node_mut`], or restructuring
+    /// via [`RenderTemplate::remove_node`] / [`RenderTemplate::with_node`].
+    pub fn get_mut(&mut self, id: &R) -> Option<&mut RenderTemplate<M, MK, E, S>> {
+        self.templates.get_mut(id)
     }
 
     /// Number of registered templates.
@@ -277,13 +542,15 @@ mod tests {
     }
 
     #[test]
-    fn template_has_no_mesh_parts_by_default() {
+    fn template_has_no_nodes_by_default() {
         let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("bare");
-        assert!(t.mesh_parts().is_empty());
+        assert!(t.nodes().is_empty());
+        assert!(t.roots().is_empty());
+        assert_eq!(t.node_count(), 0);
     }
 
     #[test]
-    fn with_mesh_part_preserves_declaration_order() {
+    fn with_mesh_part_creates_root_mesh_node() {
         let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("campfire")
             .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY)
             .with_mesh_part(
@@ -292,38 +559,173 @@ mod tests {
                 Mat4::from_translation(Vec3::new(0.0, -0.5, 0.0)),
             );
 
-        let parts = t.mesh_parts();
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].mesh, TestMesh::Cube);
-        assert_eq!(parts[0].material, TestMat::Wood);
-        assert_eq!(parts[1].mesh, TestMesh::Plane);
-        assert_eq!(parts[1].material, TestMat::Stone);
-        // Column 3 of an Mat4 holds the translation.
-        assert_eq!(parts[1].local_transform.col(3).truncate().y, -0.5);
+        let nodes = t.nodes();
+        assert_eq!(nodes.len(), 2);
+        match &nodes[0].kind {
+            NodeKind::Mesh(p) => {
+                assert_eq!(p.mesh, TestMesh::Cube);
+                assert_eq!(p.material, TestMat::Wood);
+            }
+            _ => panic!("expected mesh node"),
+        }
+        assert_eq!(nodes[1].local_transform.col(3).truncate().y, -0.5);
+        assert_eq!(t.roots(), &[0, 1]);
     }
 
     #[test]
-    fn registry_stores_template_with_parts() {
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-        enum RId {
-            Campfire,
+    fn with_node_builds_hierarchy() {
+        let root = NodeId(0);
+        let mesh = NodeId(1);
+        let attach = NodeId(2);
+        let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("rig")
+            .with_node(TemplateNode::empty(root, "root", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::mesh(
+                mesh,
+                "body",
+                Some(root),
+                Mat4::IDENTITY,
+                MeshPart::new(TestMesh::Cube, TestMat::Wood),
+            ))
+            .with_node(TemplateNode::empty(
+                attach,
+                "attach",
+                Some(root),
+                Mat4::from_translation(Vec3::Z),
+            ));
+
+        assert_eq!(t.slot_of(root), Some(0));
+        assert_eq!(t.slot_of(mesh), Some(1));
+        assert_eq!(t.slot_of(attach), Some(2));
+        assert_eq!(t.slot_of(NodeId(99)), None);
+        assert_eq!(t.roots(), &[0]);
+        assert_eq!(t.children(0), &[1, 2]);
+        assert!(t.children(1).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "NodeId(0) is already in use")]
+    fn duplicate_node_id_panics() {
+        let _ = RenderTemplate::<TestMesh, TestMat>::new("dup")
+            .with_node(TemplateNode::empty(NodeId(0), "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(NodeId(0), "b", None, Mat4::IDENTITY));
+    }
+
+    #[test]
+    #[should_panic(expected = "parents NodeId(7) which hasn't been added")]
+    fn missing_parent_panics() {
+        let _ = RenderTemplate::<TestMesh, TestMat>::new("bad").with_node(TemplateNode::empty(
+            NodeId(0),
+            "orphan",
+            Some(NodeId(7)),
+            Mat4::IDENTITY,
+        ));
+    }
+
+    #[test]
+    fn remove_node_drops_leaf_and_rebuilds_indices() {
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let c = NodeId(2);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", Some(a), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(c, "c", Some(a), Mat4::IDENTITY));
+
+        t.remove_node(b);
+
+        assert_eq!(t.node_count(), 2);
+        assert!(t.node(a).is_some());
+        assert!(t.node(b).is_none());
+        assert!(t.node(c).is_some());
+        // c's slot moved down to fill the gap b left.
+        assert_eq!(t.slot_of(c), Some(1));
+        // a's child list no longer mentions b.
+        assert_eq!(t.children(0), &[1]);
+    }
+
+    #[test]
+    fn remove_node_cascades_to_descendants() {
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let c = NodeId(2);
+        let d = NodeId(3);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", Some(a), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(c, "c", Some(b), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(d, "d", Some(a), Mat4::IDENTITY));
+
+        // Removing b should also remove c.
+        t.remove_node(b);
+
+        assert_eq!(t.node_count(), 2);
+        assert!(t.node(a).is_some());
+        assert!(t.node(b).is_none());
+        assert!(t.node(c).is_none());
+        assert!(t.node(d).is_some());
+    }
+
+    #[test]
+    fn remove_root_drops_entire_template() {
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", Some(a), Mat4::IDENTITY));
+        t.remove_node(a);
+        assert_eq!(t.node_count(), 0);
+        assert!(t.roots().is_empty());
+    }
+
+    #[test]
+    fn remove_unknown_id_is_noop() {
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(NodeId(0), "a", None, Mat4::IDENTITY));
+        t.remove_node(NodeId(99));
+        assert_eq!(t.node_count(), 1);
+    }
+
+    #[test]
+    fn node_mut_edits_local_transform_and_name() {
+        let a = NodeId(0);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "first", None, Mat4::IDENTITY));
+        {
+            let node = t.node_mut(a).expect("present");
+            node.name = "renamed".into();
+            node.local_transform = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
         }
-
-        let mut reg: RenderRegistry<RId, TestMesh, TestMat> = RenderRegistry::new();
-        reg.register(
-            RId::Campfire,
-            RenderTemplate::new("campfire")
-                .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY)
-                .with_mesh_part(
-                    TestMesh::Plane,
-                    TestMat::Stone,
-                    Mat4::from_translation(Vec3::new(0.0, -0.5, 0.0)),
-                ),
+        let node = t.node(a).unwrap();
+        assert_eq!(node.name, "renamed");
+        assert_eq!(
+            node.local_transform.col(3).truncate(),
+            Vec3::new(1.0, 2.0, 3.0)
         );
+    }
 
-        let template = reg.get(&RId::Campfire).expect("registered");
-        assert_eq!(template.label, "campfire");
-        assert_eq!(template.mesh_parts().len(), 2);
+    #[test]
+    fn registry_get_mut_allows_template_edits() {
+        let mut reg: RenderRegistry<RenderId, TestMesh, TestMat> = RenderRegistry::new();
+        reg.register(
+            RenderId::TreeOak,
+            RenderTemplate::<TestMesh, TestMat>::new("t").with_mesh_part(
+                TestMesh::Cube,
+                TestMat::Wood,
+                Mat4::IDENTITY,
+            ),
+        );
+        let template = reg.get_mut(&RenderId::TreeOak).expect("registered");
+        template.remove_node(NodeId(0));
+        assert_eq!(reg.get(&RenderId::TreeOak).unwrap().node_count(), 0);
+    }
+
+    #[test]
+    fn next_free_node_id_skips_holes_lowest_first() {
+        let t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(NodeId(0), "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(NodeId(2), "c", None, Mat4::IDENTITY));
+        // id 1 wasn't used → first free.
+        assert_eq!(t.next_free_node_id(), NodeId(1));
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -339,13 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn template_has_no_emitter_parts_by_default() {
-        let t: RenderTemplate = RenderTemplate::new("bare");
-        assert!(t.emitter_parts().is_empty());
-    }
-
-    #[test]
-    fn with_emitter_part_preserves_declaration_order() {
+    fn with_emitter_part_creates_root_emitter_node() {
         let t: RenderTemplate<(), (), TestEmitter, TestEmitterSlot> =
             RenderTemplate::new("campfire")
                 .with_emitter_part(
@@ -359,24 +755,28 @@ mod tests {
                     Mat4::from_translation(Vec3::new(0.0, 0.85, 0.0)),
                 );
 
-        let parts = t.emitter_parts();
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].template, TestEmitter::Flame);
-        assert_eq!(parts[0].attachment, TestEmitterSlot::Main);
-        assert_eq!(parts[1].template, TestEmitter::Smoke);
-        assert_eq!(parts[1].attachment, TestEmitterSlot::Secondary);
-        assert_eq!(parts[1].local_transform.col(3).truncate().y, 0.85);
+        let nodes = t.nodes();
+        assert_eq!(nodes.len(), 2);
+        match &nodes[0].kind {
+            NodeKind::Emitter(p) => {
+                assert_eq!(p.template, TestEmitter::Flame);
+                assert_eq!(p.attachment, TestEmitterSlot::Main);
+            }
+            _ => panic!("expected emitter node"),
+        }
+        assert_eq!(nodes[1].local_transform.col(3).truncate().y, 0.85);
     }
 
     #[test]
-    fn template_can_carry_all_part_kinds() {
+    fn template_can_carry_all_node_kinds() {
         let t: RenderTemplate<TestMesh, TestMat, TestEmitter, TestEmitterSlot> =
             RenderTemplate::new("rich")
                 .with_mesh_part(TestMesh::Cube, TestMat::Wood, Mat4::IDENTITY)
                 .with_emitter_part(TestEmitter::Flame, TestEmitterSlot::Main, Mat4::IDENTITY);
 
-        assert_eq!(t.mesh_parts().len(), 1);
-        assert_eq!(t.emitter_parts().len(), 1);
+        assert_eq!(t.nodes().len(), 2);
+        assert!(matches!(t.nodes()[0].kind, NodeKind::Mesh(_)));
+        assert!(matches!(t.nodes()[1].kind, NodeKind::Emitter(_)));
     }
 
     #[test]

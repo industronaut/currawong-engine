@@ -82,7 +82,10 @@ impl LumberEditorView {
                 // direction.
                 let mesh_ready = current
                     .as_ref()
-                    .and_then(|kind| self.mesh_templates.get(kind))
+                    .and_then(|kind| {
+                        self.mesh_templates
+                            .get(&crate::MeshKey::KindBody(kind.clone()))
+                    })
                     .is_some_and(|tpl| match &tpl.mesh {
                         MeshBacking::Streamed { handle } => handle.is_ready(),
                         MeshBacking::Inline { .. } => true,
@@ -94,30 +97,49 @@ impl LumberEditorView {
                     self.recalc_bounds_for(kind, sim, cmds);
                 }
 
+                // Scene-tree section (Phase 4 — scene_panel.rs). The
+                // selected-node inspector lives in its own right-side
+                // panel below so the left panel doesn't change height
+                // when the user clicks into a node.
+                self.scene_section(current.as_ref(), ui);
+
                 // Save button anchored to the bottom of the panel. Bottom-up
                 // layout reverses the natural top-down flow, so the button
                 // sits flush against the panel's lower edge regardless of
                 // how much vertical space the sections above consumed.
-                let dirty = current
-                    .as_ref()
-                    .zip(self.pending_edit.as_ref())
-                    .is_some_and(|(k, (dk, _))| k == dk);
+                // Enabled when the selected kind has any unsaved edit —
+                // bounds recalc (legacy `pending_edit`) or scene-tree
+                // mutation tracked in `dirty_kinds`.
+                let dirty = current.as_ref().is_some_and(|k| self.is_kind_dirty(k));
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                     let save_button = egui::Button::new("Save");
                     if ui
                         .add_enabled(dirty, save_button)
                         .on_hover_text(
-                            "Write the in-memory bounds for the selected \
-                             kind back to its .ron file.",
+                            "Rewrite the selected kind's `render` block on \
+                             disk with the current bounds + scene tree.",
                         )
                         .clicked()
                         && let Some(kind) = current.as_ref()
-                        && let Some(spec) = sim.render_specs.get(kind)
                     {
-                        self.save_bounds_for(kind, spec.visual_bounds());
+                        self.save_template_for(kind, sim);
                     }
                     ui.separator();
                 });
             });
+
+        // Right-side panel — only shown when a node is selected. Keeps
+        // the selected-node inspector visually separated from the
+        // scene-tree controls and avoids the left panel's height
+        // jumping every time the user clicks into a node.
+        if self.selected_node.is_some() {
+            #[allow(deprecated)]
+            egui::Panel::right("selected-node")
+                .resizable(false)
+                .default_size(280.0)
+                .show(egui_ctx, |ui| {
+                    self.selected_node_section(current.as_ref(), ui);
+                });
+        }
     }
 }

@@ -1,24 +1,16 @@
-//! In-memory bounding-box edits + Save flow + camera auto-frame. All three
-//! share the same lifecycle:
+//! Bounding-box recalc + camera auto-frame.
 //!
 //! - [`LumberEditorView::recalc_bounds_for`] reads the kind's loaded mesh,
 //!   snapshots the pre-edit `RenderSpec` into `pending_edit`, and pushes a
 //!   [`Command::UpdateBounds`] so the sim's `render_specs[kind]` reflects
-//!   the new value on the next tick.
-//! - [`LumberEditorView::save_bounds_for`] mirrors the sim's current
-//!   in-memory bounds out to the kind's `.ron` file, clearing
-//!   `pending_edit`. The file watcher then triggers a hot reload that
-//!   no-ops on bounds (disk now matches in-memory).
+//!   the new value on the next tick. Save lives in [`crate::save`] now —
+//!   the unified rewriter handles both bounds edits and scene-tree
+//!   mutations through the same render-block-replacement path.
 //! - [`LumberEditorView::maybe_auto_frame`] snaps the orbit rig to fit the
 //!   newly-selected (or freshly-edited) kind's AABB.
-//!
-//! [`rewrite_bounds_in_ron`] is the line-level rewriter the Save button
-//! depends on — preserves comments, indentation, and unrelated fields.
-
-use std::path::Path;
 
 use currawong::data::KindId;
-use currawong::{Aabb, CommandQueue, HandleState, MeshBacking};
+use currawong::{CommandQueue, HandleState, MeshBacking};
 
 use crate::LumberEditorView;
 use crate::sim::{Command, Game};
@@ -44,7 +36,10 @@ impl LumberEditorView {
         sim: &Game,
         cmds: &mut CommandQueue<Command>,
     ) {
-        let Some(template) = self.mesh_templates.get(kind) else {
+        let Some(template) = self
+            .mesh_templates
+            .get(&crate::MeshKey::KindBody(kind.clone()))
+        else {
             eprintln!("lumber_editor: recalc — no mesh template for {kind}");
             return;
         };
@@ -84,33 +79,6 @@ impl LumberEditorView {
         self.last_selected = None;
     }
 
-    /// Mirror the sim's current in-memory bounds for `kind` out to its
-    /// source `.ron` file and clear `pending_edit`. The file watcher
-    /// picks up the write and triggers a hot reload through
-    /// [`Self::maybe_hot_reload`]; since disk now matches in-memory the
-    /// resulting `ReloadDefinitions` is a no-op for the bounds.
-    pub(crate) fn save_bounds_for(&mut self, kind: &KindId, bounds: Aabb) {
-        let Some(source) = self.kind_sources.get(kind) else {
-            eprintln!("lumber_editor: save — no source path known for {kind}");
-            return;
-        };
-        let on_disk = self.assets_root.join(source.as_str());
-        if let Err(e) = rewrite_bounds_in_ron(&on_disk, bounds) {
-            eprintln!(
-                "lumber_editor: save — failed to rewrite {}: {e}",
-                on_disk.display()
-            );
-            return;
-        }
-        eprintln!(
-            "lumber_editor: save — wrote bounds_min={:?}, bounds_max={:?} to {}",
-            bounds.min,
-            bounds.max,
-            on_disk.display()
-        );
-        self.pending_edit = None;
-    }
-
     /// Snap the orbit rig to fit the newly-selected kind's bounds. No-op
     /// when the selection hasn't changed since the previous frame.
     /// (Bounds overlay re-upload lives in `render` where the queue is
@@ -139,51 +107,4 @@ impl LumberEditorView {
         }
         self.last_selected = current;
     }
-}
-
-// --- Bounds rewrite ----------------------------------------------------
-
-/// Rewrite the `bounds_min:` and `bounds_max:` lines of a kind `.ron` file
-/// in place from `bounds`. Walks the file line by line so comments,
-/// formatting, and unrelated fields are preserved — the only edits are
-/// the two tuple values inside the `render:` block. Whitespace at the
-/// start of each line is kept so the indentation matches the source.
-///
-/// A degenerate match (a kind file with two `bounds_min:` lines, or one
-/// inside a string literal) would rewrite both. Acceptable for the
-/// editor's authored content; not robust against adversarial RON.
-fn rewrite_bounds_in_ron(path: &Path, bounds: Aabb) -> std::io::Result<()> {
-    let original = std::fs::read_to_string(path)?;
-    let mut out = String::with_capacity(original.len());
-    for line in original.split_inclusive('\n') {
-        if let Some(rewritten) = rewrite_bounds_line(line, bounds) {
-            out.push_str(&rewritten);
-        } else {
-            out.push_str(line);
-        }
-    }
-    std::fs::write(path, out)
-}
-
-/// Return a replacement for `line` if it's a `bounds_min:` / `bounds_max:`
-/// line; otherwise `None`. Preserves leading indentation and the original
-/// line ending. `Debug` formatting on the f32 components matches the
-/// existing RON style (`0.0` not `0`, `-0.5` not `-0.50000`).
-fn rewrite_bounds_line(line: &str, bounds: Aabb) -> Option<String> {
-    let stripped = line.strip_suffix("\r\n").or(line.strip_suffix('\n'));
-    let body = stripped.unwrap_or(line);
-    let line_end = &line[body.len()..];
-    let trimmed = body.trim_start();
-    let indent = &body[..body.len() - trimmed.len()];
-    let (field, v) = if trimmed.starts_with("bounds_min:") {
-        ("bounds_min", bounds.min)
-    } else if trimmed.starts_with("bounds_max:") {
-        ("bounds_max", bounds.max)
-    } else {
-        return None;
-    };
-    Some(format!(
-        "{indent}{field}: ({:?}, {:?}, {:?}),{line_end}",
-        v.x, v.y, v.z,
-    ))
 }

@@ -53,11 +53,12 @@ use currawong::egui;
 use currawong::glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use currawong::{
     Camera, CameraBinding, CellHighlight, CommandQueue, EngineCtx, Facing, FlatTopsMesher, Frustum,
-    HitTarget, InstanceBuckets, MaterialInstanceRegistry, MeshInstanceAttribs, MeshPart, OrbitRig,
-    RenderObjectTraversal, RenderProxies, RenderRegistry, RenderTemplate, Renderer, SimPos, SimRng,
-    SimUnit, Simulation, SlotKey, SquareGrid, TerrainMaterial, TerrainMaterialInstance,
-    TerrainPicker, TerrainRenderer, TileCoord, UnlitColoredInstance, UnlitColoredMaterial, View,
-    ViewConfig, WorldObjectId, WorldTransform, Zone, ZoneId, Zones, sim_tile, wgpu, winit,
+    HitTarget, InstanceBuckets, MaterialInstanceRegistry, MeshInstanceAttribs, MeshPart, NodeKind,
+    OrbitRig, RenderObjectTraversal, RenderProxies, RenderRegistry, RenderTemplate, Renderer,
+    SimPos, SimRng, SimUnit, Simulation, SlotKey, SquareGrid, TerrainMaterial,
+    TerrainMaterialInstance, TerrainPicker, TerrainRenderer, TileCoord, UnlitColoredInstance,
+    UnlitColoredMaterial, View, ViewConfig, WorldObjectId, WorldTransform, Zone, ZoneId, Zones,
+    sim_tile, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -446,8 +447,12 @@ impl View for Demo {
             let template = self.templates.get(rid).expect("declared template");
             let hit_id = renderer.reserve_object(parent.zone, parent.id);
             let is_hovered = Some(parent.id) == self.hovered_object;
-            for part in template.mesh_parts() {
-                let mut attribs = extract_part(&tree, part, object.world_xform);
+            for node in template.nodes() {
+                let NodeKind::Mesh(part) = &node.kind else {
+                    continue;
+                };
+                let mut attribs =
+                    extract_part(&tree, part, object.world_xform, node.local_transform);
                 if is_hovered {
                     attribs.tint = HOVER_TINT.to_array();
                 }
@@ -659,12 +664,14 @@ fn extract_part(
     tree: &Tree,
     part: &MeshPart<MeshHandle, MatKey>,
     root: Mat4,
+    local_transform: Mat4,
 ) -> MeshInstanceAttribs {
     let maturity = smoothstep((tree.age_ticks as f32 / MATURE_AGE as f32).clamp(0.0, 1.0));
-    // Height: 0.3 → 3.0 along Z, applied between root and part transform
-    // so the trunk's XY radius stays put while the tree grows upward.
+    // Height: 0.3 → 3.0 along Z, applied between root and the node's local
+    // transform so the trunk's XY radius stays put while the tree grows
+    // upward.
     let height = 0.3 + 2.7 * maturity;
-    let world = root * Mat4::from_scale(Vec3::new(1.0, 1.0, height)) * part.local_transform;
+    let world = root * Mat4::from_scale(Vec3::new(1.0, 1.0, height)) * local_transform;
 
     // Tint: young → mature green plus per-seed jitter. Only the leaf
     // material consumes it; bark stays flat brown.

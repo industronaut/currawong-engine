@@ -34,14 +34,19 @@
 //! - W / A / S / D — pan the focal point.
 //! - Esc — quit.
 
+mod glb_import;
+mod graft;
 mod hot_reload;
 mod kind_panel;
 mod mesh_edit;
 mod overlays;
+mod save;
 mod scene;
+mod scene_panel;
 mod sim;
+mod template_build;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,12 +55,11 @@ use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
 use currawong::glam::{Mat4, UVec2, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Frustum, InstanceBuckets,
-    MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs, MeshTemplate, OrbitRig,
+    MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs, MeshTemplate, NodeId, OrbitRig,
     PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrAtlasMaterials,
     PbrMaterial, PbrMaterialInstance, RenderObjectTraversal, RenderProxies, RenderRegistry,
-    RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline,
-    SunCascades, TextureColorSpace, View, ViewConfig, ViewEnvironment, ZoneId, egui, pollster,
-    wgpu, winit,
+    RenderSpec, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline, SunCascades,
+    TextureColorSpace, View, ViewConfig, ViewEnvironment, ZoneId, egui, pollster, wgpu, winit,
 };
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -98,8 +102,27 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Generous enough for any single-item view; only one part draws at a time.
 const MAX_INSTANCES_PER_PART: u32 = 4;
 
-/// `PartKey` collapses to `KindId`: each kind is exactly one body part.
-pub(crate) type Templates = RenderRegistry<KindId, KindId, KindId>;
+/// Mesh-handle key for the lumber editor: either a kind's body mesh
+/// (resolved from its `render` block at init) or an editor-grafted glb
+/// referenced by VFS path (added via the scene panel's "Add mesh from
+/// glb" action).
+///
+/// The two variants share the same [`MeshTemplate<PbrMaterialInstance>`]
+/// storage in [`LumberEditorView::mesh_templates`] — a kind body and a
+/// glb leaf draw through the same PBR / atlas pipeline once registered.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum MeshKey {
+    KindBody(KindId),
+    /// Editor-imported glb referenced by its VFS path. Streamed through
+    /// [`AssetServer`] like every other glb in the example; the path
+    /// doubles as the cache key.
+    Glb(VfsPath),
+}
+
+/// Material key — same shape as [`MeshKey`] since the material is bundled
+/// into [`MeshTemplate`] and the per-material-slot resolution happens
+/// through [`MaterialRegistry`] during draw, not through this key.
+pub(crate) type Templates = RenderRegistry<KindId, MeshKey, MeshKey>;
 
 pub(crate) struct LumberEditorView {
     pub(crate) camera: Camera,
@@ -112,10 +135,10 @@ pub(crate) struct LumberEditorView {
     pub(crate) samplers: SamplerRegistry,
     pub(crate) asset_server: AssetServer,
 
-    pub(crate) mesh_templates: HashMap<KindId, MeshTemplate<PbrMaterialInstance>>,
+    pub(crate) mesh_templates: HashMap<MeshKey, MeshTemplate<PbrMaterialInstance>>,
     pub(crate) templates: Templates,
     pub(crate) proxies: RenderProxies<KindId>,
-    pub(crate) buckets: InstanceBuckets<KindId, MeshInstanceAttribs>,
+    pub(crate) buckets: InstanceBuckets<MeshKey, MeshInstanceAttribs>,
 
     /// Depth-only pipeline for the four cascade shadow passes per frame.
     /// Shares the canonical `PosNormalUv` + `MeshInstanceAttribs` layout, so
@@ -197,6 +220,33 @@ pub(crate) struct LumberEditorView {
     /// back to `None` (with a revert command pushed on the switch-without-save
     /// path so sim state matches disk again).
     pub(crate) pending_edit: Option<(KindId, RenderSpec)>,
+
+    /// Currently-selected node in the scene panel, scoped to the active
+    /// kind. Cleared on kind switch and on hot reload via
+    /// [`scene_panel::scene_section`](crate::scene_panel)'s stale-id
+    /// validation. Drives the selected-node inspector (name + TRS) and
+    /// the parent for "+ child" inserts.
+    pub(crate) selected_node: Option<NodeId>,
+
+    /// VFS path text-input buffer for the "Add mesh from glb" action.
+    /// Persists across frames so a half-typed path survives a redraw.
+    pub(crate) glb_import_path: String,
+
+    /// Queue of glb-import requests parked in `ui()` and applied in
+    /// `shadow_pass` cascade 0, once the [`Renderer`] is available.
+    /// Tuple is `(kind, new_node_id, parent_at_queue_time, path)` —
+    /// parent is captured at queue time so a selection change between
+    /// queue and apply doesn't reparent the new node. See
+    /// [`glb_import`](crate::glb_import).
+    pub(crate) pending_glb_imports: Vec<(KindId, NodeId, Option<NodeId>, currawong::data::VfsPath)>,
+
+    /// Kinds with unsaved scene-tree edits (add / delete / rename /
+    /// TRS edit / glb import / graft). The Save button is enabled when
+    /// the current kind is in this set or in
+    /// [`pending_edit`](Self::pending_edit) (bounds recalc). Save
+    /// flushes the kind out of this set; hot reload clears it
+    /// wholesale since the on-disk rebuild discards in-memory edits.
+    pub(crate) dirty_kinds: HashSet<KindId>,
 }
 
 impl View for LumberEditorView {
@@ -276,7 +326,8 @@ impl View for LumberEditorView {
         ))
         .expect("view-side definitions load");
 
-        let mut mesh_templates: HashMap<KindId, MeshTemplate<PbrMaterialInstance>> = HashMap::new();
+        let mut mesh_templates: HashMap<MeshKey, MeshTemplate<PbrMaterialInstance>> =
+            HashMap::new();
         let mut templates: Templates = RenderRegistry::new();
         let mut kind_sources: HashMap<KindId, VfsPath> = HashMap::new();
         for (kind_id, def) in defs.iter() {
@@ -285,24 +336,29 @@ impl View for LumberEditorView {
 
         // Silent `on_skip` — `Game::new` already eprintlned the same errors
         // when it built the sim-side `render_specs` cache.
-        for (kind_id, _spec, body) in material.streamed_kind_body_templates(
+        for (kind_id, spec, body) in material.streamed_kind_body_templates(
             renderer,
             &samplers,
             &asset_server,
             &defs,
             |_, _| {},
         ) {
-            let bounds = body.visual_bounds;
-            mesh_templates.insert(kind_id.clone(), body);
-            let template = RenderTemplate::new(kind_id.as_str())
-                .with_mesh_part(kind_id.clone(), kind_id.clone(), Mat4::IDENTITY)
-                .with_visual_bounds(bounds);
-            templates.register(kind_id, template);
+            template_build::build_template_for_kind(
+                &kind_id,
+                &spec,
+                body,
+                renderer,
+                &material,
+                &samplers,
+                &asset_server,
+                &mut mesh_templates,
+                &mut templates,
+            );
         }
 
         // Single live object, so hysteresis is irrelevant.
         let proxies = RenderProxies::<KindId>::new(0);
-        let mut buckets = InstanceBuckets::<KindId, MeshInstanceAttribs>::new(
+        let mut buckets = InstanceBuckets::<MeshKey, MeshInstanceAttribs>::new(
             "lumber-editor instances",
             MAX_INSTANCES_PER_PART,
         );
@@ -346,6 +402,10 @@ impl View for LumberEditorView {
             kind_sources,
             assets_root: Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
             pending_edit: None,
+            selected_node: None,
+            glb_import_path: String::new(),
+            pending_glb_imports: Vec::new(),
+            dirty_kinds: HashSet::new(),
         }
     }
 
@@ -430,6 +490,12 @@ impl View for LumberEditorView {
             // sees the new handles automatically.
             self.maybe_rebuild_templates(renderer);
 
+            // Drain any glb-import requests parked by ui() last frame so
+            // newly added mesh nodes have their GPU resources before
+            // declare_and_cull below sizes per-instance state from
+            // template.node_count().
+            self.apply_pending_glb_imports(renderer);
+
             self.buckets.begin_frame();
 
             let frustum = Frustum::from_view_proj(self.camera.view_proj());
@@ -466,7 +532,7 @@ impl View for LumberEditorView {
                 &sim.zones,
                 &self.templates,
                 &mut self.proxies,
-                |_parent, _kind, _components, _instance| {},
+                |_parent, _kind, _components, _template, _instance| {},
             );
 
             let buckets = &mut self.buckets;
