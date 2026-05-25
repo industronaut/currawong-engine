@@ -223,6 +223,15 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
     /// use, or if its `parent` references an id this template doesn't
     /// have — nodes must be added parent-first.
     pub fn with_node(mut self, node: TemplateNode<M, MK, E, S>) -> Self {
+        self.add_node(node);
+        self
+    }
+
+    /// In-place add — the same operation as [`Self::with_node`] but
+    /// taking `&mut self`, for editor flows that mutate an already-built
+    /// template. Same invariants: duplicate ids panic; parent references
+    /// must already exist.
+    pub fn add_node(&mut self, node: TemplateNode<M, MK, E, S>) {
         let id = node.id;
         let slot = self.nodes.len() as u32;
 
@@ -255,7 +264,55 @@ impl<M, MK, E, S> RenderTemplate<M, MK, E, S> {
         self.id_to_slot[id_idx] = Some(slot);
         self.children_slots.push(Vec::new());
         self.nodes.push(node);
-        self
+    }
+
+    /// Remove the node with id `id` and every descendant. No-op if the
+    /// template has no such node. The dense slot lookup is rebuilt — slot
+    /// indices held by the caller across this call must be assumed stale.
+    ///
+    /// Used by the editor's delete-node action. The implementation
+    /// snapshots surviving nodes in their original declaration order
+    /// (which preserves the parent-first invariant — every removed node's
+    /// parent was either removed too or precedes all survivors) and
+    /// re-pushes them into a fresh index, so all parallel structures
+    /// (`id_to_slot`, `children_slots`, `root_slots`) stay consistent.
+    pub fn remove_node(&mut self, id: NodeId) {
+        let Some(start_slot) = self.slot_of(id) else {
+            return;
+        };
+        // DFS to collect the doomed subtree's ids.
+        let mut doomed: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut stack = vec![start_slot];
+        while let Some(slot) = stack.pop() {
+            doomed.insert(self.nodes[slot as usize].id);
+            for &child in &self.children_slots[slot as usize] {
+                stack.push(child);
+            }
+        }
+
+        let surviving: Vec<TemplateNode<M, MK, E, S>> = std::mem::take(&mut self.nodes)
+            .into_iter()
+            .filter(|n| !doomed.contains(&n.id))
+            .collect();
+
+        self.id_to_slot.clear();
+        self.children_slots.clear();
+        self.root_slots.clear();
+        for node in surviving {
+            self.add_node(node);
+        }
+    }
+
+    /// Borrow the node with id `id` for in-place editing — the editor
+    /// uses this to mutate `local_transform`, `name`, and payload fields
+    /// on the selected node without rebuilding the template. Structural
+    /// fields (`id`, `parent`) should not be mutated through this handle:
+    /// changing them would desynchronise `id_to_slot` / `children_slots`.
+    /// Use [`Self::remove_node`] + a fresh [`Self::with_node`] for
+    /// reparenting.
+    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut TemplateNode<M, MK, E, S>> {
+        let slot = self.slot_of(id)? as usize;
+        self.nodes.get_mut(slot)
     }
 
     /// Convenience: add a [`MeshPart`] as a root-level [`NodeKind::Mesh`]
@@ -397,6 +454,14 @@ where
     /// up without consuming an owned copy.
     pub fn get(&self, id: &R) -> Option<&RenderTemplate<M, MK, E, S>> {
         self.templates.get(id)
+    }
+
+    /// Mutable variant of [`Self::get`] for editor-driven in-place
+    /// edits — selecting a node and editing its `local_transform`, name,
+    /// or payload through [`RenderTemplate::node_mut`], or restructuring
+    /// via [`RenderTemplate::remove_node`] / [`RenderTemplate::with_node`].
+    pub fn get_mut(&mut self, id: &R) -> Option<&mut RenderTemplate<M, MK, E, S>> {
+        self.templates.get_mut(id)
     }
 
     /// Number of registered templates.
@@ -554,6 +619,104 @@ mod tests {
             Some(NodeId(7)),
             Mat4::IDENTITY,
         ));
+    }
+
+    #[test]
+    fn remove_node_drops_leaf_and_rebuilds_indices() {
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let c = NodeId(2);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", Some(a), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(c, "c", Some(a), Mat4::IDENTITY));
+
+        t.remove_node(b);
+
+        assert_eq!(t.node_count(), 2);
+        assert!(t.node(a).is_some());
+        assert!(t.node(b).is_none());
+        assert!(t.node(c).is_some());
+        // c's slot moved down to fill the gap b left.
+        assert_eq!(t.slot_of(c), Some(1));
+        // a's child list no longer mentions b.
+        assert_eq!(t.children(0), &[1]);
+    }
+
+    #[test]
+    fn remove_node_cascades_to_descendants() {
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let c = NodeId(2);
+        let d = NodeId(3);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", Some(a), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(c, "c", Some(b), Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(d, "d", Some(a), Mat4::IDENTITY));
+
+        // Removing b should also remove c.
+        t.remove_node(b);
+
+        assert_eq!(t.node_count(), 2);
+        assert!(t.node(a).is_some());
+        assert!(t.node(b).is_none());
+        assert!(t.node(c).is_none());
+        assert!(t.node(d).is_some());
+    }
+
+    #[test]
+    fn remove_root_drops_entire_template() {
+        let a = NodeId(0);
+        let b = NodeId(1);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "a", None, Mat4::IDENTITY))
+            .with_node(TemplateNode::empty(b, "b", Some(a), Mat4::IDENTITY));
+        t.remove_node(a);
+        assert_eq!(t.node_count(), 0);
+        assert!(t.roots().is_empty());
+    }
+
+    #[test]
+    fn remove_unknown_id_is_noop() {
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(NodeId(0), "a", None, Mat4::IDENTITY));
+        t.remove_node(NodeId(99));
+        assert_eq!(t.node_count(), 1);
+    }
+
+    #[test]
+    fn node_mut_edits_local_transform_and_name() {
+        let a = NodeId(0);
+        let mut t: RenderTemplate<TestMesh, TestMat> = RenderTemplate::new("t")
+            .with_node(TemplateNode::empty(a, "first", None, Mat4::IDENTITY));
+        {
+            let node = t.node_mut(a).expect("present");
+            node.name = "renamed".into();
+            node.local_transform = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
+        }
+        let node = t.node(a).unwrap();
+        assert_eq!(node.name, "renamed");
+        assert_eq!(
+            node.local_transform.col(3).truncate(),
+            Vec3::new(1.0, 2.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn registry_get_mut_allows_template_edits() {
+        let mut reg: RenderRegistry<RenderId, TestMesh, TestMat> = RenderRegistry::new();
+        reg.register(
+            RenderId::TreeOak,
+            RenderTemplate::<TestMesh, TestMat>::new("t").with_mesh_part(
+                TestMesh::Cube,
+                TestMat::Wood,
+                Mat4::IDENTITY,
+            ),
+        );
+        let template = reg.get_mut(&RenderId::TreeOak).expect("registered");
+        template.remove_node(NodeId(0));
+        assert_eq!(reg.get(&RenderId::TreeOak).unwrap().node_count(), 0);
     }
 
     #[test]

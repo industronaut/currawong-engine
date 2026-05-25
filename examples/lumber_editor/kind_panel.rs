@@ -94,6 +94,10 @@ impl LumberEditorView {
                     self.recalc_bounds_for(kind, sim, cmds);
                 }
 
+                // Scene-tree + selected-node sections (Phase 4 — scene_panel.rs).
+                self.scene_section(current.as_ref(), ui);
+                self.selected_node_section(current.as_ref(), ui);
+
                 // Save button anchored to the bottom of the panel. Bottom-up
                 // layout reverses the natural top-down flow, so the button
                 // sits flush against the panel's lower edge regardless of

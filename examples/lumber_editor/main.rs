@@ -39,6 +39,7 @@ mod kind_panel;
 mod mesh_edit;
 mod overlays;
 mod scene;
+mod scene_panel;
 mod sim;
 
 use std::collections::HashMap;
@@ -50,7 +51,7 @@ use currawong::data::{Definitions, FsSource, KindId, Vfs, VfsPath};
 use currawong::glam::{Mat4, UVec2, Vec3, Vec4};
 use currawong::{
     AssetServer, Camera, CameraBinding, CommandQueue, EngineCtx, Frustum, InstanceBuckets,
-    MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs, MeshTemplate, OrbitRig,
+    MaterialId, MaterialRegistry, MeshDraw, MeshInstanceAttribs, MeshTemplate, NodeId, OrbitRig,
     PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams, PbrAtlasMaterials,
     PbrMaterial, PbrMaterialInstance, RenderObjectTraversal, RenderProxies, RenderRegistry,
     RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry, ShadowMeshPipeline,
@@ -197,6 +198,13 @@ pub(crate) struct LumberEditorView {
     /// back to `None` (with a revert command pushed on the switch-without-save
     /// path so sim state matches disk again).
     pub(crate) pending_edit: Option<(KindId, RenderSpec)>,
+
+    /// Currently-selected node in the scene panel, scoped to the active
+    /// kind. Cleared on kind switch and on hot reload via
+    /// [`scene_panel::scene_section`](crate::scene_panel)'s stale-id
+    /// validation. Drives the selected-node inspector (name + TRS) and
+    /// the parent for "+ child" inserts.
+    pub(crate) selected_node: Option<NodeId>,
 }
 
 impl View for LumberEditorView {
@@ -346,6 +354,7 @@ impl View for LumberEditorView {
             kind_sources,
             assets_root: Path::new(env!("CARGO_MANIFEST_DIR")).join("assets"),
             pending_edit: None,
+            selected_node: None,
         }
     }
 
