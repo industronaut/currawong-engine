@@ -34,6 +34,7 @@
 //! - W / A / S / D — pan the focal point.
 //! - Esc — quit.
 
+mod gizmo;
 mod glb_import;
 mod graft;
 mod hot_reload;
@@ -64,6 +65,7 @@ use currawong::{
 use winit::event::{ElementState, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use gizmo::GizmoState;
 use overlays::{
     BoundsOverlay, FootprintTilesOverlay, InteractionTilesOverlay, build_bounds_overlay,
     build_footprint_overlay, build_interaction_overlay, write_bounds_instance,
@@ -247,6 +249,11 @@ pub(crate) struct LumberEditorView {
     /// flushes the kind out of this set; hot reload clears it
     /// wholesale since the on-disk rebuild discards in-memory edits.
     pub(crate) dirty_kinds: HashSet<KindId>,
+
+    /// 3D transform gizmo bound to the selected node. Edits the same
+    /// `local_transform` the inspector DragValues edit, so the dirty
+    /// machinery picks up gizmo drags for free.
+    pub(crate) gizmo: GizmoState,
 }
 
 impl View for LumberEditorView {
@@ -406,6 +413,7 @@ impl View for LumberEditorView {
             glb_import_path: String::new(),
             pending_glb_imports: Vec::new(),
             dirty_kinds: HashSet::new(),
+            gizmo: GizmoState::new(),
         }
     }
 
@@ -449,6 +457,9 @@ impl View for LumberEditorView {
         egui_ctx: &egui::Context,
     ) {
         self.kind_panel(sim, cmds, egui_ctx);
+        // After the side panels so the gizmo's central-rect lookup
+        // (`egui_ctx.available_rect()`) sees the space they reserved.
+        self.draw_gizmo(sim, egui_ctx);
     }
 
     fn active_zone(&self, sim: &Game) -> Option<ZoneId> {
