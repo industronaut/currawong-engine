@@ -17,11 +17,10 @@
 //! here. Persistence is a follow-up PR (Phase 6 — RON schema with
 //! `nodes:` block).
 
-use std::f32::consts::PI;
-
 use currawong::data::{KindId, VfsPath};
 use currawong::glam::{EulerRot, Mat4, Quat, Vec3};
 use currawong::{NodeId, NodeKind, RenderTemplate, TemplateNode, egui};
+use std::f32::consts::PI;
 
 use crate::LumberEditorView;
 
@@ -255,41 +254,44 @@ impl LumberEditorView {
         let mut s = scale.to_array();
 
         let mut changed = false;
-        ui.label("Translation");
-        ui.horizontal(|ui| {
-            for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut t[i])
-                            .speed(0.02)
-                            .prefix(format!("{axis} ")),
-                    )
-                    .changed();
-            }
-        });
-        ui.label("Rotation (deg)");
-        ui.horizontal(|ui| {
-            for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut rot_deg[i])
-                            .speed(1.0)
-                            .prefix(format!("{axis} ")),
-                    )
-                    .changed();
-            }
-        });
-        ui.label("Scale");
-        ui.horizontal(|ui| {
-            for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut s[i])
-                            .speed(0.02)
-                            .prefix(format!("{axis} ")),
-                    )
-                    .changed();
-            }
+
+        ui.vertical(|ui| {
+            ui.label("Translation");
+            ui.columns(3, |ui| {
+                for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                    changed |= ui[i]
+                        .add(
+                            egui::DragValue::new(&mut t[i])
+                                .speed(0.02)
+                                .prefix(format!("{axis} ")),
+                        )
+                        .changed();
+                }
+            });
+            ui.label("Rotation (deg)");
+            ui.columns(3, |ui| {
+                for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                    changed |= ui[i]
+                        .add(
+                            egui::DragValue::new(&mut rot_deg[i])
+                                .speed(1.0)
+                                .prefix(format!("{axis} ")),
+                        )
+                        .changed();
+                }
+            });
+            ui.label("Scale");
+            ui.columns(3, |ui| {
+                for (i, axis) in ["X", "Y", "Z"].iter().enumerate() {
+                    changed |= ui[i]
+                        .add(
+                            egui::DragValue::new(&mut s[i])
+                                .speed(0.02)
+                                .prefix(format!("{axis} ")),
+                        )
+                        .changed();
+                }
+            });
         });
 
         if changed {

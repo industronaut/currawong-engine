@@ -147,7 +147,7 @@ pub use mesh_draw::{MeshDraw, PbrAtlasMaterials};
 pub use mesh_primitives::PrimitiveMesh;
 pub use mesh_template::{
     InlineTemplate, MeshBacking, MeshNodeSpec, MeshTemplate, NodeSpec, RenderSpec, TransformSpec,
-    node_kind,
+    build_hierarchical_render_template, build_streamed_pbr_mesh_template, node_kind,
 };
 pub use pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
 pub use pbr_atlas::{PbrAtlasMaterial, PbrAtlasMaterialInstance, PbrAtlasMaterialParams};

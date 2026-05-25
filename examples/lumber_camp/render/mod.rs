@@ -54,7 +54,7 @@ use currawong::{
     RenderRegistry, RenderSpec, RenderTemplate, Renderer, SamplerKind, SamplerRegistry,
     ShadowMeshPipeline, SunCascades, TerrainMaterial, TerrainMaterialInstance, TerrainRenderer,
     TextureColorSpace, View, ViewConfig, ViewEnvironment, WorldObjectRef, YakuiAssets, ZoneId,
-    egui, sun_direction_for, wgpu, winit, yakui,
+    build_hierarchical_render_template, egui, sun_direction_for, wgpu, winit, yakui,
 };
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -89,8 +89,13 @@ pub(crate) const HOVER_TINT: Vec4 = Vec4::new(1.8, 1.6, 0.8, 1.0);
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PartKey {
     /// The kind's main body — streamed glTF + PNG resolved at init from
-    /// the kind's `render` block.
+    /// the kind's `render` block. Used by the flat schema (kinds whose
+    /// `render` block has no `nodes:` field).
     Body(KindId),
+    /// Streamed glb referenced by VFS path. Used by the hierarchical
+    /// schema (kinds whose `render.nodes` block declares one Mesh node
+    /// per glb); deduped across kinds that reference the same path.
+    Glb(VfsPath),
     /// Shared red-cone marker shown above designated trees.
     Marker,
     /// Shared brown-cylinder log shown on carrying pawns.
@@ -100,9 +105,11 @@ pub enum PartKey {
 impl PartKey {
     /// Body parts receive the hover tint; ancillary parts don't (keeps the
     /// marker readably red, the carried log readably brown, no matter
-    /// which body it sits on).
+    /// which body it sits on). Hierarchical Glb nodes are body-like — a
+    /// child mesh declared in `render.nodes` is part of the kind's main
+    /// visual, not an ancillary attached by the view.
     fn is_body(&self) -> bool {
-        matches!(self, Self::Body(_))
+        matches!(self, Self::Body(_) | Self::Glb(_))
     }
 }
 
@@ -337,8 +344,26 @@ impl View for LumberCampView {
                 );
                 continue;
             };
-            mesh_templates.insert(PartKey::Body(kind_id.clone()), body_template);
-            let template = shape.register_template(kind_id.clone(), &render);
+            // Hierarchical schema: walk `render.nodes` and register one
+            // glb-keyed MeshTemplate per unique mesh path. The flat
+            // `body_template` is unused on this path — its `PartKey::Body`
+            // slot is replaced by per-node `PartKey::Glb` slots. Today
+            // only the building shape opts into nodes; tree and pawn keep
+            // their ancillary-augmented flat templates.
+            let template = if !render.nodes.is_empty() {
+                build_hierarchical_template(
+                    &kind_id,
+                    &render,
+                    renderer,
+                    &material,
+                    &samplers,
+                    &asset_server,
+                    &mut mesh_templates,
+                )
+            } else {
+                mesh_templates.insert(PartKey::Body(kind_id.clone()), body_template);
+                shape.register_template(kind_id.clone(), &render)
+            };
             templates.register(kind_id.clone(), template);
             shapes.insert(kind_id, shape);
         }
@@ -795,4 +820,41 @@ impl RenderShape {
 fn format_clock(seconds: f32) -> String {
     let total = seconds.max(0.0) as u32;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+// --- Hierarchical template build ---------------------------------------
+
+/// Fallback PBR albedo used by Mesh nodes that don't supply their own
+/// texture. The atlas pipeline takes over for primitives whose glb
+/// material slot resolves through [`MaterialRegistry`] as `gltf:lumber`;
+/// this PBR fallback is only bound for non-atlas primitives.
+const HIERARCHICAL_FALLBACK_ALBEDO_PATH: &str = "lumber/gradient_atlas.png";
+
+/// Walk `render.nodes` through the shared engine helper, keyed by
+/// [`PartKey::Glb`]. Same call shape the lumber_editor uses — both
+/// examples dedupe streamed templates by glb path and share PBR
+/// material defaults.
+fn build_hierarchical_template(
+    kind_id: &KindId,
+    render: &RenderSpec,
+    renderer: &Renderer,
+    material: &PbrMaterial,
+    samplers: &SamplerRegistry,
+    asset_server: &AssetServer,
+    mesh_templates: &mut HashMap<PartKey, MeshTemplate<PbrMaterialInstance>>,
+) -> RenderTemplate<PartKey, PartKey> {
+    let fallback_albedo =
+        VfsPath::new(HIERARCHICAL_FALLBACK_ALBEDO_PATH).expect("valid fallback albedo path");
+    let label = format!("lumber_camp: kind {kind_id}");
+    build_hierarchical_render_template(
+        &label,
+        render,
+        PartKey::Glb,
+        &fallback_albedo,
+        renderer,
+        material,
+        samplers,
+        asset_server,
+        mesh_templates,
+    )
 }

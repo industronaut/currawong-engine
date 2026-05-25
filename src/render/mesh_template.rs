@@ -16,6 +16,9 @@
 //! are the conventional way to build one. Future material families can add
 //! their own constructors with the same shape.
 
+use std::collections::HashMap;
+use std::hash::Hash;
+
 use bytemuck::cast_slice;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
@@ -28,6 +31,7 @@ use super::handle::Handle;
 use super::mesh::{Mesh, MeshPrimitive};
 use super::mesh_primitives::PrimitiveMesh;
 use super::pbr::{PbrMaterial, PbrMaterialInstance, PbrMaterialParams};
+use super::render_object::{MeshPart, NodeId, NodeKind, RenderTemplate, TemplateNode};
 use super::renderer::Renderer;
 use super::texture::{SamplerKind, SamplerRegistry, Texture, TextureColorSpace};
 use super::visibility::Aabb;
@@ -424,6 +428,201 @@ impl PbrMaterial {
             visual_bounds: params.bounds,
             material,
         }
+    }
+}
+
+// --- Hierarchical template builder -------------------------------------
+//
+// Shared core between examples that adopt the hierarchical
+// `render.nodes` schema. Today: lumber_camp and lumber_editor — both
+// walk the spec's NodeSpecs, dedupe streamed MeshTemplates by glb path,
+// and produce a parent-linked RenderTemplate. Example-specific concerns
+// (the flat-schema fallback, ancillary parts like markers / carried
+// logs, editor grafting state) stay in the example.
+
+/// Fallback half-extent for a per-glb [`MeshTemplate`]'s `visual_bounds`
+/// while the real mesh streams in. Only matters for the few frames
+/// between handle creation and the [`AssetServer`] publishing real
+/// geometry — the composite render object's visual bounds come from the
+/// spec's flat `bounds_min/max`, so this number doesn't affect culling.
+const HIERARCHICAL_FALLBACK_BOUNDS_HALF_EXTENT: f32 = 0.5;
+
+/// Build a hierarchical [`RenderTemplate`] from `spec.nodes`, registering
+/// one streamed [`MeshTemplate`] per unique glb path in `mesh_templates`
+/// (deduped — multiple nodes referencing the same path share storage).
+///
+/// `glb_key` converts a node's glb [`VfsPath`] into the caller's part-key
+/// type, e.g. `|p| PartKey::Glb(p)`. `fallback_albedo` is bound on Mesh
+/// nodes whose [`MeshNodeSpec::albedo`] is `None` (or malformed); the
+/// engine doesn't ship a default texture, so the caller picks one
+/// appropriate to its example.
+///
+/// `label` prefixes any malformed-node warnings — typically
+/// `"lumber_camp: kind {kind_id}"` so the error message points at the
+/// caller and the kind.
+///
+/// `visual_bounds` is taken from `spec.visual_bounds()` (the flat
+/// `bounds_min/max` fields) so the engine cull sees the same region
+/// whether the kind uses the flat or hierarchical schema.
+///
+/// Returns the assembled template; mutates `mesh_templates` with any
+/// newly-streamed glb entries.
+#[allow(clippy::too_many_arguments)]
+pub fn build_hierarchical_render_template<K>(
+    label: &str,
+    spec: &RenderSpec,
+    glb_key: impl Fn(VfsPath) -> K,
+    fallback_albedo: &VfsPath,
+    renderer: &Renderer,
+    material: &PbrMaterial,
+    samplers: &SamplerRegistry,
+    asset_server: &AssetServer,
+    mesh_templates: &mut HashMap<K, MeshTemplate<PbrMaterialInstance>>,
+) -> RenderTemplate<K, K>
+where
+    K: Clone + Eq + Hash,
+{
+    let mut template: RenderTemplate<K, K> =
+        RenderTemplate::new(label).with_visual_bounds(spec.visual_bounds());
+    for node_spec in &spec.nodes {
+        let kind = match node_spec.kind.as_str() {
+            node_kind::EMPTY => NodeKind::Empty,
+            node_kind::MESH => build_mesh_node_kind(
+                label,
+                node_spec,
+                &glb_key,
+                fallback_albedo,
+                renderer,
+                material,
+                samplers,
+                asset_server,
+                mesh_templates,
+            )
+            .unwrap_or(NodeKind::Empty),
+            other => {
+                eprintln!(
+                    "{label} node {} unknown kind tag `{other}`; treating as empty",
+                    node_spec.id
+                );
+                NodeKind::Empty
+            }
+        };
+        template.add_node(TemplateNode {
+            id: NodeId(node_spec.id),
+            name: node_spec.name.clone(),
+            parent: node_spec.parent.map(NodeId),
+            local_transform: node_spec.transform.to_mat4(),
+            kind,
+        });
+    }
+    template
+}
+
+/// Resolve one Mesh node's payload into a [`NodeKind::Mesh`], populating
+/// `mesh_templates` on cache miss. Returns `None` when the node's
+/// payload is missing or malformed — the caller substitutes
+/// [`NodeKind::Empty`] so the rest of the tree still loads.
+#[allow(clippy::too_many_arguments)]
+fn build_mesh_node_kind<K>(
+    label: &str,
+    node_spec: &NodeSpec,
+    glb_key: &impl Fn(VfsPath) -> K,
+    fallback_albedo: &VfsPath,
+    renderer: &Renderer,
+    material: &PbrMaterial,
+    samplers: &SamplerRegistry,
+    asset_server: &AssetServer,
+    mesh_templates: &mut HashMap<K, MeshTemplate<PbrMaterialInstance>>,
+) -> Option<NodeKind<K, K>>
+where
+    K: Clone + Eq + Hash,
+{
+    let Some(mesh_spec) = node_spec.mesh.as_ref() else {
+        eprintln!(
+            "{label} node {} declares \"mesh\" with no payload; treating as empty",
+            node_spec.id
+        );
+        return None;
+    };
+    let mesh_path = match VfsPath::new(&mesh_spec.mesh) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "{label} node {} bad mesh path `{}`: {e}",
+                node_spec.id, mesh_spec.mesh
+            );
+            return None;
+        }
+    };
+    let key = glb_key(mesh_path.clone());
+    mesh_templates.entry(key.clone()).or_insert_with(|| {
+        let albedo_path = mesh_spec
+            .albedo
+            .as_deref()
+            .and_then(|a| match VfsPath::new(a) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!(
+                        "{label} node {} bad albedo path `{a}`: {e}; using fallback",
+                        node_spec.id
+                    );
+                    None
+                }
+            })
+            .unwrap_or_else(|| fallback_albedo.clone());
+        build_streamed_pbr_mesh_template(
+            renderer,
+            material,
+            samplers,
+            asset_server,
+            mesh_path,
+            albedo_path,
+            mesh_spec.metallic,
+            mesh_spec.roughness,
+        )
+    });
+    Some(NodeKind::Mesh(MeshPart::new(key.clone(), key)))
+}
+
+/// Build a streamed-PBR [`MeshTemplate`] for one glb path. Used by the
+/// hierarchical walk; exposed for examples that want to register
+/// glb-keyed templates outside the hierarchical builder (e.g. the
+/// editor's "Add mesh from glb" action that lands a new node
+/// imperatively rather than through a spec walk).
+#[allow(clippy::too_many_arguments)]
+pub fn build_streamed_pbr_mesh_template(
+    renderer: &Renderer,
+    material: &PbrMaterial,
+    samplers: &SamplerRegistry,
+    asset_server: &AssetServer,
+    mesh_path: VfsPath,
+    albedo_path: VfsPath,
+    metallic: f32,
+    roughness: f32,
+) -> MeshTemplate<PbrMaterialInstance> {
+    let mesh_handle = asset_server.mesh(mesh_path);
+    let albedo_handle = asset_server.texture(albedo_path, TextureColorSpace::Srgb);
+    let material_instance = material.create_instance(
+        renderer,
+        samplers,
+        asset_server,
+        PbrMaterialParams {
+            albedo: albedo_handle,
+            sampler: SamplerKind::LinearRepeat,
+            albedo_factor: Vec4::ONE,
+            metallic,
+            roughness,
+        },
+    );
+    MeshTemplate {
+        mesh: MeshBacking::Streamed {
+            handle: mesh_handle,
+        },
+        visual_bounds: Aabb::new(
+            Vec3::splat(-HIERARCHICAL_FALLBACK_BOUNDS_HALF_EXTENT),
+            Vec3::splat(HIERARCHICAL_FALLBACK_BOUNDS_HALF_EXTENT),
+        ),
+        material: material_instance,
     }
 }
 

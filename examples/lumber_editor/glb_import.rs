@@ -20,26 +20,23 @@
 //! case that fits within the existing single-MeshTemplate-per-key model.
 
 use currawong::data::{KindId, VfsPath};
-use currawong::glam::{Mat4, Vec3, Vec4};
-use currawong::{
-    Aabb, MeshBacking, MeshTemplate, NodeId, PbrMaterialParams, Renderer, SamplerKind,
-    TemplateNode, TextureColorSpace,
-};
+use currawong::glam::Mat4;
+use currawong::{NodeId, Renderer, TemplateNode, build_streamed_pbr_mesh_template};
 
 use crate::{LumberEditorView, MeshKey};
-
-/// Placeholder bounds used while the glb is still streaming in. The
-/// real mesh's extents take over once
-/// [`MeshTemplate::resolve`](currawong::MeshTemplate::resolve) returns
-/// `Ready`; until then this conservative half-metre cube keeps the
-/// fallback rendering in roughly the right scale.
-const FALLBACK_BOUNDS_HALF_EXTENT: f32 = 0.5;
 
 /// Default texture for the PBR fallback material — same lumber atlas
 /// the camp's body kinds use, so a grafted glb whose material slot
 /// doesn't resolve through the atlas registry still draws with a
 /// believable albedo instead of magenta.
 const FALLBACK_ALBEDO_PATH: &str = "lumber/gradient_atlas.png";
+
+/// PBR defaults for an editor-grafted glb. Match the
+/// [`MeshNodeSpec`](currawong::MeshNodeSpec) defaults so a graft +
+/// immediate save round-trips through the spec without changing the
+/// material appearance.
+const GRAFT_METALLIC: f32 = 0.0;
+const GRAFT_ROUGHNESS: f32 = 0.85;
 
 impl LumberEditorView {
     /// Queue a glb-import request for the named kind, allocating a fresh
@@ -99,33 +96,16 @@ impl LumberEditorView {
         // already de-dupes by path so the underlying mesh bytes load once
         // either way; this just avoids a duplicate material instance.
         if !self.mesh_templates.contains_key(&key) {
-            let mesh_handle = self.asset_server.mesh(path.clone());
-            let albedo_handle = self.asset_server.texture(
-                VfsPath::new(FALLBACK_ALBEDO_PATH).expect("valid fallback path"),
-                TextureColorSpace::Srgb,
-            );
-            let material_instance = self.material.create_instance(
+            let template = build_streamed_pbr_mesh_template(
                 renderer,
+                &self.material,
                 &self.samplers,
                 &self.asset_server,
-                PbrMaterialParams {
-                    albedo: albedo_handle,
-                    sampler: SamplerKind::LinearRepeat,
-                    albedo_factor: Vec4::ONE,
-                    metallic: 0.0,
-                    roughness: 0.85,
-                },
+                path.clone(),
+                VfsPath::new(FALLBACK_ALBEDO_PATH).expect("valid fallback path"),
+                GRAFT_METALLIC,
+                GRAFT_ROUGHNESS,
             );
-            let template = MeshTemplate {
-                mesh: MeshBacking::Streamed {
-                    handle: mesh_handle,
-                },
-                visual_bounds: Aabb::new(
-                    Vec3::splat(-FALLBACK_BOUNDS_HALF_EXTENT),
-                    Vec3::splat(FALLBACK_BOUNDS_HALF_EXTENT),
-                ),
-                material: material_instance,
-            };
             self.mesh_templates.insert(key.clone(), template);
             self.buckets.register(&renderer.device, key.clone());
         }
