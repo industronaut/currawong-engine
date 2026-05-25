@@ -32,6 +32,12 @@ enum SceneAction {
     Delete { id: NodeId },
 }
 
+/// Floor for any per-axis scale value passed to
+/// [`Mat4::from_scale_rotation_translation`] — keeps the matrix
+/// invertible so the decompose round-trip on the next frame can recover
+/// the rotation the user is mid-editing.
+const MIN_SCALE_AXIS: f32 = 1.0e-4;
+
 impl LumberEditorView {
     /// Scene-tree section: node list + add / delete buttons. Renders
     /// nothing when no kind is selected or the kind has no template
@@ -209,7 +215,6 @@ impl LumberEditorView {
             return;
         };
 
-        ui.add_space(8.0);
         ui.heading("Selected node");
         ui.separator();
 
@@ -223,6 +228,18 @@ impl LumberEditorView {
         ui.horizontal(|ui| {
             ui.label("Name:");
             if ui.text_edit_singleline(&mut node.name).changed() {
+                mutated = true;
+            }
+        });
+
+        // Reset transform — recovery hatch for the degenerate-scale case
+        // (the egui DragValue lets a user type 0 in any axis, which
+        // collapses the matrix into a rank-deficient one that
+        // to_scale_rotation_translation can't decompose back into sane
+        // values). One click restores identity.
+        ui.horizontal(|ui| {
+            if ui.button("Reset transform").clicked() {
+                node.local_transform = Mat4::IDENTITY;
                 mutated = true;
             }
         });
@@ -283,7 +300,13 @@ impl LumberEditorView {
                 rot_deg[1] * PI / 180.0,
                 rot_deg[2] * PI / 180.0,
             );
-            let scale = Vec3::from(s);
+            // Clamp scale away from zero — Mat4::from_scale_rotation_translation
+            // with a zero axis produces a rank-deficient matrix that
+            // to_scale_rotation_translation can't unpack back into the
+            // edited rotation, leaving the user stranded with no way to
+            // recover via DragValue (the Reset button is the escape hatch
+            // for already-broken matrices loaded from disk).
+            let scale = Vec3::from(s).max(Vec3::splat(MIN_SCALE_AXIS));
             node.local_transform =
                 Mat4::from_scale_rotation_translation(scale, rotation, translation);
             mutated = true;

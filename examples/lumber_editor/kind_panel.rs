@@ -97,9 +97,11 @@ impl LumberEditorView {
                     self.recalc_bounds_for(kind, sim, cmds);
                 }
 
-                // Scene-tree + selected-node sections (Phase 4 — scene_panel.rs).
+                // Scene-tree section (Phase 4 — scene_panel.rs). The
+                // selected-node inspector lives in its own right-side
+                // panel below so the left panel doesn't change height
+                // when the user clicks into a node.
                 self.scene_section(current.as_ref(), ui);
-                self.selected_node_section(current.as_ref(), ui);
 
                 // Save button anchored to the bottom of the panel. Bottom-up
                 // layout reverses the natural top-down flow, so the button
@@ -125,5 +127,19 @@ impl LumberEditorView {
                     ui.separator();
                 });
             });
+
+        // Right-side panel — only shown when a node is selected. Keeps
+        // the selected-node inspector visually separated from the
+        // scene-tree controls and avoids the left panel's height
+        // jumping every time the user clicks into a node.
+        if self.selected_node.is_some() {
+            #[allow(deprecated)]
+            egui::Panel::right("selected-node")
+                .resizable(false)
+                .default_size(280.0)
+                .show(egui_ctx, |ui| {
+                    self.selected_node_section(current.as_ref(), ui);
+                });
+        }
     }
 }
